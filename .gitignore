@@ -1,0 +1,10 @@
+out/
+cache/
+out-ir/
+cache-ir/
+broadcast/
+.env
+verify/certora/munged*
+.certora_internal/
+emv-*/
+verify/den353/target/
