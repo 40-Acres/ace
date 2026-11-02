@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
@@ -9,23 +10,26 @@ import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/type
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
-import {InitializerHook} from "../../../vendor/launcher/InitializerHook.sol";
+import {BaseHook} from "../../../vendor/launcher/BaseHook.sol";
+import {IInitializerHook} from "../../../vendor/launcher/IInitializerHook.sol";
 
-/// @notice The one read the hook makes of the launch factory: the last second a launch's pool may open; zero for any other key.
+/// @notice The two reads the hook makes of the launch factory: a pool's last second to open, and whether a launch is registering now.
 interface ILaunchPools {
     function launchByOf(PoolId id) external view returns (uint64);
+    function launching() external view returns (bool);
 }
 
 /// @title RunwayHook
-/// @notice Uniswap's stock InitializerHook, plus one gate: the key must be a factory launch's recorded pool, opened by that launch's launchBy.
-/// @notice No launch token is liquid before launchBy, so the one distribution that can open the key is the launch's.
+/// @notice Uniswap's InitializerHook sender check, plus two gates: registration only inside a factory launch, and the key only by its launchBy.
+/// @notice The strategy registers a distribution only while its hook's authorized() names it, and this hook names it only inside a launch.
+/// @notice So no outside distribution can reserve a launch's pool id or open its key; past launchBy not even the launch's own can.
 /// @notice It also keeps each pool's block-start price: on a block's first swap, the pre-swap tick goes into three 12-hour slots.
 /// @dev It never touches fees or swap amounts: no delta flag, a zero delta, no fee override.
 /// @dev The swap path and windowOf must never revert, since a pool's hook is permanent: unchecked, one extsload, no other call, no divisor but SLOT.
 /// @dev Its one reader is the launch lending vault, through windowOf; no hub code reads it.
 /// @dev The strategy initializes inside its migration's try, so a refusal here fails that migration into the strategy's recovery.
 /// @dev Deployed by the factory's constructor at a salt mined for exactly the before-initialize and before-swap bits, so FACTORY is its deployer.
-contract RunwayHook is InitializerHook {
+contract RunwayHook is BaseHook, IInitializerHook {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
 
@@ -42,21 +46,34 @@ contract RunwayHook is InitializerHook {
         bool seeded; // the pool has sampled
     }
 
+    error InvalidInitializer(address caller, address expected); // the stock sender check: only the strategy initializes
     error NotALaunchPool(); // the key is no launch's recorded pool, or that launch's launchBy has passed
 
     uint256 public constant SLOT = 12 hours; // one window slot
     ILaunchPools public immutable FACTORY; // the launch factory that deployed this hook and records each launch's pool
+    address public immutable STRATEGY; // the LBP strategy: the only initializer, and the only registrar while a launch runs
     mapping(PoolId => Window) internal _windows; // each pool's block-start window
 
     /// @param poolManager_ The v4 PoolManager on this chain.
-    /// @param authorized_ The only address that may initialize a pool naming this hook: the LBP strategy.
-    constructor(IPoolManager poolManager_, address authorized_) InitializerHook(poolManager_, authorized_) {
-        FACTORY = ILaunchPools(msg.sender);
+    /// @param strategy_ The LBP strategy, the only address that may initialize a pool naming this hook.
+    constructor(IPoolManager poolManager_, address strategy_) BaseHook(poolManager_) {
+        (FACTORY, STRATEGY) = (ILaunchPools(msg.sender), strategy_);
+    }
+
+    /// @notice The strategy while the factory is registering a launch, else zero: the strategy registers no distribution naming the hook but a launch's.
+    /// @dev A function, not the stock InitializerHook's immutable: that is why this hook restates its sender check instead of inheriting it.
+    function authorized() external view returns (address) {
+        return FACTORY.launching() ? STRATEGY : address(0);
     }
 
     /// @notice Before-initialize and before-swap, and nothing else.
     function getHookPermissions() public pure override returns (Hooks.Permissions memory p) {
         (p.beforeInitialize, p.beforeSwap) = (true, true);
+    }
+
+    /// @notice The InitializerHook interface the strategy checks, and ERC-165 itself, as the stock hook answers.
+    function supportsInterface(bytes4 interfaceId) public pure returns (bool) {
+        return interfaceId == type(IInitializerHook).interfaceId || interfaceId == type(IERC165).interfaceId;
     }
 
     /// @notice The lowest and highest block-start tick over the current slot and the two before it, 24 to 36 hours, and spot apart.
@@ -72,9 +89,10 @@ contract RunwayHook is InitializerHook {
     }
 
     /// @dev The stock sender check, then the factory's launchBy for this exact key: an unknown key reads zero and is refused.
-    function _beforeInitialize(address sender, PoolKey calldata key, uint160 sqrtPriceX96) internal view override returns (bytes4 selector) {
-        selector = super._beforeInitialize(sender, key, sqrtPriceX96);
+    function _beforeInitialize(address sender, PoolKey calldata key, uint160) internal view override returns (bytes4) {
+        if (sender != STRATEGY) revert InvalidInitializer(sender, STRATEGY);
         if (block.timestamp > FACTORY.launchByOf(key.toId())) revert NotALaunchPool();
+        return IHooks.beforeInitialize.selector;
     }
 
     /// @dev A block's first swap samples the pre-swap tick, the price the block started at; a later swap in the block writes nothing.

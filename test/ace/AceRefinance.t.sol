@@ -4,15 +4,15 @@ pragma solidity 0.8.36;
 import {Test, Vm, console2} from "forge-std/Test.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
-import {MarketParams, MarketState, OpenBounds} from "../../src/ace/hub/Types.sol";
-import {BelowMinDebt, LoanClosed, NotBorrower, TenorOutOfRange, TriggerAboveFloor} from "../../src/ace/hub/Borrower.sol";
+import {MarketParams, MarketState, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol";
+import {BelowMinPrincipal, LoanClosed, NotBorrower, TenorOutOfRange, TriggerAboveFloor} from "../../src/ace/hub/Borrower.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {MockStakeVault} from "../mocks/MockStakeVault.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
-import {IAceRefinance, RebateReader} from "../utils/RebateHarness.sol";
+import {IAceRefinance, RebateReader, homeArgs, refinanceHome} from "../utils/RebateHarness.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {DrawBelowDebt} from "../../src/ace/hub/Borrower.sol";
 
@@ -81,6 +81,7 @@ contract AceRefinanceTest is WarpClock {
         _deposit(alice, TOP);
         _deposit(alice, DEEP_CASH);
         usdc.mint(borrower, FLOAT);
+        AceFixtures.installYesPolicy(ace, alice); // a home re-term reuses the claim only on the lender's yes; every row here assumed the reuse
     }
 
     // ---- fixture ----
@@ -111,7 +112,7 @@ contract AceRefinanceTest is WarpClock {
 
     function _refi(uint256 oldId, uint256 principal, uint64 tenor) internal returns (uint256) {
         vm.prank(borrower);
-        return fin.refinance(oldId, principal, tenor, OFF);
+        return refinanceHome(address(ace), oldId, principal, tenor, OFF);
     }
 
     /// @notice Repay the shortfall and refinance in ONE transaction: what a top-up used to do inside the verb.
@@ -122,7 +123,7 @@ contract AceRefinanceTest is WarpClock {
         if (gap == 0) return _refi(oldId, principal, tenor);
         bytes[] memory calls = new bytes[](2);
         calls[0] = abi.encodeCall(Ace.repay, (oldId, gap));
-        calls[1] = abi.encodeCall(Ace.refinance, (oldId, principal, tenor, OFF));
+        calls[1] = abi.encodeCall(Ace.refinanceTo, (homeArgs(address(ace), oldId, principal, tenor, OFF)));
         vm.prank(borrower);
         bytes[] memory res = ace.multicall(calls);
         return abi.decode(res[1], (uint256));
@@ -253,7 +254,7 @@ contract AceRefinanceTest is WarpClock {
 
         vm.prank(borrower);
         vm.expectRevert(DrawBelowDebt.selector);
-        fin.refinance(oldId, P, TEN30, OFF);
+        refinanceHome(address(ace), oldId, P, TEN30, OFF);
 
         assertFalse(read.loan(oldId).closedAt != 0, "a refused refinance leaves the old loan untouched");
         assertEq(read.debtOf(oldId), P, "with its debt intact");
@@ -274,7 +275,7 @@ contract AceRefinanceTest is WarpClock {
         uint256 quote0 = usdc.balanceOf(borrower);
         vm.prank(borrower);
         vm.expectRevert(DrawBelowDebt.selector);
-        fin.refinance(oldId, pNew, TEN30, OFF);
+        refinanceHome(address(ace), oldId, pNew, TEN30, OFF);
         assertEq(usdc.balanceOf(borrower), quote0, "a refused refinance is a no-op on the borrower's balance");
         assertEq(read.debtOf(oldId), P, "and on the old loan");
     }
@@ -308,9 +309,9 @@ contract AceRefinanceTest is WarpClock {
         vm.startPrank(borrower);
         ace.repay(oldId, gap - 1);
         vm.expectRevert(DrawBelowDebt.selector);
-        fin.refinance(oldId, P, TEN30, OFF);
+        refinanceHome(address(ace), oldId, P, TEN30, OFF);
         ace.repay(oldId, 1);
-        uint256 newId = fin.refinance(oldId, P, TEN30, OFF);
+        uint256 newId = refinanceHome(address(ace), oldId, P, TEN30, OFF);
         vm.stopPrank();
 
         assertGt(newId, oldId, "the last wei of the gap is what opens the successor");
@@ -320,13 +321,13 @@ contract AceRefinanceTest is WarpClock {
 
     // ============ 18 / 19. every open() gate is live, and nothing half-executes ============
 
-    /// @notice A new principal under `minDebt` is refused by `open`'s own floor.
+    /// @notice A new principal under `minPrincipal` is refused by `open`'s own floor.
     function test_Refinance_RevertsBelowMinDebt() public {
         uint256 oldId = _open(P, TEN30);
         _warpTo(t0 + 15 days);
         vm.prank(borrower);
-        vm.expectRevert(BelowMinDebt.selector);
-        fin.refinance(oldId, 1e6, TEN30, OFF);
+        vm.expectRevert(BelowMinPrincipal.selector);
+        refinanceHome(address(ace), oldId, 1e6, TEN30, OFF);
     }
 
     /// @notice A tenor off the market's grid is refused by `open`'s own range check.
@@ -335,7 +336,7 @@ contract AceRefinanceTest is WarpClock {
         _warpTo(t0 + 15 days);
         vm.prank(borrower);
         vm.expectRevert(TenorOutOfRange.selector);
-        fin.refinance(oldId, P, 60 days, OFF);
+        refinanceHome(address(ace), oldId, P, 60 days, OFF);
     }
 
     /// @notice Plan tests 24c and 27: refinance is not a rescue verb.
@@ -345,7 +346,7 @@ contract AceRefinanceTest is WarpClock {
         _warpTo(t0 + 15 days);
         vm.prank(borrower);
         vm.expectRevert(TriggerAboveFloor.selector);
-        fin.refinance(oldId, 200_000e6, TEN30, OFF);
+        refinanceHome(address(ace), oldId, 200_000e6, TEN30, OFF);
     }
 
     /// @notice Plan test 19: a failing draw gate leaves the OLD loan open, funded and untouched.
@@ -359,7 +360,7 @@ contract AceRefinanceTest is WarpClock {
 
         vm.prank(borrower);
         vm.expectRevert(TriggerAboveFloor.selector);
-        fin.refinance(oldId, 200_000e6, TEN30, OFF);
+        refinanceHome(address(ace), oldId, 200_000e6, TEN30, OFF);
 
         assertFalse(read.loan(oldId).closedAt != 0, "the old loan is still open");
         assertEq(read.debtOf(oldId), P, "with its debt intact");
@@ -415,7 +416,7 @@ contract AceRefinanceTest is WarpClock {
 
         vm.prank(borrower);
         vm.expectRevert(LoanClosed.selector);
-        fin.refinance(oldId, 35_000e6, TEN30, OFF);
+        refinanceHome(address(ace), oldId, 35_000e6, TEN30, OFF);
     }
 
     /// @notice The same race the other way: a refinanced loan can no longer be finalized.
@@ -440,13 +441,13 @@ contract AceRefinanceTest is WarpClock {
 
         vm.prank(mallory);
         vm.expectRevert(NotBorrower.selector);
-        fin.refinance(oldId, P, TEN30, OFF);
+        refinanceHome(address(ace), oldId, P, TEN30, OFF);
 
         vm.prank(borrower);
         ace.setCreditOperator(mallory, true);
         vm.prank(mallory);
         vm.expectRevert(NotBorrower.selector);
-        fin.refinance(oldId, P, TEN30, OFF);
+        refinanceHome(address(ace), oldId, P, TEN30, OFF);
     }
 
     /// @notice A closed loan cannot be refinanced, which is the ONLY status gate there is.
@@ -455,7 +456,7 @@ contract AceRefinanceTest is WarpClock {
         vm.startPrank(borrower);
         ace.repay(oldId, P);
         vm.expectRevert(LoanClosed.selector);
-        fin.refinance(oldId, P, TEN30, OFF);
+        refinanceHome(address(ace), oldId, P, TEN30, OFF);
         vm.stopPrank();
     }
 
@@ -475,7 +476,7 @@ contract AceRefinanceTest is WarpClock {
     /// @dev One measurement point on its own market, so the ladders never share a tick.
     function _gasAt(uint256 n) private {
         MarketParams memory p = _params();
-        p.minDebt = 10e6 + n; // inert here; it only makes each measurement point a distinct market id
+        p.minPrincipal = 10e6 + n; // inert here; it only makes each measurement point a distinct market id
         bytes32 mid = ace.createMarket(p);
 
         usdc.mint(alice, n * 1_000e6 + DEEP_CASH);
@@ -498,7 +499,7 @@ contract AceRefinanceTest is WarpClock {
         // same principal, same block: the fresh fee outruns the full refund, so this is the composition
         bytes[] memory calls = new bytes[](2);
         calls[0] = abi.encodeCall(Ace.repay, (loanId, _gapIn(mid, loanId, n * 1_000e6, TEN7)));
-        calls[1] = abi.encodeCall(Ace.refinance, (loanId, n * 1_000e6, TEN7, OFF));
+        calls[1] = abi.encodeCall(Ace.refinanceTo, (MigrateArgs(loanId, mid, n * 1_000e6, TEN7, OFF, 0, address(0))));
         uint256 g = gasleft();
         ace.multicall(calls);
         uint256 used = g - gasleft();

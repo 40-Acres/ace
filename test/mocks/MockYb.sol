@@ -11,8 +11,14 @@ contract MockYbLt is MockERC20 {
     uint256 public underlyingScale = 1e10; // 1e18 / 1e8: the real underlying is BTC, at 8 decimals
     address public ASSET_TOKEN; // what the LT redeems into; zero until a fixture names it, so no record admits an unnamed underlying
     bool internal broken;
+    bool internal previewLocked; // preview_withdraw alone reverts, as the live LT's nonreentrant lock does mid-operation
 
     constructor() MockERC20("YieldBasis liquidity for cbBTC", "yb-cbBTC", 18) {}
+
+    /// @dev Revert `preview_withdraw` alone, leaving `pricePerShare` readable: the live LT mid-operation.
+    function setPreviewLocked(bool v) external {
+        previewLocked = v;
+    }
 
     /// @dev The token the live LT names as `ASSET_TOKEN`; a fixture sets it to the underlying it builds.
     function setAssetToken(address t) external {
@@ -35,6 +41,7 @@ contract MockYbLt is MockERC20 {
     /// @dev Defaults to `pps` rescaled DOWN, so a fixture silent about redemption sees no discount.
     function preview_withdraw(uint256) external view returns (uint256) {
         require(!broken, "lt down");
+        require(!previewLocked, "lt locked");
         return previewWithdrawn == 0 ? pps / underlyingScale : previewWithdrawn;
     }
 

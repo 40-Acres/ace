@@ -28,8 +28,8 @@ contract CuratorVaultSurfacePinTest is CuratorVaultBase {
 
     /// @dev The other half of the invariant: every hub call the vault makes names ITSELF as owner and payee.
     /// @dev `expectCall` matches the calldata as a prefix, so this pins the arguments up to the payee and not merely the selector.
-    /// @dev The door opens the loan to the vault and withdraws every resting unit to the vault; the roll withdraws to the vault;
-    /// @dev the crank's `collect` spends the vault's own pool and pays it to the vault.
+    /// @dev The door opens the loan to the vault and withdraws every resting unit to the vault.
+    /// @dev The crank's `collect` spends the vault's own pool and pays it to the vault.
     function test_Surface_EveryHubCallNamesTheVaultItselfAsOwnerAndPayee() public {
         CuratorVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
@@ -39,15 +39,12 @@ contract CuratorVaultSurfacePinTest is CuratorVaultBase {
         vm.startPrank(borrower);
         collateral.approve(address(v), COLL);
         BorrowRequest memory r = _request(address(collateral), COLL, DRAW);
-        r.arm = true;
         vm.expectCall(address(ace), abi.encodeWithSelector(IAceLenderOps.open.selector, mid, COLL, DRAW, tenor, address(v)));
         vm.expectCall(address(ace), abi.encodeCall(IAceLenderOps.withdraw, (mid, type(uint256).max, address(v), 0)));
         uint256 loanId = v.borrow(r, "", "");
         vm.stopPrank();
 
         _warpAtLeastTo(uint256(read.loan(loanId).expiry) - 1 hours);
-        vm.expectCall(address(ace), abi.encodeCall(IAceLenderOps.withdraw, (mid, type(uint256).max, address(v), 0)));
-        v.roll(loanId, "");
 
         vm.expectCall(address(ace), abi.encodeCall(Ace.collect, (v.asset(), address(v))));
         v.crank();
@@ -57,22 +54,20 @@ contract CuratorVaultSurfacePinTest is CuratorVaultBase {
     /// @dev A new exit on `IAceLenderOps` would compile in every vault; this is what makes the addition a decision.
     /// @dev Spelled from signature STRINGS, not `.selector`, so a member re-signed to new TYPES is red too.
     /// @dev BLIND TO A SAME-TYPE ARGUMENT SWAP: `collect(lender, quote)` became `collect(quote, to)` under one unchanged string.
-    /// @dev The vault is the transient BORROWER of its door's loans, so the borrower verbs its door and roll run are members.
+    /// @dev The vault is the transient BORROWER of its door's loans, so the borrower verbs its door runs are members, and its own policy's setter.
     /// @dev Still NOT members: `redeemInKind` and `multicall`, and `drawableOf`, whose only reader was the deleted recall.
-    function test_Surface_TheLenderOpsRailHasExactlyItsNineteenMembers() public pure {
+    function test_Surface_TheLenderOpsRailHasExactlyFifteenMembers() public pure {
         bytes4 reads = bytes4(keccak256("POSITION_MANAGER()")) ^ bytes4(keccak256("POSITION_TITLE()")) ^ bytes4(keccak256("idToMarketParams(bytes32)"))
             ^ bytes4(keccak256("lenderAssets(address,address)")) ^ bytes4(keccak256("lenderOwed(address,address)"))
             ^ bytes4(keccak256("lenderUnresolved(address,address)")) ^ bytes4(keccak256("lenderByCollateral(address,address,address)"))
-            ^ bytes4(keccak256("loanMarket(uint256)")) ^ bytes4(keccak256("restingOf(bytes32)")) ^ bytes4(keccak256("debtOf(uint256)"))
-            ^ bytes4(keccak256("isClosed(uint256)")) ^ bytes4(keccak256("tryContinue(uint256)"));
+            ^ bytes4(keccak256("loanMarket(uint256)")) ^ bytes4(keccak256("restingOf(bytes32)"));
         string memory params = string.concat(
             "(address,address,address,address,uint256,uint256,uint256,uint256,",
             "uint64,uint64,uint256,uint256,uint256,uint256,uint256,uint256,uint256,address,bool)"
         );
         bytes4 verbs = bytes4(keccak256(bytes(string.concat("createMarket(", params, ")")))) ^ bytes4(keccak256("deposit(bytes32,uint256)"))
             ^ bytes4(keccak256("withdraw(bytes32,uint256,address,uint256)")) ^ bytes4(keccak256("collect(address,address)"))
-            ^ bytes4(keccak256("open(bytes32,uint256,uint256,uint64,address,(uint256,uint256,uint64))"))
-            ^ bytes4(keccak256("setAutoRefinance(uint256,uint64,uint16,uint16)")) ^ bytes4(keccak256("refinanceByPolicy(uint256)"));
+            ^ bytes4(keccak256("open(bytes32,uint256,uint256,uint64,address,(uint256,uint256,uint64))")) ^ bytes4(keccak256("setRollPolicy(address)"));
         assertEq(type(IAceLenderOps).interfaceId, reads ^ verbs, "IAceLenderOps gained, lost or re-signed a member");
     }
 

@@ -36,7 +36,7 @@ contract AceWideDecimalGapTest is WarpClock {
 
     uint256 internal constant DEPOSIT = 6000; // quote atoms, which at a 0-decimal quote are whole tokens
     uint256 internal constant PRINCIPAL = 5000; // likewise: five thousand WHOLE quote tokens of debt
-    uint256 internal constant TICKET = 2; // the smallest `minDebt` the genesis fee rail admits at a 0-decimal quote
+    uint256 internal constant TICKET = 2; // the smallest `minPrincipal` the genesis fee rail admits at a 0-decimal quote
 
     function setUp() public {
         _warpTo(1_000_000);
@@ -51,13 +51,13 @@ contract AceWideDecimalGapTest is WarpClock {
     /// @dev SPLIT from creation: an armed `vm.expectRevert` must not be consumed by a token deploy.
     /// @param q The quote token.
     /// @param c The collateral token.
-    /// @param minDebt The market's borrower-side quantum.
+    /// @param minPrincipal The market's borrower-side quantum.
     /// @return p The params, ready to hand `createMarket`.
-    function _params(MockERC20 q, MockERC20 c, uint256 minDebt) internal view returns (MarketParams memory p) {
+    function _params(MockERC20 q, MockERC20 c, uint256 minPrincipal) internal view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(q), address(c));
         p.record = address(0);
         p.settleBountyBps = 0; // no in-kind sliver, so the coverage line reaches the class pot undiverted
-        p.minDebt = minDebt;
+        p.minPrincipal = minPrincipal;
     }
 
     /// @dev The gap-18 market itself: an 18-decimal collateral against a 0-decimal quote, at the smallest ticket.
@@ -106,9 +106,9 @@ contract AceWideDecimalGapTest is WarpClock {
 
     // ============ 1. the ticket: the sharpest practical consequence of a 0-decimal quote ============
 
-    /// @notice At a 0-decimal quote the genesis fee rail puts the smallest ticket at TWO WHOLE quote tokens.
-    /// @notice One is refused because its own origination fee ceils to the whole token, leaving nothing to lend.
-    /// @dev `min debt under fee` sits ABOVE the decimals bound in `MarketInit`, so it is what names the refusal.
+    /// @notice At a 0-decimal quote genesis puts the smallest ticket at TWO WHOLE quote tokens.
+    /// @notice One is refused: its debt floor, half of it, is zero, and its own origination fee would ceil to the whole token.
+    /// @dev `debt floor zero` sits ABOVE the fee rail and the decimals bound in `MarketInit`, so it is what names the refusal.
     function test_Ticket_GapEighteenAdmitsTwoWholeQuoteTokensAndRefusesOne() public {
         MockERC20 q = new MockERC20("Quote", "Q", 0);
         MockERC20 c = new MockERC20("Collateral", "COLL", 18);
@@ -117,7 +117,7 @@ contract AceWideDecimalGapTest is WarpClock {
         assertEq(LoanMath.originationFee(2, t, PocDeployConfig.BASE_BPS, t), 1, "premise: two leaves one over, so two is the first workable ticket");
 
         MarketParams memory one = _params(q, c, 1);
-        vm.expectRevert("min debt under fee");
+        vm.expectRevert("debt floor zero");
         ace.createMarket(one);
 
         MarketParams memory two = _params(q, c, TICKET);
@@ -126,10 +126,10 @@ contract AceWideDecimalGapTest is WarpClock {
 
     // ============ 2. the lot floor, which does NOT move with the gap ============
 
-    /// @notice `minDebt` is pure quote atoms with no price term, so it floors a deposit identically at any gap.
+    /// @notice `minPrincipal` is pure quote atoms with no price term, so it floors a deposit identically at any gap.
     /// @notice Asserted at the DEPOSIT DOOR in both layouts, so it compares behaviour rather than a formula to itself.
     /// @dev The contrast with the ask quantum below is the point: only one of the two is gap-sensitive.
-    /// @dev THE FLOOR USED TO BE DERIVED as `ceil(minDebt / maxClaimTicks)`; it is `minDebt` itself now, and the
+    /// @dev THE FLOOR USED TO BE DERIVED as `ceil(minPrincipal / maxClaimTicks)`; it is `minPrincipal` itself now, and the
     /// @dev gap-insensitivity this row pins is what survived -- the derivation never had a price term either.
     function test_MinLot_IsTheSameQuoteAtomsAtGapEighteenAndGapSixteen() public {
         _probeMinLotAt(0);

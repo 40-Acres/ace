@@ -26,21 +26,21 @@ contract CuratorVaultTableTest is AceVaultRig {
     function test_TheTimelockIsRailed() public {
         Listing[] memory none = new Listing[](0);
         vm.expectRevert(CuratorVault.TimelockOutOfBounds.selector);
-        new CuratorVault(_cfg(), MIN_DEBT, COVERAGE, 1 days - 1, none, "C", "C");
+        new CuratorVault(_cfg(), MIN_PRINCIPAL, COVERAGE, 1 days - 1, none, "C", "C");
         vm.expectRevert(CuratorVault.TimelockOutOfBounds.selector);
-        new CuratorVault(_cfg(), MIN_DEBT, COVERAGE, 14 days + 1, none, "C", "C");
-        assertEq(new CuratorVault(_cfg(), MIN_DEBT, COVERAGE, 14 days, none, "C", "C").TIMELOCK(), 14 days, "the ceiling itself is admitted");
+        new CuratorVault(_cfg(), MIN_PRINCIPAL, COVERAGE, 14 days + 1, none, "C", "C");
+        assertEq(new CuratorVault(_cfg(), MIN_PRINCIPAL, COVERAGE, 14 days, none, "C", "C").TIMELOCK(), 14 days, "the ceiling itself is admitted");
     }
 
-    /// @notice minDebt and coverage are checked against the hub's genesis rails at construction.
+    /// @notice minPrincipal and coverage are checked against the hub's genesis rails at construction.
     function test_TheImmutablesMeetTheGenesisRails() public {
         Listing[] memory none = new Listing[](0);
         vm.expectRevert(CuratorVault.BadTerms.selector);
         new CuratorVault(_cfg(), 0, COVERAGE, TIMELOCK, none, "C", "C");
         vm.expectRevert(CuratorVault.BadTerms.selector);
-        new CuratorVault(_cfg(), MIN_DEBT, 1e18, TIMELOCK, none, "C", "C");
+        new CuratorVault(_cfg(), MIN_PRINCIPAL, 1e18, TIMELOCK, none, "C", "C");
         vm.expectRevert(CuratorVault.BadTerms.selector);
-        new CuratorVault(_cfg(), MIN_DEBT, 21e18, TIMELOCK, none, "C", "C");
+        new CuratorVault(_cfg(), MIN_PRINCIPAL, 21e18, TIMELOCK, none, "C", "C");
     }
 
     /// @notice A new collateral waits the timelock; anyone accepts it once it has run.
@@ -82,7 +82,7 @@ contract CuratorVaultTableTest is AceVaultRig {
 
     /// @notice Every table verb leaves gross NAV, the pile, NAV and the mark untouched.
     function test_TableVerbsMoveNoValue() public {
-        _borrow(MIN_TENOR, false);
+        _borrow(MIN_TENOR);
         usdc.mint(address(vault), 1_000e6);
         vault.crank();
         uint256 gross = vault.grossNav();
@@ -185,7 +185,7 @@ contract CuratorVaultTableTest is AceVaultRig {
 
     /// @notice The door's price is the buffered windowed minimum rounded down onto a 50-tick grid.
     function test_ThePriceIsTheGriddedBufferedMinimum() public {
-        MarketParams memory mp = _mp(_borrow(MIN_TENOR, false));
+        MarketParams memory mp = _mp(_borrow(MIN_TENOR));
         uint256 buffered = record.minPrice(address(usdc), address(coll)) * (10_000 - BUFFER_BPS) / 10_000;
         assertLe(mp.price, buffered, "never above the buffered minimum");
         assertGt(mp.price * 10_051, buffered * 10_000, "within one 50-tick step under it");
@@ -194,10 +194,10 @@ contract CuratorVaultTableTest is AceVaultRig {
 
     /// @notice Two borrows at nearby record prints share a market: the grid absorbs a move inside one step.
     function test_NearbyPricesShareAMarket() public {
-        uint256 a = _borrow(MIN_TENOR, false);
+        uint256 a = _borrow(MIN_TENOR);
         uint256 m = record.minPrice(address(usdc), address(coll));
         record.setMinPrice(m + m / 100_000);
-        uint256 b = _borrowAs(bob, UNITS, PRINCIPAL, MIN_TENOR, false);
+        uint256 b = _borrowAs(bob, UNITS, PRINCIPAL, MIN_TENOR);
         assertEq(_mid(a), _mid(b), "one market across a sub-step move");
     }
 
@@ -205,14 +205,14 @@ contract CuratorVaultTableTest is AceVaultRig {
     function test_TheCapRoomBrakesExposure() public {
         vm.prank(curator);
         vault.submitCap(address(coll), uint192(PRINCIPAL + PRINCIPAL / 2));
-        _borrow(MIN_TENOR, false);
+        _borrow(MIN_TENOR);
         coll.mint(bob, UNITS);
         vm.startPrank(bob);
         coll.approve(address(vault), UNITS);
         vm.expectRevert(AceVaultFlows.OverCap.selector);
-        vault.borrow(_req(UNITS, PRINCIPAL, MIN_TENOR, false), "", "");
+        vault.borrow(_req(UNITS, PRINCIPAL, MIN_TENOR), "", "");
         vm.stopPrank();
-        _borrowAs(bob, UNITS, PRINCIPAL / 2, MIN_TENOR, false);
+        _borrowAs(bob, UNITS, PRINCIPAL / 2, MIN_TENOR);
     }
 
     /// @notice A collateral with no row is not listed; a removed one (cap zero) refuses every placement.
@@ -223,7 +223,7 @@ contract CuratorVaultTableTest is AceVaultRig {
         vm.startPrank(bob);
         coll.approve(address(vault), UNITS);
         vm.expectRevert(AceVaultFlows.OverCap.selector);
-        vault.borrow(_req(UNITS, PRINCIPAL, MIN_TENOR, false), "", "");
+        vault.borrow(_req(UNITS, PRINCIPAL, MIN_TENOR), "", "");
         vm.stopPrank();
     }
 

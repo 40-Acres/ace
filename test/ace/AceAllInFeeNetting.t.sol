@@ -5,6 +5,8 @@ import {Ace} from "../../src/ace/hub/Ace.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {Borrower, DrawBelowDebt} from "../../src/ace/hub/Borrower.sol";
 import {Constants} from "../../src/ace/hub/Constants.sol";
+import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
+import {RefinanceMath} from "../utils/RefinanceMath.sol";
 import {MarketParams, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
@@ -15,14 +17,9 @@ import {AceReader} from "../utils/AceReader.sol";
 import {AllInFeeSpec} from "../utils/AllInFeeSpec.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
 
-interface IAceContinue {
-    function tryContinue(uint256 id) external view returns (bool ok, bytes4 reason, uint256 principal);
-    function setAutoRefinance(uint256 id, uint64 tenor, uint16 minBufferBps, uint16 maxFeeBps) external;
-}
-
 /// @notice The MANUAL continuation: the caller names the principal, so a stale inverse shows up as a revert.
 /// @notice `_net` is where it lands, and the boundary it enforces is one wei wide in both directions.
-/// @dev The armed path derives its own principal and can never disagree with itself; this path can.
+/// @dev No hub verb derives a successor's principal, so this path is the only one that can disagree with the inverse.
 /// @dev The boundary principal is the RECORD's inverse, not the hub's, so a wrong hub is caught, not mirrored.
 /// @dev Also pins the `Quote` word order: an INSERT rather than an append passes the arity check alone.
 contract AceAllInFeeNettingTest is WarpClock {
@@ -30,7 +27,6 @@ contract AceAllInFeeNettingTest is WarpClock {
     AceLens internal lens;
     PositionManager internal pm;
     AceReader internal read;
-    IAceContinue internal auto_;
     bytes32 internal idA;
     bytes32 internal idB;
 
@@ -62,7 +58,6 @@ contract AceAllInFeeNettingTest is WarpClock {
         AceFixtures.Deployment memory d = AceFixtures.deploy(_params(BASE_BPS_A));
         (ace, pm, read, idA) = (d.ace, d.positionManager, d.read, d.id);
         lens = new AceLens(address(ace));
-        auto_ = IAceContinue(address(ace));
         idB = ace.createMarket(_params(BASE_BPS_B));
 
         _deposit(idA, TOP_CASH);
@@ -84,12 +79,12 @@ contract AceAllInFeeNettingTest is WarpClock {
 
         vm.prank(borrower);
         vm.expectRevert(DrawBelowDebt.selector);
-        ace.refinance(loanId, pExact - 1, TEN30, OFF);
+        ace.refinanceTo(MigrateArgs(loanId, idA, pExact - 1, TEN30, OFF, 0, address(0)));
 
         uint256 owedBefore = read.quoteOwedTotal(idA);
         uint256 wallet = usdc.balanceOf(borrower);
         vm.prank(borrower);
-        uint256 newId = ace.refinance(loanId, pExact, TEN30, OFF);
+        uint256 newId = ace.refinanceTo(MigrateArgs(loanId, idA, pExact, TEN30, OFF, 0, address(0)));
 
         assertEq(read.debtOf(newId), pExact, "the successor carries the boundary draw as its whole debt");
         assertEq(read.quoteOwedTotal(idA) - owedBefore, 0, "the boundary draw nets to nothing: not a wei over the old debt");
@@ -97,28 +92,29 @@ contract AceAllInFeeNettingTest is WarpClock {
         assertTrue(read.loan(loanId).closedAt != 0, "and the old loan retired on it");
     }
 
-    /// @notice At expiry there is no refund left, so the boundary is the inverse of the whole debt.
-    /// @dev The zero-refund branch is the one a stale inverse hides in: nothing else absorbs a wei of error.
-    function test_TheManualBoundary_AtExpiryWithNoRefund_IsOneWeiWide() public {
+    /// @notice A second before expiry the refund is one second's sliver, so the boundary is the inverse of the debt less that sliver.
+    /// @dev The near-zero-refund branch is the one a stale inverse hides in; at the expiry second a refinance refuses `LoanMatured` instead.
+    function test_TheManualBoundary_AtExpiryMinusOne_IsOneWeiWide() public {
         uint256 loanId = _open(idA, P, TEN30);
-        _warpTo(uint256(read.loan(loanId).expiry));
+        _warpTo(uint256(read.loan(loanId).expiry) - 1);
 
-        assertEq(read.earlyExitRefund(loanId), 0, "fixture: no calendar time is left to rebate");
+        uint256 refund = read.earlyExitRefund(loanId);
+        assertLe(refund, read.feeEscrowOf(loanId) / TEN30, "fixture: one second of calendar time is left to rebate");
         uint256 debtOld = read.debtOf(loanId);
-        uint256 pExact = AllInFeeSpec.principalForOwed(debtOld, TEN30, BASE_BPS_A, TEN7, PS);
+        uint256 pExact = AllInFeeSpec.principalForOwed(debtOld - refund, TEN30, BASE_BPS_A, TEN7, PS);
 
         vm.prank(borrower);
         vm.expectRevert(DrawBelowDebt.selector);
-        ace.refinance(loanId, pExact - 1, TEN30, OFF);
+        ace.refinanceTo(MigrateArgs(loanId, idA, pExact - 1, TEN30, OFF, 0, address(0)));
 
         uint256 owedBefore = read.quoteOwedTotal(idA);
         uint256 wallet = usdc.balanceOf(borrower);
         vm.prank(borrower);
-        uint256 newId = ace.refinance(loanId, pExact, TEN30, OFF);
+        uint256 newId = ace.refinanceTo(MigrateArgs(loanId, idA, pExact, TEN30, OFF, 0, address(0)));
 
-        assertEq(read.quoteOwedTotal(idA) - owedBefore, 0, "the boundary draw nets to nothing at expiry too");
+        assertEq(read.quoteOwedTotal(idA) - owedBefore, 0, "the boundary draw nets to nothing a second before expiry too");
         assertEq(usdc.balanceOf(borrower), wallet, "neither booked nor paid out in cash");
-        assertEq(pExact - _allIn(pExact, BASE_BPS_A), debtOld, "and its payout IS the debt it replaced, with no refund to help");
+        assertEq(pExact - _allIn(pExact, BASE_BPS_A) + refund, debtOld, "and its payout plus the one-second refund IS the debt it replaced");
         assertGt(newId, loanId, "the successor opened");
     }
 
@@ -152,26 +148,25 @@ contract AceAllInFeeNettingTest is WarpClock {
         assertEq(usdc.balanceOf(borrower), wallet, "neither booked nor paid out in cash");
     }
 
-    /// @notice The armed derivation and the manual netting agree to the WEI: the hub's principal is the boundary.
+    /// @notice `RefinanceMath.principalForOwed` and the manual netting agree to the WEI: the fee's inverse is the boundary a refinance's draw meets.
     /// @notice A drift of one wei between the inverse and the forward fee would show here and nowhere else.
-    /// @dev The two spellings live on opposite sides of the hub, and only this pairing puts them in one assertion.
-    function test_TheHubsDerivedPrincipalIsExactlyTheManualBoundary() public {
+    /// @dev No hub verb derives a successor principal (`extend` lengthens in place), so the inverse is checked as the library spells it.
+    function test_TheLoanMathInverseIsExactlyTheManualBoundary() public {
         uint256 loanId = _open(idA, P, TEN7);
-        vm.prank(borrower);
-        auto_.setAutoRefinance(loanId, TEN7, 0, 0);
         _warpTo(uint256(read.loan(loanId).expiry) - 1 hours);
 
-        (bool ok,, uint256 derived) = auto_.tryContinue(loanId);
-        assertTrue(ok, "fixture: the continuation must be admitted for its principal to mean anything");
+        uint256 owed = read.debtOf(loanId) - read.earlyExitRefund(loanId);
+        uint256 derived = RefinanceMath.principalForOwed(owed, TEN7, BASE_BPS_A, TEN7);
+        assertEq(derived, AllInFeeSpec.principalForOwed(owed, TEN7, BASE_BPS_A, TEN7, PS), "fixture: the library and the spec agree");
 
         vm.prank(borrower);
         vm.expectRevert(DrawBelowDebt.selector);
-        ace.refinance(loanId, derived - 1, TEN7, OFF);
+        ace.refinanceTo(MigrateArgs(loanId, idA, derived - 1, TEN7, OFF, 0, address(0)));
 
         uint256 owedBefore = read.quoteOwedTotal(idA);
         uint256 wallet = usdc.balanceOf(borrower);
         vm.prank(borrower);
-        uint256 newId = ace.refinance(loanId, derived, TEN7, OFF);
+        uint256 newId = ace.refinanceTo(MigrateArgs(loanId, idA, derived, TEN7, OFF, 0, address(0)));
 
         assertEq(read.debtOf(newId), derived, "the manual verb drew the derived principal exactly");
         assertEq(read.quoteOwedTotal(idA) - owedBefore, 0, "and it netted to nothing, so the two spellings agree to the wei");
@@ -179,21 +174,21 @@ contract AceAllInFeeNettingTest is WarpClock {
     }
 
     /// @notice Over every roll time in the term, the record's inverse is the boundary the verb enforces.
-    /// @dev Fuzzed on the CLOCK rather than the principal: `refundOld` is what moves the boundary around.
+    /// @dev Fuzzed on the CLOCK rather than the principal: `refundOld` moves the boundary; it stops at `expiry - 1`, the last second a refinance lands.
     function testFuzz_TheManualBoundaryTracksTheRefundAtEveryRollTime(uint256 elapsedSeed) public {
         uint256 loanId = _open(idA, P, TEN30);
-        _warpBy(bound(elapsedSeed, 0, uint256(TEN30)));
+        _warpBy(bound(elapsedSeed, 0, uint256(TEN30) - 1));
 
         uint256 pExact = AllInFeeSpec.principalForOwed(read.debtOf(loanId) - read.earlyExitRefund(loanId), TEN30, BASE_BPS_A, TEN7, PS);
 
         vm.prank(borrower);
         vm.expectRevert(DrawBelowDebt.selector);
-        ace.refinance(loanId, pExact - 1, TEN30, OFF);
+        ace.refinanceTo(MigrateArgs(loanId, idA, pExact - 1, TEN30, OFF, 0, address(0)));
 
         uint256 owedBefore = read.quoteOwedTotal(idA);
         uint256 wallet = usdc.balanceOf(borrower);
         vm.prank(borrower);
-        ace.refinance(loanId, pExact, TEN30, OFF);
+        ace.refinanceTo(MigrateArgs(loanId, idA, pExact, TEN30, OFF, 0, address(0)));
         assertEq(read.quoteOwedTotal(idA) - owedBefore, 0, "the boundary is exact at every roll time, never merely sufficient");
         assertEq(usdc.balanceOf(borrower), wallet, "neither booked nor paid out in cash");
     }

@@ -4,8 +4,9 @@ pragma solidity 0.8.36;
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
-import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
-import {AutoPolicyDisarmed, BelowCoverageLine, GateRefused} from "../../src/ace/hub/Borrower.sol";
+import {MarketParams, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol";
+import {BelowCoverageLine, GateRefused} from "../../src/ace/hub/Borrower.sol";
+import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {PositionTitleNFT} from "../../src/ace/positions/PositionTitleNFT.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
@@ -14,11 +15,12 @@ import {MockStakeVault} from "../mocks/MockStakeVault.sol";
 import {MockDeleverageKeeper} from "../mocks/MockDeleverageKeeper.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
+import {_extended} from "../utils/Extended.sol";
 
 /// @title AceS1NamedBorrowerTitleTest
 /// @notice Audit run 2026-10-03-251533, phase 1: the named-borrower rule reads the CURRENT title holder.
-/// @notice A title sale in a market naming its borrower left the loan armed and reserved, while its home roll was refused.
-/// @notice FIXED (Y-12 A): in such a market any title move disarms a live armed loan, and `arm` refuses a holder the gate refuses.
+/// @notice The run found a sold loan left armed in a market naming its borrower; arming is now deleted outright.
+/// @notice What stands: a holder the market does not name may hold the title, but its extension refuses `GateRefused`.
 contract AceS1NamedBorrowerTitleTest is WarpClock {
     Ace internal ace;
     AceReader internal read;
@@ -40,15 +42,13 @@ contract AceS1NamedBorrowerTitleTest is WarpClock {
     uint256 internal constant COLL = 100_000e18;
     uint256 internal constant TOP = 400_000e6;
 
-    event AutoPolicySet(uint256 indexed id, uint64 tenor, uint16 minBufferBps, uint16 maxFeeBps);
-
     function setUp() public {
         _warpTo(1_000_000);
         usdc = new MockERC20("USD Coin", "USDC", 6);
         vault = new MockStakeVault(42);
         record = new MockPersistenceRecord(address(usdc), address(vault));
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(vault));
-        p.record = address(record); // a recordless market cannot arm
+        p.record = address(record); // an extension needs a record to admit against
         p.borrower = named;
         AceFixtures.Deployment memory d = AceFixtures.deploy(p);
         (ace, pm, read, mid) = (d.ace, d.positionManager, d.read, d.id);
@@ -62,12 +62,11 @@ contract AceS1NamedBorrowerTitleTest is WarpClock {
         vm.stopPrank();
     }
 
-    function _openArmed() internal returns (uint256 loanId) {
+    function _open() internal returns (uint256 loanId) {
         vault.mint(named, COLL);
         vm.startPrank(named);
         vault.approve(address(pm), COLL);
         loanId = ace.open(mid, COLL, P, TEN7, named, OpenBounds(0, 0, 0));
-        ace.setAutoRefinance(loanId, TEN7, 0, 0);
         vm.stopPrank();
     }
 
@@ -76,81 +75,65 @@ contract AceS1NamedBorrowerTitleTest is WarpClock {
         title.transferFrom(named, buyer, loanId);
     }
 
-    /// @notice Control: the named borrower holding its own title rolls at expiry.
-    function test_Control_TheNamedHolderRolls() public {
-        uint256 loanId = _openArmed();
-        (bool ok, bytes4 reason,) = ace.tryContinue(loanId);
-        assertFalse(ok, "outside the window before expiry");
-        _warpTo(uint256(read.loan(loanId).expiry));
-        (ok, reason,) = ace.tryContinue(loanId);
-        assertTrue(ok, "the named holder's home roll admits");
+    /// @dev Mint `who` the extension fee on `loanId` for `TEN7` and approve the hub for it.
+    function _fundFee(address who, uint256 loanId) internal {
+        MarketParams memory p = ace.idToMarketParams(mid);
+        uint256 fee = LoanMath.originationFee(read.debtOf(loanId), TEN7, p.baseBps, p.minTenor);
+        usdc.mint(who, fee);
+        vm.prank(who);
+        usdc.approve(address(ace), fee);
+    }
+
+    /// @notice Control: the named borrower holding its own title extends in place a second before expiry, on its lender's yes.
+    function test_Control_TheNamedHolderExtends() public {
+        AceFixtures.installYesPolicy(ace, alice);
+        uint256 loanId = _open();
+        uint64 x = read.loan(loanId).expiry;
+        _warpTo(uint256(x) - 1);
+        (bool ok, bytes4 reason,) = ace.tryExtend(loanId, 0, "", named);
+        assertTrue(ok, "the named holder's extension admits a second before expiry");
+        assertEq(reason, bytes4(0), "with no reason");
+        _fundFee(named, loanId);
         uint256 before = read.loanCount();
-        vm.prank(keeper);
-        ace.forceClose(loanId);
-        assertEq(read.loanCount(), before + 1, "a successor opened");
+        vm.prank(named);
+        ace.extend(loanId, 0, "");
+        assertTrue(_extended(read, loanId, x), "the same loan extended");
+        assertEq(read.loanCount(), before, "and no successor opened");
     }
 
     /// @notice Premise: the sale moves `Loan.borrower`, so the market's write-once rule now refuses the holder.
     function test_Premise_TheSaleMovesTheBorrowerTheGateReads() public {
-        uint256 loanId = _openArmed();
+        uint256 loanId = _open();
         _sell(loanId);
         assertEq(ace.borrowerOf(loanId), buyer, "retitle moved the borrower of record");
         assertTrue(ace.idToMarketParams(mid).borrower != buyer, "the market names someone else");
     }
 
-    /// @notice The sale DISARMS the loan and releases its reservation, logging the disarm as zeros.
-    /// @dev Was the run's premise that the policy and the reservation travelled with the position.
-    function test_TheSaleDisarmsTheLoanAndReleasesItsReservation() public {
-        uint256 loanId = _openArmed();
-        assertGt(read.rollReserve(mid), 0, "PREMISE: arming reserved cash");
-        vm.expectEmit(true, false, false, true, address(ace));
-        emit AutoPolicySet(loanId, 0, 0, 0);
+    /// @notice The new holder cannot extend: the borrower rule refuses a holder the market does not name, on the preview and the verb.
+    function test_TheNewHolderCannotExtendTheGateRefuses() public {
+        AceFixtures.installYesPolicy(ace, alice);
+        uint256 loanId = _open();
         _sell(loanId);
-        (uint64 tenor, uint16 buf, uint16 fee) = read.autoPolicyOf(loanId);
-        assertEq(tenor, 0, "the policy did not travel with the position");
-        assertEq(uint256(buf) + uint256(fee), 0, "and nothing of it is left stored");
-        assertEq(read.rollReserve(mid), 0, "and the reservation went back to the market");
+        _warpBy(1 days);
+        (bool ok, bytes4 reason,) = ace.tryExtend(loanId, 0, "", buyer);
+        assertFalse(ok, "no extension is offered to the buyer");
+        assertEq(reason, GateRefused.selector, "because the borrower rule refuses the holder");
+        _fundFee(buyer, loanId);
+        vm.prank(buyer);
+        vm.expectRevert(GateRefused.selector);
+        ace.extend(loanId, 0, "");
     }
 
-    /// @notice At expiry the sold loan is simply unarmed: the fold takes the ordinary settle branch, as for any unarmed loan.
-    function test_TheSoldLoanSettlesAsAnUnarmedLoan() public {
-        uint256 loanId = _openArmed();
+    /// @notice At expiry the sold loan settles as any loan does: the borrower rule never blocks a settlement.
+    function test_TheSoldLoanSettlesAtExpiry() public {
+        uint256 loanId = _open();
         _sell(loanId);
         _warpTo(uint256(read.loan(loanId).expiry));
-        (bool ok, bytes4 reason,) = ace.tryContinue(loanId);
-        assertFalse(ok, "no roll is offered");
-        assertEq(reason, AutoPolicyDisarmed.selector, "because the loan is disarmed, not because the gate refused it");
         uint256 before = read.loanCount();
         vm.prank(keeper);
         ace.forceClose(loanId);
         assertTrue(ace.isClosed(loanId), "the loan ended");
-        assertEq(read.loanCount(), before, "no successor: the unarmed default");
-    }
-
-    /// @notice The new holder cannot re-arm: `arm` refuses a holder the market does not name, and the lens agrees.
-    function test_TheNewHolderCannotArmARollTheGateRefuses() public {
-        uint256 loanId = _openArmed();
-        _sell(loanId);
-        vm.prank(buyer);
-        vm.expectRevert(GateRefused.selector);
-        ace.setAutoRefinance(loanId, TEN7, 0, 0);
-        (bool armOk, uint256 q) = lens.armable(loanId, TEN7);
-        assertFalse(armOk, "the lens refuses it too");
-        assertEq(q, 0, "and quotes no reservation");
-        vm.prank(buyer);
-        ace.setAutoRefinance(loanId, 0, 0, 0); // a disarm still lands for anyone holding the title
-    }
-
-    /// @notice A loan that reads armed at its home roll is never refused there by the borrower rule.
-    /// @dev Was the run's RED row: the disarm at a title move into a non-named holder turned it green.
-    function test_AnArmedHomeRollIsNeverRefusedByTheBorrowerRule() public {
-        uint256 loanId = _openArmed();
-        _sell(loanId);
-        _warpTo(uint256(read.loan(loanId).expiry));
-        (uint64 tenor,,) = read.autoPolicyOf(loanId);
-        (bool ok, bytes4 reason,) = ace.tryContinue(loanId);
-        bool refusedByGate = !ok && reason == GateRefused.selector;
-        assertFalse(tenor != 0 && refusedByGate, "an armed loan's home roll was refused by the borrower rule");
+        assertEq(read.loanCount(), before, "no successor");
     }
 }
 
@@ -342,11 +325,12 @@ contract AceS1ClaimPastCashCapTest is WarpClock {
         assertEq(read.claimOf(mid, loanId), first, "a draw's claim is bounded by the cash it took");
 
         _fill(); // the lender tops the market back up to the cap
+        AceFixtures.installYesPolicy(ace, alice); // the recycle of `first` rides the lender's yes
         uint256 next = first + CAP - 1; // recycles `first`, draws CAP - 1 fresh
         usdc.mint(bob, CAP); // headroom for any fee leg the netting asks
         vm.startPrank(bob);
         usdc.approve(address(ace), type(uint256).max);
-        uint256 newId = ace.refinance(loanId, next, 7 days, OpenBounds(0, 0, 0));
+        uint256 newId = ace.refinanceTo(MigrateArgs(loanId, mid, next, 7 days, OpenBounds(0, 0, 0), 0, address(0)));
         vm.stopPrank();
 
         uint256 claim = read.claimOf(mid, newId);

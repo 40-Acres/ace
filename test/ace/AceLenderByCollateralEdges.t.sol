@@ -4,8 +4,7 @@ pragma solidity 0.8.36;
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
-import {BelowMinDebt} from "../../src/ace/hub/Borrower.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
+import {BelowDebtFloor} from "../../src/ace/hub/Borrower.sol";
 import {MarketParams, MigrateArgs, OpenBounds, Order, Storage} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {ProtocolPolicy} from "../../src/config/Defaults.sol";
@@ -14,6 +13,8 @@ import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
 import {DeleverageCrank} from "../utils/DeleverageCrank.sol";
+import {_extended} from "../utils/Extended.sol";
+import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 
 /// @title AceLenderByCollateralEdges
 /// @notice The per-(lender, quote, collateral) split on the paths `AceLenderByCollateral` does not drive.
@@ -89,14 +90,14 @@ contract AceLenderByCollateralEdgesTest is WarpClock, DeleverageCrank {
         _lend(m, SEED);
     }
 
-    /// @dev A band-armed USDC market of `coll` with its own `minDebt`, so a deleverage crank can be capped by it.
-    function _deleverageMarket(MockERC20 coll, uint256 minDebt) internal returns (Mkt memory) {
+    /// @dev A band-armed USDC market of `coll` at debt floor `floor` (`minPrincipal` twice it), so a deleverage crank restores or closes against it.
+    function _deleverageMarket(MockERC20 coll, uint256 floor) internal returns (Mkt memory) {
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(coll));
         p.deleverageFloorEpsBps = ProtocolPolicy.DELEVERAGE_FLOOR_EPS_BPS;
         p.deleverageBandBps = BAND_BPS;
         p.deleverageTargetBps = 4000;
         p.deleverageStopBps = 1;
-        p.minDebt = minDebt;
+        p.minPrincipal = 2 * floor;
         return _create(p, usdc, coll, lender, true);
     }
 
@@ -200,7 +201,7 @@ contract AceLenderByCollateralEdgesTest is WarpClock, DeleverageCrank {
         return ace.lenderByCollateral(m.lender, address(m.quote), address(m.coll));
     }
 
-    /// @dev The split equals the claim book, the borrower-side debt book and the raw pots, for this market's triple.
+    /// @dev The split equals the claim book, the borrower-side debt book, and the raw pots, for this market's triple.
     function _assertSplit(Mkt memory m, string memory at) internal view {
         (uint256 lent, uint256 units) = _split(m);
         (uint256 wantLent, uint256 wantUnits, uint256 debt) = _expected(m.lender, address(m.quote), address(m.coll));
@@ -253,16 +254,16 @@ contract AceLenderByCollateralEdgesTest is WarpClock, DeleverageCrank {
         assertEq(l1, PX, "and only the other loan's claim is left");
         _assertSplit(rx, "forceClose");
 
-        _warpTo(read.loan(a).expiry + MarketInit.autoRefinanceWindow(read.loan(a).tenor));
+        _warpAtLeastTo(read.loan(a).expiry);
         vm.prank(keeper);
-        ace.settleExpired(a); // the unpaid door: no sliver
+        ace.forceClose(a); // the same door again, on the other loan
         uint256 potA = read.invPotOf(rx.id, a);
-        assertGt(potA, needA, "PREMISE: the backstop forfeits coverage too");
+        assertGt(potA, needA, "PREMISE: the second forfeit puts coverage in the pot too");
         (uint256 l2, uint256 u2) = _split(rx);
         assertEq(u2, potA + potB, "a second forfeit adds its whole pot to the units already held");
         assertEq(l2, 0, "both claims left lent");
-        _assertSplit(rx, "settleExpired");
-        _assertSplit(my, "settleExpired, Y");
+        _assertSplit(rx, "second forceClose");
+        _assertSplit(my, "second forceClose, Y");
 
         vm.prank(lender);
         uint256 out = ace.redeemInKind(b, lender);
@@ -337,6 +338,7 @@ contract AceLenderByCollateralEdgesTest is WarpClock, DeleverageCrank {
     function test_Migrate_AHomeRefinanceIntoASmallerSuccessorLandsOnIt() public {
         Mkt memory mx = _market(usdc, collX, lender);
         Mkt memory my = _market(usdc, collY, lender);
+        AceFixtures.installYesPolicy(ace, lender); // the home claim recycles only on the lender's policy yes
         _borrow(my, PY);
         uint256 id = _borrow(mx, PX);
         _repay(mx, id, PX - 100e6);
@@ -347,7 +349,7 @@ contract AceLenderByCollateralEdgesTest is WarpClock, DeleverageCrank {
         (,, uint256 owed0) = read.lenderPools(lender, address(usdc));
 
         vm.prank(borrower);
-        uint256 next = ace.refinance(id, newP, 0, OFF);
+        uint256 next = ace.refinanceTo(MigrateArgs(id, mx.id, newP, 0, OFF, 0, address(0)));
         assertEq(read.marketState(mx.id).cash, cash0, "PREMISE: a zero-fresh draw, the successor recycled whole");
         assertEq(read.claimOf(mx.id, next), newP, "PREMISE: the successor's claim is its principal");
         (uint256 x,) = _split(mx);
@@ -385,51 +387,33 @@ contract AceLenderByCollateralEdgesTest is WarpClock, DeleverageCrank {
         _assertSplit(my, "shedding re-term, Y");
     }
 
-    /// @notice Only the borrower may repay into `(0, minDebt)`; the split follows to the dust, and the fold's minDebt floor raises it.
-    /// @dev The one roll whose successor is floored ABOVE its fee-derived size, so the split rises past the old debt by more than a fee.
-    function test_Repay_TheDustBandThenTheFoldRaisesTheSplitToMinDebt() public {
+    /// @notice No repay, the borrower's or a third party's, may leave a live loan under its debt floor; a refused one moves no split.
+    function test_Repay_TheDustBandIsRefusedToEveryoneAndTheSplitStands() public {
         Mkt memory mx = _market(usdc, collX, lender);
         Mkt memory my = _market(usdc, collY, lender);
         _borrow(my, PY);
         uint256 id = _borrow(mx, PX);
-        uint256 minDebt = ace.idToMarketParams(mx.id).minDebt;
-        uint256 dust = minDebt / 2;
-
-        usdc.mint(keeper, PX);
-        vm.startPrank(keeper);
-        usdc.approve(address(ace), PX);
-        vm.expectRevert(BelowMinDebt.selector);
-        ace.repay(id, PX - dust);
-        vm.stopPrank();
-        (uint256 x0,) = _split(mx);
-        assertEq(x0, PX, "a refused third-party repay moved nothing");
-
-        _repay(mx, id, PX - dust);
-        (uint256 x1,) = _split(mx);
-        assertEq(x1, dust, "the borrower's own repay took the split into the dust band");
-        _assertSplit(mx, "dust");
-
-        uint64 tenor = read.loan(id).tenor; // read before the prank, which the next external call spends
-        vm.prank(borrower);
-        ace.setAutoRefinance(id, tenor, 0, 0);
-        _warpAtLeastTo(read.loan(id).expiry);
-        uint256 n = read.loanCount();
-        vm.prank(keeper);
-        ace.forceClose(id);
-        assertEq(read.loanCount(), n + 1, "PREMISE: the fold rolled into a successor");
-        (uint256 x2, uint256 u2) = _split(mx);
-        assertEq(x2, minDebt, "the floored successor's principal is the market's minDebt");
-        assertEq(x2, read.claimOf(mx.id, n + 1), "and it is the successor's claim");
-        assertEq(u2, 0, "a roll leaves no pot");
-        _assertSplit(mx, "dust fold");
-        _assertSplit(my, "dust fold, Y");
+        uint256 dust = LoanMath.debtFloor(ace.idToMarketParams(mx.id).minPrincipal) / 2; // inside `(0, floor)`
+        address[2] memory payers = [keeper, borrower];
+        for (uint256 i; i < payers.length; ++i) {
+            usdc.mint(payers[i], PX);
+            vm.startPrank(payers[i]);
+            usdc.approve(address(ace), PX);
+            vm.expectRevert(BelowDebtFloor.selector);
+            ace.repay(id, PX - dust);
+            vm.stopPrank();
+            (uint256 x,) = _split(mx);
+            assertEq(x, PX, "a refused repay moved nothing");
+        }
+        _assertSplit(mx, "refused dust");
+        _assertSplit(my, "refused dust, Y");
     }
 
-    // ============ E7: a crank capped at minDebt ============
+    // ============ E7: a restore crank, and a closing one ============
 
-    /// @notice A crank whose restore would melt past `minDebt` is capped there, and the split lands on the debt it leaves.
-    function test_Deleverage_ACrankCappedAtMinDebtLandsTheSplitOnTheDebt() public {
-        uint256 floorDebt = PX - 10e6; // ten quote of head: far under the restore the band asks for
+    /// @notice A restore crank against a material debt floor lands the split on the debt it leaves, at or over the floor.
+    function test_Deleverage_ARestoreCrankLandsTheSplitOnTheDebtItLeaves() public {
+        uint256 floorDebt = 1_000e6; // under the ~40% of the draw the restore leaves, so the crank restores
         Mkt memory dx = _deleverageMarket(collX, floorDebt);
         Mkt memory my = _market(usdc, collY, lender);
         _borrow(my, PY);
@@ -438,14 +422,33 @@ contract AceLenderByCollateralEdgesTest is WarpClock, DeleverageCrank {
 
         (uint256 sold,) = ace.deleverage(id, 0, "");
         assertGt(sold, 0, "PREMISE: the crank sold");
+        assertEq(read.loan(id).closedAt, 0, "PREMISE: and restored rather than closed");
         uint256 debt1 = read.debtOf(id);
         assertLt(debt1, PX, "PREMISE: and melted");
-        assertGe(debt1, floorDebt, "PREMISE: no further than minDebt");
+        assertGe(debt1, floorDebt, "PREMISE: no further than the debt floor");
         (uint256 x,) = _split(dx);
-        assertEq(x, debt1, "the split is the debt the capped melt left");
+        assertEq(x, debt1, "the split is the debt the melt left");
         assertEq(x, read.claimOf(dx.id, id), "and the loan's claim");
-        _assertSplit(dx, "capped crank");
-        _assertSplit(my, "capped crank, Y");
+        _assertSplit(dx, "restore crank");
+        _assertSplit(my, "restore crank, Y");
+    }
+
+    /// @notice A crank whose restore would melt past the debt floor closes the loan, and the split retires with the claim.
+    function test_Deleverage_AClosingCrankRetiresTheSplitWithTheClaim() public {
+        Mkt memory dx = _deleverageMarket(collX, PX / 2); // over the ~40% of the draw the restore leaves, and `minPrincipal` is the draw itself
+        Mkt memory my = _market(usdc, collY, lender);
+        _borrow(my, PY);
+        uint256 id = _borrow(dx, PX);
+        _enterBand(dx, id, 110);
+
+        (uint256 sold,) = ace.deleverage(id, 0, "");
+        assertGt(sold, 0, "PREMISE: the crank sold");
+        assertGt(read.loan(id).closedAt, 0, "PREMISE: and closed the dust-bound loan");
+        (uint256 x,) = _split(dx);
+        assertEq(x, 0, "the split retired with the loan");
+        assertEq(read.claimOf(dx.id, id), 0, "as the claim did");
+        _assertSplit(dx, "closing crank");
+        _assertSplit(my, "closing crank, Y");
     }
 
     /// @notice A crank that CHARGES the protocol cut melts only the net: the split falls by it, never by the gross proceeds.

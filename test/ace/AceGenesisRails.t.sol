@@ -51,7 +51,7 @@ contract AceGenesisRailsTest is Test {
         p.baseBps = PocDeployConfig.BASE_BPS;
         p.minTenor = ProtocolPolicy.MIN_TENOR;
         p.maxTenor = ProtocolPolicy.MAX_TENOR;
-        p.minDebt = PocDeployConfig.MIN_DEBT;
+        p.minPrincipal = PocDeployConfig.MIN_PRINCIPAL;
         p.settleBountyBps = PocDeployConfig.SETTLE_BOUNTY_BPS;
         /// @dev Sole tenancy: genesis refuses a zero lender, and every row here means to trip a DIFFERENT rail.
         p.lender = address(0x1E4DE2);
@@ -202,18 +202,18 @@ contract AceGenesisRailsTest is Test {
     /// @dev Their full behaviour lives in `AceCoSizing.t.sol`; these two pin the rail STRINGS.
 
     /// @notice THE ANTI-RAIL, kept as a row because a deleted rail still needs a witness that it is gone.
-    /// @notice The once-inverted pair is ADMITTED, and `minDebt` covers its own floor by construction.
+    /// @notice The once-inverted pair is ADMITTED, and `minPrincipal` covers its own floor by construction.
     /// @dev Nothing weakened: the invariant is asserted here, it is simply no longer a rail's job.
-    /// @dev IT USED TO BE A PRODUCT -- `maxClaimTicks * ceil(minDebt / maxClaimTicks) >= minDebt` -- because a
+    /// @dev IT USED TO BE A PRODUCT -- `maxClaimTicks * ceil(minPrincipal / maxClaimTicks) >= minPrincipal` -- because a
     /// @dev draw reached the floor from many lots. One bucket makes the deposit floor and the draw floor the
     /// @dev same number, so the inversion the rail guarded against is not expressible rather than merely unrailed.
     function test_NoRail_TheDepositFloorIsTheDrawFloorAndCoversIt() public {
         MarketParams memory p = _base();
-        p.minDebt = 5_000e6; // the old inversion: a wide spread at the creator's 10e6 funded a fraction of it
+        p.minPrincipal = 5_000e6; // the old inversion: a wide spread at the creator's 10e6 funded a fraction of it
         bytes32 id = ace.createMarket(p);
 
-        assertEq(ace.idToMarketParams(id).minDebt, 5_000e6, "genesis admits what it used to refuse");
-        assertGe(ace.idToMarketParams(id).minDebt, p.minDebt, "and the one floor covers itself, with no product to invert");
+        assertEq(ace.idToMarketParams(id).minPrincipal, 5_000e6, "genesis admits what it used to refuse");
+        assertGe(ace.idToMarketParams(id).minPrincipal, p.minPrincipal, "and the one floor covers itself, with no product to invert");
     }
 
     /// @dev DELETED: `test_Rail_ClaimCapOverGasCeiling`. `maxClaimTicks` bounded how many ticks one draw could
@@ -224,24 +224,22 @@ contract AceGenesisRailsTest is Test {
 
     /// @notice A zero borrower quantum derives a zero lender ticket, so one wei of dust books at any tick.
     /// @notice It also lets a draw fund nothing, leaving a live loan with no funding floor for a guard to read.
-    function test_Rail_MinDebtZero() public {
+    function test_Rail_MinPrincipalZero() public {
         MarketParams memory p = _base();
-        p.minDebt = 0;
-        _reject(p, "min debt zero");
+        p.minPrincipal = 0;
+        _reject(p, "debt floor zero");
     }
 
-    /// @notice One wei is REFUSED, and two is admitted: the floor is IMPLIED, never a calibrated number.
-    /// @notice A one-wei market admits a one-wei draw whose fee CEILS to the whole wei, paying nothing.
-    /// @dev This row asserted the opposite until the fee ceiling landed, when `minDebt = 1` stayed legal.
-    /// @dev The rail is still structural -- it derives the floor from the fee rather than picking one.
-    /// @dev At every rate the share bound admits, that derivation lands on exactly 2 wei.
-    function test_Rail_MinDebtOneWeiIsRefusedAndTwoIsAdmitted() public {
+    /// @notice One wei is REFUSED, and two is admitted: the debt floor, half `minPrincipal`, must be positive.
+    /// @notice One wei would also admit a one-wei draw whose fee CEILS to the whole wei; the fee rail still backs that.
+    /// @dev At every rate the share bound admits, the fee rail alone also lands on exactly 2 wei.
+    function test_Rail_MinPrincipalOneWeiIsRefusedAndTwoIsAdmitted() public {
         MarketParams memory p = _base();
-        p.minDebt = 1;
-        _reject(p, "min debt under fee");
+        p.minPrincipal = 1;
+        _reject(p, "debt floor zero");
 
         p = _base();
-        p.minDebt = 2;
+        p.minPrincipal = 2;
         assertTrue(ace.createMarket(p) != bytes32(0), "the quantum is the creator's, anywhere the fee leaves change");
     }
 
@@ -383,7 +381,7 @@ contract AceGenesisRailsTest is Test {
     }
 
     /// @notice A zero tenor is refused HERE, BY NAME: no other rail names it, and one later rail divides by it.
-    /// @dev With min == max == 0 the fee rail reads `0 <= 0` and passes, then `min debt under fee` divides by `minTenor`.
+    /// @dev With min == max == 0 the fee rail reads `0 <= 0` and passes, then `min principal under fee` divides by `minTenor`.
     /// @dev So the rail's ORDER is load-bearing: moved below that rail, the first case reverts with EMPTY data instead.
     /// @dev Zero is caught by the derived tenor floor, which subsumes the old zero-only rail; this row keeps the degenerate end.
     function test_Rail_TenorZero() public {
@@ -397,37 +395,35 @@ contract AceGenesisRailsTest is Test {
         _reject(p, "min tenor under floor");
     }
 
-    /// @dev The floor re-derived here from all three divisors, independent of the constant: the larger of the two legs that can reach zero.
-    function _derivedFloor() private pure returns (uint64) {
-        uint64 roll = Constants.AUTO_REFINANCE_WINDOW_DIVISOR * Constants.AUTO_ROLL_HOME_SHARE_DIVISOR;
-        return roll > Constants.INVENTORY_HOLD_DIVISOR ? roll : Constants.INVENTORY_HOLD_DIVISOR;
+    uint64 internal constant RULED_FLOOR = 10; // the tenor floor as ruled, a LITERAL here so a change to the constant must change this row
+
+    /// @dev The bound re-derived from the one tenor-derived window left, the inventory hold: the least tenor whose hold is not zero.
+    function _derivedBound() private pure returns (uint64) {
+        return Constants.INVENTORY_HOLD_DIVISOR;
     }
 
-    /// @notice THE TENOR FLOOR IS DERIVED, not picked: the smallest `minTenor` at which no tenor-derived window is zero.
-    /// @notice It is spelled here from the three divisors, never read off the constant, so a retune of any one moves this row with it.
+    /// @notice THE TENOR FLOOR IS RULED AT 10 SECONDS: one under it is refused and the floor itself is admitted.
+    /// @notice It sits above the bound the window divisor derives, so the derivation no longer sets it; the ruling does.
     /// @dev min == max throughout, so the fee rail cancels the tenor and cannot refuse the short market first.
     function test_Rail_MinTenorFloor_RefusesOneUnderAndAdmitsTheFloor() public {
-        uint64 floor = _derivedFloor();
+        assertGe(RULED_FLOOR, _derivedBound(), "the ruled floor sits at or above the bound the divisors derive");
         MarketParams memory p = _base();
-        (p.minTenor, p.maxTenor) = (floor - 1, floor - 1);
+        (p.minTenor, p.maxTenor) = (RULED_FLOOR - 1, RULED_FLOOR - 1);
         _reject(p, "min tenor under floor");
 
         p = _base();
-        (p.minTenor, p.maxTenor) = (floor, floor);
+        (p.minTenor, p.maxTenor) = (RULED_FLOOR, RULED_FLOOR);
         bytes32 id = ace.createMarket(p);
-        assertEq(ace.idToMarketParams(id).minTenor, floor, "the floor itself is admissible");
+        assertEq(ace.idToMarketParams(id).minTenor, RULED_FLOOR, "the floor itself is admissible");
     }
 
-    /// @notice AT THE FLOOR EVERY TENOR-DERIVED WINDOW IS AT LEAST ONE SECOND, which is the whole reason it exists.
-    /// @notice One under it some hold is zero, so the floor is TIGHT rather than merely safe.
-    /// @dev Tightness is asserted over BOTH holds, so it survives a retune that makes the inventory leg the binding one.
-    function test_MinTenorFloor_EveryDerivedWindowIsAtLeastASecondThere() public pure {
-        uint64 floor = _derivedFloor();
-        assertGe(MarketInit.autoRefinanceWindow(floor), 1, "the roll window opens before expiry");
-        assertGe(MarketInit.homeRollHold(floor), 1, "a stranger may route in the window's trailing second, before expiry");
-        assertGe(MarketInit.inventoryHold(floor), 1, "settled inventory rests before its ask opens");
-        bool someZero = MarketInit.homeRollHold(floor - 1) == 0 || MarketInit.inventoryHold(floor - 1) == 0;
-        assertTrue(someZero, "one under the floor a hold is zero: no smaller floor works");
+    /// @notice AT THE DERIVED BOUND THE INVENTORY HOLD IS AT LEAST ONE SECOND, and so at the ruled floor above it.
+    /// @notice One under the bound the hold is zero, so the bound is TIGHT: it is the least floor the hold could take.
+    function test_MinTenorFloor_TheInventoryHoldIsAtLeastASecondThere() public pure {
+        uint64 b = _derivedBound();
+        assertGe(MarketInit.inventoryHold(RULED_FLOOR), 1, "at the ruled floor settled inventory still rests before its ask opens");
+        assertGe(MarketInit.inventoryHold(b), 1, "and at the derived bound");
+        assertEq(MarketInit.inventoryHold(b - 1), 0, "one under the bound the hold is zero: no smaller bound works");
     }
 
     /// @notice An inverted tenor grid is refused BY NAME rather than by an arithmetic panic.

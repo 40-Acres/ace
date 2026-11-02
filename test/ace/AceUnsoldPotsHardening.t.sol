@@ -4,7 +4,7 @@ pragma solidity 0.8.36;
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
-import {Ace, NoRecordPrice} from "../../src/ace/hub/Ace.sol";
+import {Ace, InventoryHeld, NoRecordPrice} from "../../src/ace/hub/Ace.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
@@ -15,12 +15,13 @@ import {UnresolvedProbeToken} from "../mocks/UnresolvedProbeToken.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
 import {GUARD_TRIP} from "../utils/GuardTrip.sol";
+import {_extended} from "../utils/Extended.sol";
 
 /// @title AceUnsoldPotsHardening
 /// @notice The hardening pass over the unsold-pot count and the whole-pot sale (#803 half b), beside `AceUnsoldPots`.
 /// @notice 1. `clearingBudget` is EXACT over collateral decimals {0,6,8,18}, quote {6,18}, fees {0,25,50} and a record floor at or above book.
 /// @notice 2. The whole-pot charge is within the budget, never under the exact all-in value, and a split buy never pays less.
-/// @notice 3. The count through a recordless coverage pot, the unpaid backstop, an armed roll and two markets in one pair.
+/// @notice 3. The count through a recordless coverage pot, `forceClose` on a record market, an extension and two markets in one pair.
 /// @notice 4. The count and the clearing quote refuse a read from inside the collateral release of a buy and of a redeem.
 /// @dev Expected values come from the hub's own reads or are spelled here; the count under test is never an input to them.
 contract AceUnsoldPotsHardeningTest is WarpClock {
@@ -70,7 +71,7 @@ contract AceUnsoldPotsHardeningTest is WarpClock {
         p.price = price;
         p.lender = lender;
         p.fillFeeBps = fee;
-        p.minDebt = 10 * m.one;
+        p.minPrincipal = 10 * m.one;
         m.id = ace.createMarket(p);
     }
 
@@ -326,9 +327,9 @@ contract AceUnsoldPotsHardeningTest is WarpClock {
 
     // ============ 3. the count through every door ============
 
-    /// @notice A RECORDLESS market forfeits the whole coverage line into the pot, spread first; the settlement still counts ONCE.
-    /// @notice Through both expiry doors, and each pot clears at the lens's quote, which prices a recordless pot at book.
-    function test_Count_ARecordlessCoveragePotCountsOnceThroughEitherExpiryDoor() public {
+    /// @notice A RECORDLESS market forfeits the whole coverage line into the pot, spread first; each settlement still counts ONCE.
+    /// @notice Two loans through `forceClose` a day apart, and each pot clears at the lens's quote, which prices a recordless pot at book.
+    function test_Count_ARecordlessCoveragePotCountsOncePerSettlement() public {
         Mkt memory m = _market(usdc, address(new MockERC20("C", "C", 18)), 25, _par(18), 0);
         uint256 a = _loan(m, 4_500e6);
         uint256 b = _loan(m, 4_500e6);
@@ -342,29 +343,29 @@ contract AceUnsoldPotsHardeningTest is WarpClock {
 
         _warpAtLeastTo(read.loan(b).expiry + 1 days);
         vm.prank(keeper);
-        ace.settleExpired(b);
-        assertGt(read.invPotOf(m.id, b), 0, "PREMISE: the unpaid backstop left a pot");
-        assertEq(_count(m), 2, "and the backstop's counts beside it");
+        ace.forceClose(b);
+        assertGt(read.invPotOf(m.id, b), 0, "PREMISE: the second settlement left a pot");
+        assertEq(_count(m), 2, "and it counts beside the first");
 
         _warpAtLeastTo(read.inventoryAskOpensAt(b));
         _buy(m, a, inv.clearingBudget(m.id, a));
-        assertEq(_count(m), 1, "a buy at the quote clears the forceClose pot");
+        assertEq(_count(m), 1, "a buy at the quote clears the first pot");
         _buy(m, b, inv.clearingBudget(m.id, b));
-        assertEq(read.invPotOf(m.id, b), 0, "PREMISE: and the backstop's");
+        assertEq(read.invPotOf(m.id, b), 0, "PREMISE: and the second's");
         assertEq(_count(m), 0, "so the count is clear");
     }
 
-    /// @notice The unpaid backstop on a RECORD market: its pot counts, and the in-kind redeem and a buy each take one off.
-    function test_Count_SettleExpiredOnARecordMarketCountsAndBothExitsClear() public {
+    /// @notice `forceClose` on a RECORD market: its pots count, and the in-kind redeem and a buy each take one off.
+    function test_Count_ForceCloseOnARecordMarketCountsAndBothExitsClear() public {
         Mkt memory m = _market(usdc, address(new MockERC20("C", "C", 18)), 25, _par(18), 2 * _par(18));
         uint256 a = _loan(m, 4_500e6);
         uint256 b = _loan(m, 4_500e6);
         _warpAtLeastTo(read.loan(b).expiry + 1 days);
         vm.startPrank(keeper);
-        ace.settleExpired(a);
-        ace.settleExpired(b);
+        ace.forceClose(a);
+        ace.forceClose(b);
         vm.stopPrank();
-        assertEq(_count(m), 2, "two backstop settlements, two counts");
+        assertEq(_count(m), 2, "two settlements, two counts");
         vm.prank(lender);
         ace.redeemInKind(a, lender);
         assertEq(_count(m), 1, "the lender's redeem takes one off");
@@ -373,35 +374,38 @@ contract AceUnsoldPotsHardeningTest is WarpClock {
         assertEq(_count(m), 0, "and the buy at the quote the other");
     }
 
-    /// @notice An ARMED loan at expiry rolls into a successor: the fold closes it with no pot, so the count stands.
-    /// @notice A buy on the rolled loan then meets an empty pot and takes nothing; the successor counts when it settles.
-    function test_Count_AnArmedRollAtExpiryLeavesItUnchanged() public {
+    /// @notice A loan extended in its last second stays live with no pot, so the count stands.
+    /// @notice A buy on the extended loan is refused, a live loan having no pot to sell; the loan counts only if it later settles.
+    function test_Count_AnExtensionLeavesItUnchanged() public {
         Mkt memory m = _market(usdc, address(new MockERC20("C", "C", 18)), 25, _par(18), 2 * _par(18));
         uint256 settled = _loan(m, 4_500e6);
         _finalize(m, settled);
         assertEq(_count(m), 1, "PREMISE: one unsold pot");
 
-        uint256 armed = _loan(m, 4_500e6);
-        _lend(m, 20_000e6); // the successor draws afresh, so the market must still fund it
-        uint64 tenor = read.loan(armed).tenor; // read before the prank, which the next external call spends
-        vm.prank(borrower);
-        ace.setAutoRefinance(armed, tenor, 0, 0);
-        _warpAtLeastTo(read.loan(armed).expiry);
+        uint256 rolled = _loan(m, 4_500e6);
+        AceFixtures.installYesPolicy(ace, ace.idToMarketParams(m.id).lender); // an extension lands only on its lender's yes
+        uint64 x = read.loan(rolled).expiry;
+        _warpAtLeastTo(uint256(x) - 1);
         uint256 n = read.loanCount();
-        vm.prank(keeper);
-        ace.forceClose(armed);
-        assertEq(read.loanCount(), n + 1, "PREMISE: the fold rolled into a successor rather than settling");
-        assertTrue(read.loan(armed).closedAt != 0, "PREMISE: and retired the armed loan");
-        assertEq(read.invPotOf(m.id, armed), 0, "with no pot");
+        vm.startPrank(borrower);
+        usdc.approve(address(ace), type(uint256).max);
+        ace.extend(rolled, 0, "");
+        vm.stopPrank();
+        assertTrue(_extended(read, rolled, x), "PREMISE: the borrower extended the loan in place");
+        assertEq(read.loanCount(), n, "PREMISE: and minted no successor");
+        assertEq(read.invPotOf(m.id, rolled), 0, "with no pot");
         assertEq(_count(m), 1, "so the count stands at the one settled pot");
 
-        _warpAtLeastTo(read.inventoryAskOpensAt(armed));
-        (uint256 none,) = _buy(m, armed, 1_000e6);
-        assertEq(none, 0, "PREMISE: the rolled loan's pot is empty");
-        assertEq(_count(m), 1, "and a buy on it takes no other pot's count");
+        usdc.mint(buyer, 1_000e6);
+        vm.startPrank(buyer);
+        usdc.approve(address(ace), 1_000e6);
+        vm.expectRevert(InventoryHeld.selector);
+        ace.buyInventory(rolled, 1_000e6, 0, buyer);
+        vm.stopPrank();
+        assertEq(_count(m), 1, "and a refused buy on it takes no other pot's count");
 
-        _finalize(m, n + 1);
-        assertEq(_count(m), 2, "the successor's own settlement counts");
+        _finalize(m, rolled);
+        assertEq(_count(m), 2, "the extended loan's own later settlement counts");
     }
 
     /// @notice ONE PAIR, TWO MARKETS: the count is the lender's in a quote, so settlements in different markets add and each sale takes one.

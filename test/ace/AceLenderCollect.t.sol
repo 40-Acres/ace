@@ -36,7 +36,7 @@ contract AceLenderCollectTest is Test {
     uint256 internal T4; // the price this suite's market bids at; assigned in setUp, since par is not a compile-time value
     uint256 internal constant COLL = 10_000e18;
     uint256 internal constant PRINCIPAL = 1_000e6;
-    uint256 internal constant MIN_LOT = 1e6; // the resting floor IS `minDebt`, low enough that a real fee clears it
+    uint256 internal constant MIN_LOT = 1e6; // the resting floor IS `minPrincipal`, low enough that a real fee clears it
 
     /// @dev This suite's pair, so a tick reads as its distance from par rather than as a grid coordinate.
     /// @param offset Ticks above par.
@@ -56,7 +56,7 @@ contract AceLenderCollectTest is Test {
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(record);
         p.price = T4; // the market's own bid, which the deposit door's cap rows read
-        p.minDebt = MIN_LOT;
+        p.minPrincipal = MIN_LOT;
         AceFixtures.Deployment memory d = AceFixtures.deploy(p);
         (ace, positionManager, read, mid) = (d.ace, d.positionManager, d.read, d.id);
     }

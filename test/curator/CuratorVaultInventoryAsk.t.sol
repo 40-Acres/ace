@@ -39,12 +39,12 @@ contract CuratorVaultInventoryAskTest is CuratorVaultBase {
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(usdc));
         p.lender = address(h);
         p.settleBountyBps = 50;
-        h.setTerms(p, Terms({units: 1_000e6, principal: 100e6, tenor: 0, arm: false, minBufferWad: 0}));
+        h.setTerms(p, Terms({units: 1_000e6, principal: 100e6, tenor: 0, minBufferWad: 0}));
         usdc.mint(borrower, 1_000e6);
         vm.startPrank(borrower);
         usdc.approve(address(h), 1_000e6);
         vm.expectRevert(AceVaultFlows.CashIsNotCollateral.selector);
-        h.borrow(BorrowRequest(address(usdc), 1_000e6, 100e6, 0, false, 0, 0, 0), "", "");
+        h.borrow(BorrowRequest(address(usdc), 1_000e6, 100e6, 0, 0, 0, 0), "", "");
         vm.stopPrank();
 
         assertEq(ace.idToMarketParams(keccak256(abi.encode(p))).lender, address(0), "no market was created");

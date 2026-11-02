@@ -19,8 +19,9 @@ struct Schedule {
 /// @dev The account code is deployed by this constructor, so every clone's LAUNCH is the lock; the derived lock says which schedules revoke.
 abstract contract ScheduleLock {
     error BadSchedule(); // a cliff past the duration, or a curve ending past uint64
-    error BadBeneficiary(); // an address a release would strand in, or recycle into, the protocol or this lock
+    error BadBeneficiary(); // an address a release would strand in, or recycle into, the protocol or this lock; or DEAD, which no key releases for
 
+    address internal constant DEAD = 0x000000000000000000000000000000000000dEaD; // the burn address, whose account no key would ever release
     address public immutable TOKEN; // the token every account here locks
     address public immutable HUB; // the ACE hub every account here pledges into
     address public immutable IMPLEMENTATION; // the account code every clone runs, deployed here so a clone's code is this lock's choice
@@ -59,15 +60,15 @@ abstract contract ScheduleLock {
         emit AccountCreated(a, beneficiary, scheduleId);
     }
 
-    /// @notice Whether `account` refuses `beneficiary`: an address a release would strand in, or recycle into, the protocol or this lock.
-    /// @notice Zero, the token, the hub, its custodian and title, this lock, its account implementation, and any account it deployed.
+    /// @notice Whether `account` refuses `beneficiary`: an address a release would strand in, or recycle into, the protocol or this lock, or keyless DEAD.
+    /// @notice Zero, DEAD, the token, the hub, its custodian and title, this lock, its account implementation, and any account it deployed.
     /// @dev An account it has only PREDICTED is not recognisable, since its address does not reveal its beneficiary.
     /// @dev A release into such an address is benign: a donation to that account, which vests it again for its own beneficiary.
     /// @dev The refusal can arrive LATE: once that account deploys, an account OF that beneficiary not yet deployed never can be.
     /// @dev Anyone can trigger it through get-or-create, so whoever relies on an account deploys it first.
     function beneficiaryRefused(address beneficiary) public view returns (bool) {
-        return beneficiary == address(0) || beneficiary == TOKEN || beneficiary == HUB || beneficiary == POSITION_MANAGER || beneficiary == POSITION_TITLE
-            || beneficiary == address(this) || beneficiary == IMPLEMENTATION || isAccount[beneficiary];
+        return beneficiary == address(0) || beneficiary == DEAD || beneficiary == TOKEN || beneficiary == HUB || beneficiary == POSITION_MANAGER
+            || beneficiary == POSITION_TITLE || beneficiary == address(this) || beneficiary == IMPLEMENTATION || isAccount[beneficiary];
     }
 
     /// @dev A schedule is admitted only when its cliff sits inside it and its end fits uint64, so no account's curve can overflow.

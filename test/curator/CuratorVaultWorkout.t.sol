@@ -83,7 +83,7 @@ contract CuratorVaultWorkoutTest is CuratorVaultBase {
 
     /// @dev T38 INVERTED: a realized loss reserves NOTHING. Every cent of the vault's balance stays lendable.
     /// @dev Bob's cash lands BEFORE the loss, so the balance holds his deposit as well as alice's leftover.
-    /// @dev With no request and no armed loan, `lendable` is the whole balance: one wei past it is refused, and all of it lends.
+    /// @dev With no request, `lendable` is the whole balance: one wei past it is refused, and all of it lends.
     function test_Lend_ReservesNothingAgainstARealizedLoss() public {
         CuratorVault v = _newVault(0);
         _lpDeposit(v, bob, SEED);

@@ -3,8 +3,9 @@ pragma solidity 0.8.36;
 
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
-import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
+import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
+import {RefinanceMath} from "../utils/RefinanceMath.sol";
+import {MarketParams, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
@@ -13,8 +14,8 @@ import {AceReader} from "../utils/AceReader.sol";
 
 /// @title AceP7PooledIdentityTest
 /// @notice Audit run 2026-09-13-670568 phase 7, goal 2: try to make the books lie on the POOLED, sole-tenant model.
-/// @notice Two lenders share one quote; one lender runs two markets, so her pool spans both; a stranger routes a loan between lenders.
-/// @notice The invariant handler drives no routed roll, so this sequence is the first to hold the identity across one.
+/// @notice Two lenders share one quote; one lender runs two markets, so her pool spans both; a borrower moves its loan between lenders.
+/// @notice The invariant handler drives no migration between two lenders' markets, so this sequence holds the identity across one.
 /// @dev After every step: hub quote == pools(resting + owed) + markets(revenue + quoteOwed) + loans(feeEscrow), and pool legs match markets.
 contract AceP7PooledIdentityTest is WarpClock {
     Ace internal ace;
@@ -24,7 +25,7 @@ contract AceP7PooledIdentityTest is WarpClock {
     MockERC20 internal coll;
     bytes32 internal h1; // alice's first market
     bytes32 internal h2; // alice's second market, same quote: her pool spans both
-    bytes32 internal d; // mallory's market, the routing destination
+    bytes32 internal d; // mallory's market, the migration's destination
 
     address internal alice = address(0xA11CE);
     address internal mallory = address(0xBAD);
@@ -37,7 +38,7 @@ contract AceP7PooledIdentityTest is WarpClock {
         usdc = new MockERC20("USD Coin", "USDC", 6);
         coll = new MockERC20("Collateral", "COLL", 18);
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(coll));
-        p.record = address(new MockPersistenceRecord(address(usdc), address(coll))); // one record for all three: arming needs one, routing an equal one
+        p.record = address(new MockPersistenceRecord(address(usdc), address(coll))); // one record for all three markets
         AceFixtures.Deployment memory dep = AceFixtures.deploy(p);
         (ace, pm, read, h1) = (dep.ace, dep.positionManager, dep.read, dep.id);
         p.minCoverageWad = 1.5e18;
@@ -102,23 +103,24 @@ contract AceP7PooledIdentityTest is WarpClock {
         assertEq(coll.balanceOf(address(pm)), ledger, string.concat(step, ": the pot holds exactly the ledger"));
     }
 
-    function test_TheBooksHoldAcrossPoolingRoutingSettlementAndEveryExit() public {
+    /// @notice The books hold across pooling, the borrower's own migration between two lenders, settlement and every exit.
+    /// @dev Keeper routing is deleted, so the move between lenders is the borrower's own `refinanceTo`.
+    function test_TheBooksHoldAcrossPoolingMigrationSettlementAndEveryExit() public {
         _assertBooks("genesis");
         uint256 a = _open(h1, b1, 1000e18, 100e6);
-        uint64 tenor = read.loan(a).tenor; // read before the prank: an argument's own call would consume it
-        vm.prank(b1);
-        ace.setAutoRefinance(a, tenor, 2000, 100);
+        uint64 tenor = read.loan(a).tenor;
         uint256 b = _open(h2, b2, 500e18, 50e6);
         _assertBooks("two opens across alice's two markets");
         _repay(b2, b, 20e6);
         _assertBooks("partial repay");
 
-        uint64 w = MarketInit.autoRefinanceWindow(ace.idToMarketParams(h1).minTenor);
-        _warpTo(uint256(read.loan(a).expiry) - w / 4);
-        vm.prank(mallory);
-        uint256 a2 = ace.refinanceByPolicyTo(a, d);
+        _warpTo(uint256(read.loan(a).expiry) - 30 minutes); // the borrower moves late in the term, before expiry
+        MarketParams memory dp = ace.idToMarketParams(d);
+        uint256 p2 = RefinanceMath.principalForOwed(read.debtOf(a), tenor, dp.baseBps, dp.minTenor); // the draw that retires the old debt
+        vm.prank(b1);
+        uint256 a2 = ace.refinanceTo(MigrateArgs(a, d, p2, tenor, OpenBounds(0, 0, 0), 0, address(0)));
         assertEq(ace.loanMarket(a2), d, "fixture: the successor sits in the other lender's market");
-        _assertBooks("routed roll between two lenders");
+        _assertBooks("the borrower's own migration between two lenders");
 
         uint256 owedA = ace.lenderOwed(alice, address(usdc));
         assertGt(owedA, 0, "fixture: alice has pooled credit a stranger might reach for");

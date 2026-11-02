@@ -66,7 +66,7 @@ contract AceCoverageHandler is WarpClock, DeleverageCrank {
     uint256 public dustRepays; // repays that landed the debt inside the coverage-thin window
     uint256 public lineWithdrawals; // withdrawals driven off the lens that actually moved units
     uint256 public deleveragesDone; // decline-channel cranks that sold units
-    uint256 public settlements; // expiry folds that closed a loan
+    uint256 public settlements; // `forceClose` calls at expiry that closed a loan
     uint256 public erodedOnTheLine; // deleverages run on a loan already at or under its line: a REACH counter
     uint256 public cranksAttempted; // deleverage calls the handler put to the hub
     uint256 public cranksLanded; // of those, the ones the hub did not refuse
@@ -380,7 +380,7 @@ contract AceCoverageHandler is WarpClock, DeleverageCrank {
         _heal();
     }
 
-    /// @notice The expiry fold: the settlement that a thinned line would report as bad debt.
+    /// @notice `forceClose` at expiry: the settlement that a thinned line would report as bad debt.
     function forceClose(uint256 loanSeed) external {
         _bump("forceClose");
         if (_loanIds.length == 0) return;

@@ -12,11 +12,12 @@ import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {MockDeleverageKeeper} from "../mocks/MockDeleverageKeeper.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
+import {_extended} from "../utils/Extended.sol";
 
 /// @title AceS10ValueFlow
 /// @notice Audit run 2026-10-03-251533 phase 10: the value-moving shapes no solvency campaign drives, against every book.
 /// @notice Deleverage with a cut AND a partial-fill refund; a home cash-out refinance with a withdrawal leg; a zero-fresh refinance.
-/// @notice A recordless settlement's forfeited coverage, sold in part and redeemed in kind; an armed fold with its sliver and a floored credit.
+/// @notice A recordless settlement's forfeited coverage, sold in part and redeemed in kind; a cash extension at minPrincipal that draws nothing.
 /// @dev Four books after EVERY step: the quote equality, the custody ledgers A/B/C, LR-9 per market, and the pooled pair.
 /// @dev Per verb, also: the token that moved IS the variable the books recorded.
 /// @dev Two markets on one quote and one collateral, with DIFFERENT lenders, so a custody or pool leak has a neighbour to land in.
@@ -140,7 +141,7 @@ contract AceS10ValueFlowTest is WarpClock {
         assertEq(lent, claims, string.concat(at, ": pooled lent != the market's claims"));
     }
 
-    /// @dev Every address this file ever lets a close, a fold or a settlement credit units to.
+    /// @dev Every address this file ever lets a close or a settlement credit units to.
     function _unitsOwed(uint256 id) internal view returns (uint256 s) {
         address[6] memory who = [BORROWER, KEEPER, address(crank), L1, L2, BUYER];
         for (uint256 k; k < 6; k++) {
@@ -265,6 +266,7 @@ contract AceS10ValueFlowTest is WarpClock {
         uint256 hubBefore = usdc.balanceOf(address(ace));
         uint256 bUsdc = usdc.balanceOf(BORROWER);
         uint256 bColl = coll.balanceOf(BORROWER);
+        AceFixtures.installYesPolicy(ace, L1); // the recycle of the old debt rides the lender's yes
         vm.prank(BORROWER);
         uint256 nid = ace.refinanceTo(MigrateArgs(id, midRec, 4_000e6, 30 days, OpenBounds(0, 0, 0), 1_000e18, BORROWER));
         _books("refinanceTo with a withdrawal leg");
@@ -287,9 +289,10 @@ contract AceS10ValueFlowTest is WarpClock {
         (,, uint256 owedBefore) = read.lenderPools(L1, address(usdc));
         uint256 cashBefore = read.marketState(midRec).cash;
         uint256 bUsdc = usdc.balanceOf(BORROWER);
+        AceFixtures.installYesPolicy(ace, L1); // the whole-principal recycle rides the lender's yes
 
         vm.prank(BORROWER);
-        ace.refinance(id, newP, 7 days, OpenBounds(0, 0, 0));
+        ace.refinanceTo(MigrateArgs(id, midRec, newP, 7 days, OpenBounds(0, 0, 0), 0, address(0)));
         _books("zero-fresh refinance");
 
         assertEq(read.marketState(midRec).cash, cashBefore, "BOOKED: a draw recycling its whole principal takes no cash");
@@ -341,42 +344,32 @@ contract AceS10ValueFlowTest is WarpClock {
         assertEq(pm.retiredOf(id), 0, "every retired unit has a home");
     }
 
-    /* ====== 4. an armed fold: the sliver, and a floored successor's credit ====== */
+    /* ====== 4. a cash extension at minPrincipal: nothing drawn, nothing credited ====== */
 
-    /// @notice A loan repaid under minDebt rolls into a minDebt successor; the net out is CREDITED once and claims to the atom.
-    function test_ArmedFoldWithSliverAndFlooredCredit() public {
+    /// @notice A loan repaid to minPrincipal EXTENDS in place at its own debt, the fee paid in cash: nothing is drawn or credited.
+    function test_ExtensionAtMinDebtDrawsNothingAndCreditsNothing() public {
+        AceFixtures.installYesPolicy(ace, L1);
         uint256 id = _open(midRec, 1_000e18, 50e6, 0);
+        uint256 md = ace.idToMarketParams(read.loan(id).market).minPrincipal;
         vm.prank(BORROWER);
-        ace.repay(id, 45e6);
-        vm.prank(BORROWER);
-        ace.setAutoRefinance(id, 7 days, 0, 0);
-        _books("armed under minDebt");
+        ace.repay(id, 50e6 - md);
+        _books("repaid to minPrincipal");
 
-        _warpTo(read.loan(id).expiry);
+        uint64 x = read.loan(id).expiry;
+        _warpTo(uint256(x) - 1);
         uint256 hubBefore = usdc.balanceOf(address(ace));
-        uint256 treasuryBefore = usdc.balanceOf(AceFixtures.TREASURY);
-        vm.prank(KEEPER);
-        ace.forceClose(id);
-        _books("fold");
-        uint256 nid = read.loanCount();
-        assertEq(read.loan(nid).debt, 10e6, "premise: the successor floored at minDebt");
-
-        uint256 fee = LoanMath.originationFee(10e6, 7 days, 40, 7 days);
-        uint256 out = 10e6 - fee - 5e6;
-        assertEq(read.quoteOwedOf(id, BORROWER), out, "BOOKED: the net out is credited on the retired loan");
-        uint256 swept = usdc.balanceOf(AceFixtures.TREASURY) - treasuryBefore;
-        assertEq(hubBefore - usdc.balanceOf(address(ace)), swept, "MOVED: only the piggyback sweep left the hub; the roll moved no quote");
-        uint256 sliver = read.unitsOwedOf(id, KEEPER);
-        assertEq(read.loan(nid).collateralUnits + sliver, 1_000e18, "the successor carries the lot less the sliver");
-
-        uint256 bUsdc = usdc.balanceOf(BORROWER);
+        uint256 walletBefore = usdc.balanceOf(BORROWER);
         vm.prank(BORROWER);
-        ace.claimOwed(id, BORROWER);
-        assertEq(usdc.balanceOf(BORROWER) - bUsdc, out, "MOVED: the claim paid the credit exactly");
-        vm.prank(KEEPER);
-        ace.claimOwed(id, KEEPER);
-        assertEq(coll.balanceOf(KEEPER), sliver, "MOVED: the keeper got the sliver exactly");
-        _books("claims");
-        assertEq(pm.retiredOf(id), 0, "nothing retired is left on the rolled loan");
+        uint256 fee = ace.extend(id, 0, "");
+        _books("extend");
+        assertTrue(_extended(read, id, x), "premise: the extension landed in place");
+
+        assertEq(fee, LoanMath.originationFee(md, 7 days - 1, 40, 7 days), "the fee is charged on the loan's own debt, for the time added");
+        assertEq(read.loan(id).debt, md, "and the debt stays its own: the fee did not join it");
+        assertEq(read.quoteOwedOf(id, BORROWER), 0, "BOOKED: nothing is credited, since nothing was drawn");
+        assertEq(walletBefore - usdc.balanceOf(BORROWER), fee, "MOVED: the borrower paid the fee");
+        assertEq(usdc.balanceOf(address(ace)) - hubBefore, fee, "MOVED: and the hub took exactly it; no sweep rides an extension");
+        assertEq(read.loan(id).collateralUnits, 1_000e18, "the loan keeps its whole lot: an extension pays no sliver");
+        assertEq(pm.retiredOf(id), 0, "nothing retired on the extended loan");
     }
 }

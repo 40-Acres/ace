@@ -76,7 +76,7 @@ contract AceGenesisOffChannelFieldsTest is Test {
         p.baseBps = PocDeployConfig.BASE_BPS;
         p.minTenor = ProtocolPolicy.MIN_TENOR;
         p.maxTenor = ProtocolPolicy.MAX_TENOR;
-        p.minDebt = PocDeployConfig.MIN_DEBT;
+        p.minPrincipal = PocDeployConfig.MIN_PRINCIPAL;
         p.settleBountyBps = PocDeployConfig.SETTLE_BOUNTY_BPS;
         /// @dev Sole tenancy and the market's one price: genesis refuses a zero of either, and every row
         /// @dev below means to trip a DIFFERENT rail, so both are set to something unremarkable here.

@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {Constants} from "../../src/ace/hub/Constants.sol";
+import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PriceFrame} from "../utils/PriceFrame.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
@@ -292,7 +293,7 @@ contract AceDeleverageDenominatorBoundTest is Test {
         Sizing, // the sizing landed at or under both caps, so the hub was held to `_twin`
         Resized, // a cap bound on a market with a cut and the cut-free restore fit under it, so the hub was held to `_twin` at a zero cut
         Cap, // the settlement reserve bound, so the hub was held to `_securedBaseTwin`
-        MinDebt // the minDebt cap bound, so the hub was held to `_minDebtRoomTwin`
+        Close // the restore's net melt would leave dust, so the hub was held to `_uCloseTwin`
     }
 
     function _rand(uint256 seed, uint256 k) private pure returns (uint256) {
@@ -309,6 +310,7 @@ contract AceDeleverageDenominatorBoundTest is Test {
     function _anchorParams(uint256 seed) private view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(record);
+        p.minPrincipal = 20e6; // a 10e6 debt floor, the one the close arm's seeds were measured at
         p.minCoverageWad = _pick(seed, 1, Constants.MIN_COVERAGE_WAD, Constants.MAX_COVERAGE_WAD);
         p.deleverageFloorEpsBps = _pick(seed, 4, 1, Constants.MAX_DELEVERAGE_FLOOR_EPS_BPS);
         p.deleverageBandBps = _pick(seed, 20, Constants.MIN_DELEVERAGE_BAND_BPS, 9000);
@@ -369,33 +371,42 @@ contract AceDeleverageDenominatorBoundTest is Test {
         return req < sellable ? req : sellable;
     }
 
-    /// @dev The `minDebt` cap re-spelled: the largest sale whose proceeds, at the eps-discounted floor, leave the debt at or above `minDebt`.
-    /// @dev Nothing links this copy to `Deleverage`: re-read the shipped cap when it changes, because no tool reports the drift.
-    function _minDebtRoomTwin(uint256 loanId, MarketParams memory p, uint256 ps) private view returns (uint256) {
+    /// @dev The close's size re-spelled: the exact inverse of `_owed`'s ceil, the smallest sale whose bill at the floor covers the whole debt.
+    /// @dev Nothing links this copy to `Deleverage`: re-read the shipped close when it changes, because no tool reports the drift.
+    function _uCloseTwin(uint256 loanId, MarketParams memory p, uint256 ps) private view returns (uint256) {
         uint256 debt = read.loan(loanId).debt;
-        uint256 head = debt > p.minDebt ? debt - p.minDebt : 0;
-        return FullMath.mulDiv(head, 10000 * UNIT_SCALE, ps * (10000 - p.deleverageFloorEpsBps));
+        return FullMath.mulDiv(debt - 1, 10000 * UNIT_SCALE, ps * (10000 - p.deleverageFloorEpsBps)) + 1;
     }
 
-    /// @dev Both caps are re-derived here rather than assumed away: `securedBase` and the `minDebt` room, each AFTER sizing, as the hub reads them.
-    /// @dev The sizing sells with its cut only while `u < C` and it fits under both; otherwise the cut-free restore is capped by them.
+    /// @dev The close decision re-spelled: the restore's ceiled bill, less the cut when it charges, would leave the debt under its debt floor.
+    function _closesTwin(uint256 loanId, MarketParams memory p, uint256 ps, uint256 sold, bool charge) private view returns (bool) {
+        uint256 gross = FullMath.mulDivRoundingUp(ps, sold * (10000 - p.deleverageFloorEpsBps), 10000 * UNIT_SCALE);
+        uint256 net = gross - (charge ? FullMath.mulDiv(gross, p.deleverageProtocolBps, 10000) : 0);
+        return read.loan(loanId).debt < LoanMath.debtFloor(p.minPrincipal) + net;
+    }
+
+    /// @dev The cap is re-derived here rather than assumed away: `securedBase`, AFTER sizing, as the hub reads it.
+    /// @dev The sizing sells with its cut only while `u < C` and it fits under the cap; otherwise the cut-free restore is capped by it.
+    /// @dev Then the close decision, derived here too: a restore whose net melt would leave dust is replaced by `uClose`.
     /// @dev The arm rides out with the number because the caller cannot recover it: `min` erases which side won.
-    /// @dev A TIE keeps the earlier arm -- the figure returned is the same either way.
     function _predict(bytes32 mid, uint256 loanId, MarketParams memory p) private view returns (uint256 got, Arm arm) {
         uint256[3] memory cfg = [p.minCoverageWad, p.deleverageFloorEpsBps, p.deleverageProtocolBps];
         uint256 units = read.loan(loanId).collateralUnits;
         uint256 ps = record.windowMin();
         uint256 trig = read.triggerPrice(loanId);
         uint256 want = _twin(cfg, p.deleverageTargetBps, units, trig, ps);
-        uint256 base = _securedBaseTwin(mid, loanId, p, units);
-        uint256 room = _minDebtRoomTwin(loanId, p, ps);
-        uint256 cap = base < room ? base : room;
-        if (want < units && want <= cap) return (want, Arm.Sizing);
-        bool cut = cfg[2] > 0; // at a zero cut the re-size is the sizing itself, so only `_twin` at the market's cut is pinned
-        cfg[2] = 0;
-        got = _twin(cfg, p.deleverageTargetBps, units, trig, ps); // the cut-free restore
-        if (got <= cap) return (got, cut ? Arm.Resized : Arm.Sizing);
-        (got, arm) = base <= room ? (base, Arm.Cap) : (room, Arm.MinDebt);
+        if (want == 0) return (0, Arm.Sizing); // at or above target: the hub returns before it caps or decides
+        uint256 cap = _securedBaseTwin(mid, loanId, p, units);
+        bool charge = want < units && want <= cap;
+        if (charge) {
+            (got, arm) = (want, Arm.Sizing);
+        } else {
+            bool cut = cfg[2] > 0; // at a zero cut the re-size is the sizing itself, so only `_twin` at the market's cut is pinned
+            cfg[2] = 0;
+            got = _twin(cfg, p.deleverageTargetBps, units, trig, ps); // the cut-free restore
+            (got, arm) = got <= cap ? (got, cut ? Arm.Resized : Arm.Sizing) : (cap, Arm.Cap);
+        }
+        if (_closesTwin(loanId, p, ps, got, charge)) (got, arm) = (_uCloseTwin(loanId, p, ps), Arm.Close);
     }
 
     /// @dev ONE body, so the fuzz row and the anti-vacuity count can never exercise different code.
@@ -403,12 +414,17 @@ contract AceDeleverageDenominatorBoundTest is Test {
     /// @dev A sale of zero reports `Refused` -- both twins predict zero there, so the equality holds without touching either formula.
     function _anchorRun(uint256 seed) private returns (Arm) {
         MarketParams memory p = _anchorParams(seed);
+        return _anchorRunAt(p, _pick(seed, 24, 1.001e18, 1e18 + (10000 - p.deleverageBandBps) * 1e14 - 1e15));
+    }
+
+    /// @dev The anchor's body at a named config and record ratio `rhoWad = ps / trigger`, so a pinned row runs exactly what the sampler runs.
+    function _anchorRunAt(MarketParams memory p, uint256 rhoWad) private returns (Arm) {
         (bool ok, bytes memory ret) = address(ace).call(abi.encodeCall(Ace.createMarket, (p)));
         if (!ok) return Arm.Refused; // a config genesis refuses is `AceGenesisRails`' row, not this one
         bytes32 mid = abi.decode(ret, (bytes32));
         _seedLadder(mid);
         uint256 loanId = _openAtTheGate(mid, p.minCoverageWad);
-        _enterBand(loanId, p.deleverageBandBps, _pick(seed, 24, 1.001e18, 1e18 + (10000 - p.deleverageBandBps) * 1e14 - 1e15));
+        _enterBand(loanId, p.deleverageBandBps, rhoWad);
         (uint256 want, Arm arm) = _predict(mid, loanId, p);
         vm.prank(cranker);
         try keeper.crankDeleverage(loanId) returns (uint256 sold, uint256) {
@@ -420,7 +436,7 @@ contract AceDeleverageDenominatorBoundTest is Test {
     }
 
     /// @notice The anchor, SAMPLED: on an admitted crank the hub's units MUST be what the twin predicts, or this file checks a dead formula.
-    /// @notice The prediction is the sizing composed with the scope cap and the `minDebt` cap, re-sized cut-free whenever the sizing does not fit.
+    /// @notice The prediction is the sizing composed with the scope cap, re-sized cut-free whenever it does not fit, then the close decision.
     function testFuzz_TheTwinPredictsTheHubCrank(uint256 seed) public {
         _anchorRun(seed);
     }
@@ -432,31 +448,43 @@ contract AceDeleverageDenominatorBoundTest is Test {
         assertTrue(_anchorRun(3.5e18) == Arm.Cap, "the pinned counterexample no longer sells against the settlement reserve");
     }
 
+    /// @notice The cut-free re-size against the settlement reserve, pinned: the sampler reached that arm only through the deleted debt-floor room.
+    /// @dev Near the coverage line at k 1.4, eps 100, cut 2000, target 5000, theta ~0.757: `free` ~0.29 C fits under `securedBase` ~0.30 C.
+    /// @dev The cut-charging restore, ~0.42 C, does not fit, so the hub re-sizes cut-free; `_anchorRunAt` holds it to the twin.
+    function test_TheAnchorHoldsWhereTheCutFreeResizeFitsTheReserve() public {
+        MarketParams memory p = AceFixtures.marketParams(address(usdc), address(vault));
+        p.record = address(record);
+        p.minCoverageWad = 1.4e18;
+        (p.deleverageFloorEpsBps, p.deleverageBandBps, p.deleverageTargetBps) = (100, 3000, 5000);
+        (p.deleverageStopBps, p.deleverageProtocolBps) = (1000, 2000);
+        assertTrue(_anchorRunAt(p, 1.321e18) == Arm.Resized, "the pinned config no longer re-sizes cut-free under the settlement reserve");
+    }
+
     /// @notice A sweep whose every crank refuses asserts NOTHING, so the admitted cranks are counted directly and deterministically.
     /// @notice ALL FOUR arms are counted, because the prediction is four twins composed and one run can only ever pin one of them.
+    /// @notice The re-sized arm is counted and reported but not required here: the row above pins it on a named config.
     /// @dev Same body as the fuzz row, so a sampler that stops reaching an admitted crank fails here by name instead of going green.
     /// @dev 200 seeds because the reserve binds only near `MIN_COVERAGE_WAD`, which a uniform draw reaches about once in seventy.
     function test_TheHubAnchorReachesAnAdmittedCrank() public {
         uint256 sizingHits;
         uint256 resizedHits;
         uint256 capHits;
-        uint256 minDebtHits;
+        uint256 closeHits;
         for (uint256 s = 1; s <= 200; ++s) {
             uint256 snap = vm.snapshotState();
             Arm arm = _anchorRun(s);
             if (arm == Arm.Sizing) ++sizingHits;
             if (arm == Arm.Resized) ++resizedHits;
             if (arm == Arm.Cap) ++capHits;
-            if (arm == Arm.MinDebt) ++minDebtHits;
+            if (arm == Arm.Close) ++closeHits;
             vm.revertToState(snap);
         }
         emit log_named_uint("anchored cranks the sizing twin bound, of 200", sizingHits);
         emit log_named_uint("anchored cranks re-sized cut-free, of 200", resizedHits);
         emit log_named_uint("anchored cranks the scope cap bound, of 200", capHits);
-        emit log_named_uint("anchored cranks the minDebt cap bound, of 200", minDebtHits);
+        emit log_named_uint("anchored cranks that closed the loan, of 200", closeHits);
         assertGt(sizingHits, 2, "the hub anchor never reached a sizing-bound crank, so `_twin` is tied to nothing");
-        assertGt(resizedHits, 0, "the hub anchor never reached a re-sized crank, so the cut-free `_twin` is tied to nothing");
         assertGt(capHits, 0, "the hub anchor never reached a cap-bound crank, so `_securedBaseTwin` is tied to nothing");
-        assertGt(minDebtHits, 0, "the hub anchor never reached a minDebt-bound crank, so `_minDebtRoomTwin` is tied to nothing");
+        assertGt(closeHits, 0, "the hub anchor never reached a closing crank, so `_uCloseTwin` is tied to nothing");
     }
 }

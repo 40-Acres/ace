@@ -181,7 +181,7 @@ contract CuratorVaultExitTest is CuratorVaultBase {
         uint256 held = v.balanceOf(alice);
         uint256 cap = v.maxRedeem(alice);
         assertLt(cap, held, "idle cannot clear the whole holding, and maxRedeem says so");
-        assertEq(v.maxWithdraw(alice), idle0, "the cash bound is exitable cash, which with no request and no armed loan is all of idle");
+        assertEq(v.maxWithdraw(alice), idle0, "the cash bound is exitable cash, which with no request is all of idle");
 
         _finalize(loanId);
         _crankAll(v); // the crank brings what the hub owes the vault home into idle
@@ -261,7 +261,7 @@ contract CuratorVaultExitTest is CuratorVaultBase {
         ReadEveryMoveAsset hook = new ReadEveryMoveAsset();
         VaultConfig memory cfg = _cfg(0);
         cfg.asset = address(hook);
-        CuratorVault v = new CuratorVault(cfg, RIG_MIN_DEBT, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, new Listing[](0), "Curator", "cVLT");
+        CuratorVault v = new CuratorVault(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, new Listing[](0), "Curator", "cVLT");
         address[2] memory lps = [alice, bob];
         for (uint256 i; i < 2; i++) {
             hook.mint(lps[i], SEED);

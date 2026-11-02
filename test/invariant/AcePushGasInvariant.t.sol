@@ -6,7 +6,6 @@ import {VmSafe} from "forge-std/Vm.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Ace, PushGasShort} from "../../src/ace/hub/Ace.sol";
 import {Lender} from "../../src/ace/hub/Lender.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
 import {Loan, MarketParams, MarketState, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
@@ -19,7 +18,7 @@ import {DeleverageCrank} from "../utils/DeleverageCrank.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
 
 /// @title AcePushGasHandler
-/// @notice Drives the four terminal closes, the strict uncapped `sweepRevenue` and `deleverage` at a BOUNDED limit, on a quote it can turn hostile.
+/// @notice Drives `repay`, `finalize`, `forceClose`, the strict uncapped `sweepRevenue` and `deleverage` at a BOUNDED limit, on a quote it can turn hostile.
 /// @notice Each bounded action first bisects its own least completing limit in snapshots, then runs once for real near that edge.
 /// @dev The latch trips on a pool that moved without its push or its fallback, a stamp without a sweep event, a refusal after the call,
 /// @dev or an outcome that is not monotone in the limit. The support verbs share ONE selector so the bounded actions dominate the draw.
@@ -49,7 +48,6 @@ contract AcePushGasHandler is WarpClock, DeleverageCrank {
     uint8 internal constant REPAY = 0;
     uint8 internal constant FINALIZE = 1;
     uint8 internal constant FORCE = 2;
-    uint8 internal constant SETTLE = 3;
 
     uint256[] internal _loans;
     uint8 public mode; // 0 honest, 1 every transfer burns, 2 every transfer refuses, 3 only the treasury's transfer burns
@@ -129,10 +127,6 @@ contract AcePushGasHandler is WarpClock, DeleverageCrank {
 
     function closeForce(uint256 loanSeed, uint256 gasSeed) external {
         _door(FORCE, loanSeed, gasSeed);
-    }
-
-    function closeSettle(uint256 loanSeed, uint256 gasSeed) external {
-        _door(SETTLE, loanSeed, gasSeed);
     }
 
     /// @notice The strict standalone sweep at a bounded limit: it sweeps, returns early, or reverts; it has no fallback and no gate.
@@ -219,19 +213,14 @@ contract AcePushGasHandler is WarpClock, DeleverageCrank {
             record.setBelow(true);
             return (KEEPER, abi.encodeCall(Ace.finalize, (id)));
         }
-        if (door == FORCE) {
-            _warpAtLeastTo(uint256(l.expiry) + 1);
-            return (KEEPER, abi.encodeCall(Ace.forceClose, (id)));
-        }
-        _warpAtLeastTo(uint256(l.expiry) + MarketInit.autoRefinanceWindow(l.tenor) + 1);
-        return (KEEPER, abi.encodeCall(Ace.settleExpired, (id)));
+        _warpAtLeastTo(uint256(l.expiry) + 1);
+        return (KEEPER, abi.encodeCall(Ace.forceClose, (id)));
     }
 
     function _doorTag(uint8 door) internal pure returns (string memory) {
         if (door == REPAY) return "door.repay";
         if (door == FINALIZE) return "door.finalize";
-        if (door == FORCE) return "door.forceClose";
-        return "door.settleExpired";
+        return "door.forceClose";
     }
 
     /* ---- the judges: each latches its first violation ---- */
@@ -498,14 +487,13 @@ contract AcePushGasInvariantTest is WarpClock {
         ace.deposit(mid, DEPOSIT);
         vm.stopPrank();
         handler = new AcePushGasHandler(ace, pm, read, usdc, coll, record, mid);
-        bytes4[] memory sel = new bytes4[](7);
+        bytes4[] memory sel = new bytes4[](6);
         sel[0] = AcePushGasHandler.step.selector;
         sel[1] = AcePushGasHandler.closeRepay.selector;
         sel[2] = AcePushGasHandler.closeFinalize.selector;
         sel[3] = AcePushGasHandler.closeForce.selector;
-        sel[4] = AcePushGasHandler.closeSettle.selector;
-        sel[5] = AcePushGasHandler.sweepBounded.selector;
-        sel[6] = AcePushGasHandler.deleverageBounded.selector;
+        sel[4] = AcePushGasHandler.sweepBounded.selector;
+        sel[5] = AcePushGasHandler.deleverageBounded.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: sel}));
         targetContract(address(handler));
     }
@@ -538,22 +526,21 @@ contract AcePushGasInvariantTest is WarpClock {
                 handler.closeRepay(s, gasSeed);
                 handler.closeFinalize(s, gasSeed);
                 handler.closeForce(s, gasSeed);
-                handler.closeSettle(s, gasSeed);
                 handler.sweepBounded(gasSeed);
                 handler.deleverageBounded(gasSeed);
                 handler.step(s, gasSeed);
             }
         }
-        assertEq(handler.tally("door.calls"), 48, "a door call did not register");
+        assertEq(handler.tally("door.calls"), 36, "a door call did not register");
         assertGt(handler.tally("door.landed"), 0, "no bounded close landed");
         assertGt(handler.tally("lev.landed"), 0, "no bounded crank landed");
         assertEq(handler.violations(), 0, handler.violation());
     }
 
     /// @notice The per-verb tally, and the anti-vacuity guard: in EVERY run a bounded terminal close was driven and completed.
-    /// @dev Four of seven selectors are doors and each lands from its least limit up, so a run with no landing is not a seed's bad luck.
+    /// @dev Three of six selectors are doors and each lands from its least limit up, so a run with no landing is not a seed's bad luck.
     function afterInvariant() public view {
-        string[27] memory tags = [
+        string[26] memory tags = [
             "step.open",
             "step.repayPartial",
             "step.collect",
@@ -563,7 +550,6 @@ contract AcePushGasInvariantTest is WarpClock {
             "door.repay",
             "door.finalize",
             "door.forceClose",
-            "door.settleExpired",
             "door.refused",
             "door.landed",
             "door.short",

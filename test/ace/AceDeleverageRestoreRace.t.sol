@@ -6,8 +6,10 @@ import {Ace} from "../../src/ace/hub/Ace.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {Constants} from "../../src/ace/hub/Constants.sol";
+import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {NotInBand} from "../../src/ace/hub/Deleverage.sol";
+import {PocDeployConfig} from "../../src/config/Defaults.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockWindowedRecord} from "../mocks/MockWindowedRecord.sol";
@@ -40,8 +42,8 @@ import {WarpClock} from "../utils/WarpClock.sol";
 /// @dev At that rate the smallest headroom that holds is `h = 0.24`, clamped and unclamped alike.
 /// @dev One rung under it the floor headroom `h = 0.03` already holds, on a flat book and a spread book both.
 /// @dev SO THERE IS NO `h_min` A COUPLING RAIL COULD BUY: below the breaking rate nothing needs buying.
-/// @dev ALL OF THAT IS THE SIZING GEOMETRY, measured at a two-atom `minDebt` so the no-flip cap never ends a race.
-/// @dev A race near the breaking rate melts the debt under one USDC, so at a real floor the CAP binds first: at 100 USDC the break is 5%.
+/// @dev ALL OF THAT IS THE SIZING GEOMETRY, measured at a one-atom debt floor (`minPrincipal` 2) so no race ends in a close.
+/// @dev A race near the breaking rate melts the debt under one USDC, so at a real floor the CLOSE ends it first: at 100 USDC the break is 30%.
 /// @dev WHY A CLOSED FORM GETS THIS WRONG: it charges the clamp one crank per window and the protocol does not.
 /// @dev One window of persistence admits every crank while the loan is in band, and an under-restoring crank leaves it there.
 /// @dev `test_AClampedCrankDoesNotConsumeItsWindow` pins that, and it took the breaking rate from 6% to 12%.
@@ -50,10 +52,10 @@ import {WarpClock} from "../utils/WarpClock.sol";
 /// @dev WHAT THE RESERVE DOES COST IS GAS, NOT SAFETY: splitting one sale into many charges gas per crank.
 /// @dev The units sold and the keeper's `eps` take per unit are unchanged, so only the crank count grows.
 /// @dev The keeper-economics rows, all at the genesis-floor `k`, measure 7 to 9 cranks against 1, and about 8x the gas per quote retired.
-/// @dev At that `k` on a `MIN_DEBT` loan the clamped restore stops paying its own gas.
+/// @dev At that `k` on a loan near the shipped debt floor the clamped restore stops paying its own gas.
 /// @dev So the liveness question and the incentive question have OPPOSITE answers, and both are measured here.
-/// @dev At the shipped `k = 1.4`, floor lifted, the clamp costs at most one extra crank on a `MIN_DEBT` loan and pays: `AceReserveClampRemeasure`.
-/// @dev At the shipped `MIN_DEBT` itself the #674 cap ends that loan's sale first, before the reserve binds; that remeasure pins it too.
+/// @dev At the shipped `k = 1.4`, floor lifted, the clamp costs at most one extra crank on that loan and pays: `AceReserveClampRemeasure`.
+/// @dev At the shipped debt floor itself the crank closes that loan first, before the reserve binds; that remeasure pins it too.
 /// @dev THE GAS ROWS ASSERT A CEILING, NOT A BAND, because the figure is profile-dependent: via-IR optimizes
 /// @dev every one of them ~4% cheaper than legacy, so a two-sided band tuned on one profile fails on the other.
 /// @dev Only the upward direction was ever the regression, and each ceiling IS its old band's upper edge, so
@@ -81,7 +83,7 @@ contract AceDeleverageRestoreRaceTest is WarpClock, DeleverageCrank {
     uint256 internal constant LOT = 1_500e6; // per tick, so the ladder is never the binding constraint
     uint256 internal constant POSITION = 10_530e18; // collateral units; coverage is what caps the draw
     uint256 internal position = POSITION; // the position this scenario opens with; a small-loan row shrinks it
-    uint256 internal raceMinDebt = 2; // the least genesis admits here, so the minDebt cap never ends a race; the cost row raises it
+    uint256 internal raceFloor = 1; // the debt floor; `minPrincipal` is twice it, 2 the least genesis admits, so no race ends in a close
     uint256 internal constant SEED_PRICE_WAD = 4e18; // above every seeded tick, so the draw cap admits the whole ladder
     uint256 internal parT; // this pair's par tick on THIS suite's spacing; the seeded ladder walks down from it
     uint256 internal constant STEPS = 40; // decline windows per race: 20 hours, well inside the tenor
@@ -140,7 +142,7 @@ contract AceDeleverageRestoreRaceTest is WarpClock, DeleverageCrank {
         p.record = address(record);
         p.minCoverageWad = d.k;
         p.settleBountyBps = d.b;
-        p.minDebt = raceMinDebt;
+        p.minPrincipal = 2 * raceFloor;
         p.deleverageFloorEpsBps = d.eps;
         p.deleverageProtocolBps = d.cut;
         p.deleverageBandBps = d.band;
@@ -471,24 +473,23 @@ contract AceDeleverageRestoreRaceTest is WarpClock, DeleverageCrank {
         assertEq(_rateSweep(_poc(0), 1, 0.045e18), 1200, "the PoC floor's measured breaking decline, bps per window");
     }
 
-    /// @notice THE `minDebt` CAP'S MEASURED COST: at a 100 USDC floor the PoC floor's breaking decline falls from 12% to 5% per window.
-    /// @notice Once a declining loan's debt reaches `minDebt` the channel sells nothing more, so the loan crosses its stop and settles.
-    /// @dev The draw is ~10,029 USDC, so the floor is ~1% of it; a race retires ~99% of the debt at 4% per window (debt left ~1.07%).
-    /// @dev The 5% leg is re-run at the two-atom floor the rows above use, where it survives: the cap, not the geometry, is what lost it.
-    /// @dev The accepted cost of the no-flip rule: the stranded tail de-risks by title transfer at `finalize`, never as lender bad debt.
-    function test_TheMinDebtCapLowersTheBreakingDecline_AtAHundredUsdcFloor() public {
+    /// @notice AT A 100 USDC FLOOR THE DECLINE ENDS IN A CLOSE: once a restore would leave the debt under the debt floor, the crank sells the whole debt.
+    /// @notice So the floor no longer strands the tail on the stop, and the PoC floor's breaking decline is measured at this floor too.
+    /// @dev The draw is ~10,029 USDC, so the floor is ~1% of it; at 5% per window the race retires the loan before it reaches the stop.
+    /// @dev Measured: every ladder rate through 2000 bps ends in a close, and 3000 is the first to lose, above the one-atom floor's 1200.
+    function test_AtAHundredUsdcFloor_TheDeclineEndsInAClose() public {
         Dials memory d = _poc(0);
         d.k = 1e18 + d.b * 1e14 + 0.045e18;
-        raceMinDebt = 100e6;
-        Race memory holds = _race(d, 400, STEPS, 1);
-        assertFalse(holds.lostChannel, "at a 100 USDC floor a 4% fall per window still holds");
-        Race memory loses = _race(d, 500, STEPS, 1);
-        assertTrue(loses.lostChannel, "and a 5% fall per window loses the channel");
-        assertEq(loses.debtEnd, 100e6, "with the debt parked exactly on the floor: the cap stopped the restore");
-        raceMinDebt = 2;
-        Race memory control = _race(d, 500, STEPS, 1);
-        assertFalse(control.lostChannel, "the same 5% race at a two-atom floor holds, so the floor is the whole difference");
+        raceFloor = 100e6;
+        Race memory r = _race(d, 500, STEPS, 1);
+        assertFalse(r.lostChannel, "at a 100 USDC floor a 5% fall per window no longer loses the channel");
+        assertGt(read.loan(r.loanId).closedAt, 0, "the decline ended in a close");
+        assertEq(r.debtEnd, 0, "retiring the whole debt, where the cap used to park it on the floor");
+        assertEq(_rateSweep(d, 1, 0.045e18), BREAK_AT_A_HUNDRED_USDC, "the measured breaking decline at a 100 USDC floor, bps per window");
+        raceFloor = 1;
     }
+
+    uint256 internal constant BREAK_AT_A_HUNDRED_USDC = 3000; // the first losing rate in the ladder at a 100 USDC floor, bps per window
 
     /// @notice THE PROTOCOL CUT DOES NOT MOVE THIS RACE EITHER, and the reason is structural rather than numeric.
     /// @notice A reserve-capped crank re-sizes cut-free with `charge` false, and `_meltAll` gates the cut on `charge`.
@@ -663,7 +664,7 @@ contract AceDeleverageRestoreRaceTest is WarpClock, DeleverageCrank {
     /// @dev fails then, and it is the row to keep green-sensitive if this one is ever re-tuned.
     function test_KeeperEconomics_Corner_GasPerQuoteRetired() public {
         uint256 g = _gasPerQuote(_restoreFromDeepestFill(_corner(Constants.MIN_COVERAGE_WAD), 1, 100));
-        assertLt(g, 155, "gas per quote of debt retired"); // legacy 149, IR 143; WAS 157 before the tick walk went
+        assertLt(g, 160, "gas per quote of debt retired"); // 155 measured with a per-crank dues read, since deleted; WAS 157 before the tick walk went
     }
 
     /// @notice And the revenue side: the keeper's take as bps of the debt it retired.
@@ -676,7 +677,7 @@ contract AceDeleverageRestoreRaceTest is WarpClock, DeleverageCrank {
     }
 
     function test_KeeperEconomics_Poc_GasPerQuoteRetired() public {
-        assertLt(_gasPerQuote(_restoreFromDeepestFill(_poc(Constants.MIN_COVERAGE_WAD), 1, 100)), 137, "gas per quote of debt retired"); // legacy 131, IR 125
+        assertLt(_gasPerQuote(_restoreFromDeepestFill(_poc(Constants.MIN_COVERAGE_WAD), 1, 100)), 140, "gas per quote of debt retired"); // legacy 137, IR 130
     }
 
     function test_KeeperEconomics_Poc_PayPerQuoteRetired() public {
@@ -686,21 +687,21 @@ contract AceDeleverageRestoreRaceTest is WarpClock, DeleverageCrank {
     /// @notice THE SMALLEST ADMISSIBLE LOAN, which is where the concern bites hardest.
     /// @notice Gas is charged PER CRANK and the debt retired per crank scales with the loan.
     /// @notice So gas per unit of work rises as the loan shrinks while the keeper's `eps` take per unit does not.
-    /// @dev The position is sized so the draw lands near `Defaults.MIN_DEBT`, which the rows above sit at ~2x.
+    /// @dev The position is sized so the draw lands near the shipped debt floor, half `MIN_PRINCIPAL`, which the rows above sit at ~2x.
     /// @dev This is the review's owed keeper-economics row, and it is the number to price a gas market against.
     function test_KeeperEconomics_Poc_MinDebtLoan_GasPerQuoteRetired() public {
         position = 5_450e18;
         Restore memory r = _restoreFromDeepestFill(_poc(Constants.MIN_COVERAGE_WAD), 1, 100);
         emit log_named_uint("  debt at open, quote wei", r.debtBefore);
-        assertLt(r.debtBefore, 6_000e6, "fixture: the loan must be near MIN_DEBT, not a multiple of it");
-        assertLt(_gasPerQuote(r), 265, "gas per quote of debt retired at the smallest admissible loan"); // legacy 254, IR 243; WAS 268
+        assertLt(r.debtBefore, 6_000e6, "fixture: the loan must be near the shipped debt floor, not a multiple of it");
+        assertLt(_gasPerQuote(r), 270, "gas per quote of debt retired at the smallest admissible loan"); // legacy 266, IR 252
     }
 
     uint256 internal constant GAS_PRICE_WEI = 30 gwei; // AN ASSUMPTION ABOUT THE WORLD, named so it can be argued with
     uint256 internal constant ETH_IN_QUOTE = 3_000e6; // quote wei per 1e18 wei of gas token, at the same assumption
 
     /// @notice THE FINDING, PINNED AS A DEFECT: at the genesis-floor `k` on the smallest admissible loan, the CLAMPED restore does not pay its gas.
-    /// @notice At the shipped `k = 1.4` it pays at the same debt and gas, floor lifted; at the shipped `MIN_DEBT` the #674 cap ends the sale first.
+    /// @notice At the shipped `k = 1.4` it pays at the same debt and gas, floor lifted; at the shipped debt floor the crank closes the loan instead.
     /// @notice Mutate the reserve away and the same restore clears it easily.
     /// @notice So the settlement reserve makes the keeper-incentive problem WORSE, and this row is where a later reader will find that.
     /// @dev The mechanism is not a smaller take: gas is charged PER CRANK while `eps` is charged per UNIT SOLD.
@@ -715,6 +716,76 @@ contract AceDeleverageRestoreRaceTest is WarpClock, DeleverageCrank {
         emit log_named_uint("  keeper pay, quote wei", r.pay);
         emit log_named_uint("  gas cost at the named assumption, quote wei", gasCost);
         assertLt(r.pay, gasCost, "DEFECT PIN: the clamped restore costs the keeper more gas than it earns");
+    }
+
+    /// @notice THE CLOSING CRANK'S KEEPER ECONOMICS at the shipped debt floor: one crank sells the whole debt's worth and closes the loan.
+    /// @notice Its gross is `eps / (1 - eps)` of the WHOLE debt, against one crank's gas with the close's books and the lender push in it.
+    /// @dev A loan just over the shipped floor, near its coverage line, at its own stop: the restore would leave dust, so it closes at once.
+    /// @dev Born at the shipped `MIN_PRINCIPAL` on twice the position, repaid to the floor plus 100 USDC, then withdrawn to the position.
+    /// @dev Gas is the hub's alone; the keeper's own route rides on top, and the decisions record adds it.
+    function test_KeeperEconomics_ClosingCrank_AtTheShippedDebtFloor() public {
+        position = 5_450e18;
+        uint256 floor = LoanMath.debtFloor(PocDeployConfig.MIN_PRINCIPAL);
+        raceFloor = floor;
+        _build(_poc(Constants.MIN_COVERAGE_WAD));
+        raceFloor = 1;
+        assertEq(ace.idToMarketParams(mid).minPrincipal, PocDeployConfig.MIN_PRINCIPAL, "PREMISE: the shipped minPrincipal");
+        _seed(1);
+        Restore memory r;
+        uint256 loanId = _openRepaidTo(floor + 100e6);
+        r.debtBefore = read.loan(loanId).debt;
+        uint256 ps = _stopLevel(read.triggerPrice(loanId), ace.idToMarketParams(mid).deleverageStopBps) + 1;
+        record.push(ps);
+        _warpBy(WINDOW + 1);
+        uint256 before = gasleft();
+        (uint256 sold,) = ace.deleverage(loanId, 0, "");
+        r.gas = before - gasleft();
+        r.cranks = read.loan(loanId).closedAt != 0 ? 1 : 0;
+        r.debtAfter = read.loan(loanId).debt;
+        r.pay = FullMath.mulDiv(sold, ps, unitScale) - lastQuoteOwed;
+        uint256 cost5 = (r.gas * 5 gwei * ETH_IN_QUOTE) / 1e18;
+        uint256 cost10 = (r.gas * 10 gwei * ETH_IN_QUOTE) / 1e18;
+        emit log_named_uint("  closing crank gas, hub only", r.gas);
+        emit log_named_uint("  debt at open, quote wei", r.debtBefore);
+        emit log_named_uint("  keeper gross, quote wei", r.pay);
+        emit log_named_uint("  hub gas cost at 5 gwei, quote wei", cost5);
+        emit log_named_uint("  hub gas cost at 10 gwei, quote wei", cost10);
+        assertEq(r.cranks, 1, "one crank closes the dust-bound loan");
+        assertEq(r.debtAfter, 0, "retiring the whole debt");
+        assertGt(r.debtBefore, floor, "PREMISE: the loan sits over the shipped debt floor");
+        assertApproxEqAbs(_payBps(r), 101, 1, "the keeper grosses eps / (1 - eps) of the whole debt");
+        uint256 restoreGas = _restoreCrankGas(floor + 100e6);
+        emit log_named_uint("  the same loan's restore crank gas at a one-atom floor", restoreGas);
+        emit log_named_uint("  what the close adds", r.gas > restoreGas ? r.gas - restoreGas : 0);
+    }
+
+    /// @dev A loan of `debt` on `position`: born at `minPrincipal` on twice the position, repaid to `debt`, then withdrawn to `position`.
+    function _openRepaidTo(uint256 debt) internal returns (uint256 loanId) {
+        uint256 mp = ace.idToMarketParams(mid).minPrincipal;
+        uint256 one = position;
+        position = 2 * one; // `debt >= mp / 2`, so twice the position covers `mp`
+        loanId = _open(mp);
+        position = one;
+        vm.startPrank(borrower);
+        usdc.approve(address(ace), mp - debt);
+        ace.repay(loanId, mp - debt);
+        ace.withdrawCollateral(loanId, one, borrower);
+        vm.stopPrank();
+        assertEq(read.loan(loanId).debt, debt, "PREMISE: the loan carries the row's debt");
+        assertEq(read.loan(loanId).collateralUnits, one, "PREMISE: on the row's position");
+    }
+
+    /// @dev The control: the same loan in a market whose floor is one atom, so the same crank restores; its hub gas.
+    function _restoreCrankGas(uint256 principal) internal returns (uint256 gas) {
+        _build(_poc(Constants.MIN_COVERAGE_WAD));
+        _seed(1);
+        uint256 loanId = _open(principal);
+        record.push(_stopLevel(read.triggerPrice(loanId), ace.idToMarketParams(mid).deleverageStopBps) + 1);
+        _warpBy(WINDOW + 1);
+        uint256 before = gasleft();
+        ace.deleverage(loanId, 0, "");
+        gas = before - gasleft();
+        assertEq(read.loan(loanId).closedAt, 0, "PREMISE: at a one-atom floor the same crank restores");
     }
 
     /* ========================= the two dial sets ========================= */

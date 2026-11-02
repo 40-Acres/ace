@@ -60,7 +60,7 @@ contract AceDeployCapTest is Test {
         p.baseBps = PocDeployConfig.BASE_BPS;
         p.minTenor = ProtocolPolicy.MIN_TENOR;
         p.maxTenor = ProtocolPolicy.MAX_TENOR;
-        p.minDebt = PocDeployConfig.MIN_DEBT;
+        p.minPrincipal = PocDeployConfig.MIN_PRINCIPAL;
         p.settleBountyBps = PocDeployConfig.SETTLE_BOUNTY_BPS;
         p.lender = address(this); // genesis refuses a zero lender, and this suite's subject is the gas, not tenancy
         p.price = PriceFrame.priceAt(quote, collateral, 0); // likewise a zero price: par is the cheapest thing to name
@@ -91,7 +91,7 @@ contract AceDeployCapTest is Test {
     function test_AceDeploy_UnderCap() public {
         PositionManager e = new PositionManager(vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1));
         uint256 g = gasleft();
-        ace = new Ace(AceFixtures.TREASURY, address(e), AceFixtures.PUSH_GAS);
+        ace = new Ace(AceFixtures.TREASURY, address(e), AceFixtures.PUSH_GAS, AceFixtures.POLICY_GAS);
         uint256 used = g - gasleft();
         emit log_named_uint("Ace deploy", used);
         assertLt(used, CAP, "Ace deploy under Base cap");

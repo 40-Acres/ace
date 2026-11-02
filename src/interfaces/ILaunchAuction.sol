@@ -132,6 +132,8 @@ interface IV4PositionManager {
 }
 
 /// @notice The auction factory's address oracle, as upstream declares it: the strategy's salt is hashed with its migration parameters.
+/// @notice Its fee controller: nonzero lets the auctions it makes take a protocol fee out of the raise.
 interface ICcaFactory {
     function getAddress(address token, uint256 amount, bytes calldata configData, bytes32 salt, address sender) external view returns (address);
+    function protocolFeeController() external view returns (address);
 }

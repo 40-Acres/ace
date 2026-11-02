@@ -101,7 +101,7 @@ contract AceCreditRoutingTest is WarpClock {
         p = AceFixtures.marketParams(address(wbtc), address(weth));
         p.record = address(recEB);
         p.baseBps = BASE_BPS;
-        p.minDebt = 1e4; // 0.0001 WBTC: the dust floor follows the 8dp quote
+        p.minPrincipal = 1e4; // 0.0001 WBTC: the dust floor follows the 8dp quote
         p.price = T_EB; // the rung this market funded at is its own price now
         p.minTenor = TEN7;
         p.maxTenor = TEN30;

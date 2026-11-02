@@ -139,8 +139,8 @@ contract AceAllInFeeRoundingTest is Test {
         if (fee != 0) assertLt((fee - 1) * den, num, "and it overshot: a smaller integer already cleared the ratio");
     }
 
-    /// @notice The all-in is monotone in the PRINCIPAL, which is what lets the minDebt floor raise a draw safely.
-    /// @dev `derivedPrincipal` floors at `minDebt` without re-checking the inequality, and this is why it may.
+    /// @notice The all-in is monotone in the PRINCIPAL, which is what lets the minPrincipal floor raise a draw safely.
+    /// @dev `derivedPrincipal` floors at `minPrincipal` without re-checking the inequality, and this is why it may.
     function testFuzz_TheAllInIsMonotoneInThePrincipal(uint64 minTenorSeed, uint256 baseBpsSeed, uint64 tenorSeed, uint256 pSeed, uint256 liftSeed)
         public
         pure

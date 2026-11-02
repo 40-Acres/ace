@@ -24,7 +24,7 @@ library PocDeployConfig {
     uint64 internal constant PENDING_WINDOW = 4 hours; // W: grace added on top of persistence
     uint256 internal constant PERSISTENCE_WINDOW = 30 minutes; // P: distress window
     uint256 internal constant TRUNC_BPS = 500; // a windowed record's per-bucket price-move cap; no shipped record truncates
-    uint256 internal constant MIN_DEBT = 5000e6; // admission floor at BOTH doors and the least a crank leaves
+    uint256 internal constant MIN_PRINCIPAL = 10000e6; // smallest loan and lender lot; the live debt floor is half, 5000e6
     uint256 internal constant SETTLE_BOUNTY_BPS = 50; // in-kind sliver on finalize + forceClose
     uint256 internal constant PUSH_GAS = 100_000; // Ethereum's push budget, ~2.1x the worst stablecoin push; the hub deploy takes a per-chain value instead
     uint256 internal constant ORACLE_MAX_STALENESS = 25 hours; // a 24h feed heartbeat plus 1h: detects a DEAD feed; freshness is the deviation tier's job

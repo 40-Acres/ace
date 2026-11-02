@@ -29,10 +29,9 @@ import {AceReader} from "../utils/AceReader.sol";
 /// @dev The doctrinal claim under test is `the design record`, `shortfall-unreachable`:
 /// @dev "withdrawing to the line does not thin it, because at the line `units = k x need` exactly".
 /// @dev That identity is real-arithmetic; `need` is a sum of integer ceilings and is not `debt * S / floor`.
-/// @dev DUST DEBT IS REACHABLE WITHOUT ANY CODE CHANGE, BY PLAIN `repay`, and nothing else is needed.
-/// @dev `Types.sol` states why: `minDebt` is an ADMISSION quantum that floors what a DRAW issues.
-/// @dev It floors what a `deleverage` crank leaves, never what a repay (anyone's) leaves: no `src` site reads it on that path.
-/// @dev So a borrower walks a funded loan into the dust window with one public verb and no guard.
+/// @dev DUST DEBT IS REACHABLE ONLY UNDER A PERMISSIVE `minPrincipal`: no repay leaves a live loan under its market's floor.
+/// @dev `minPrincipal` is creator-chosen and bounded only by `originationFee(minPrincipal) < minPrincipal`, so a tiny floor is legal.
+/// @dev So every row repays to its debt with one public verb, on a market whose floor admits that debt.
 contract AceWithdrawCoverageDustTest is Test {
     /// @dev One deployed market, and the borrower repays its debt down to dust.
     struct Fx {
@@ -60,14 +59,14 @@ contract AceWithdrawCoverageDustTest is Test {
     /* ============================ the fixture ============================ */
 
     /// @dev A market whose collateral and quote decimals are the caller's, funded across all 32 ticks.
-    function _deploy(uint8 collDec, uint8 quoteDec, uint256 perTick, uint256 minDebt) internal returns (Fx memory f) {
+    function _deploy(uint8 collDec, uint8 quoteDec, uint256 perTick, uint256 minPrincipal) internal returns (Fx memory f) {
         f.quote = new MockERC20("Quote", "Q", quoteDec);
         f.coll = new MockERC20("Collateral", "C", collDec);
         MockPersistenceRecord record = new MockPersistenceRecord(address(f.quote), address(f.coll));
 
         MarketParams memory p = AceFixtures.marketParams(address(f.quote), address(f.coll));
         p.record = address(record);
-        p.minDebt = minDebt;
+        p.minPrincipal = minPrincipal;
 
         AceFixtures.Deployment memory d = AceFixtures.deploy(p);
         (f.ace, f.pm, f.read, f.id) = (d.ace, d.positionManager, d.read, d.id);
@@ -75,7 +74,7 @@ contract AceWithdrawCoverageDustTest is Test {
         f.unitScale = f.read.marketState(f.id).unitScale;
 
         /// @dev THE TOTAL IS KEPT AND THE PER-RUNG LEG IS GONE: `perTick` sits under the deposit floor, which
-        /// @dev is `minDebt` itself now rather than the fraction `ceil(minDebt / maxClaimTicks)` used to be.
+        /// @dev is `minPrincipal` itself now rather than the fraction `ceil(minPrincipal / maxClaimTicks)` used to be.
         uint256 total = perTick * TICKS;
         f.quote.mint(alice, total);
         vm.startPrank(alice);
@@ -96,8 +95,7 @@ contract AceWithdrawCoverageDustTest is Test {
         vm.stopPrank();
     }
 
-    /// @dev Walks the debt down to `target` with a plain `repay`: the only route to dust the hub has.
-    /// @dev No `minDebt` guard stands on this path, so the target may sit anywhere inside the window.
+    /// @dev Walks the debt down to `target` with a plain `repay`; the target must sit at or over the market's `minPrincipal`.
     function _repayTo(Fx memory f, uint256 loanId, uint256 target) internal {
         uint256 pay = f.read.loan(loanId).debt - target;
         f.quote.mint(borrower, pay);
@@ -147,38 +145,15 @@ contract AceWithdrawCoverageDustTest is Test {
 
     /* ============ the sequence that reproduced the defect ============ */
 
-    /// @notice THE PROPERTY: a loan withdrawn to the gate's own line still covers every claim it created.
-    /// @notice Reproduced on an 8-dec collateral against an 18-dec quote, with debt repaid to dust.
-    /// @notice This is the route the dust floor used to block, so it is the one the gate has to carry alone.
-    /// @dev No `src` edit and no `vm.store`: every step is a public verb any borrower can call today.
-    function test_WithdrawToTheLine_OnDustDebt_LeavesTheLoanCoveredAtSettlement() public {
-        Fx memory f = _deploy(8, 18, 1e18, 10e18);
-        uint256 loanId = _open(f, 1e18, 8e9);
-        assertEq(f.read.claimCount(f.id, loanId), 1, "fixture: the draw funded, and a draw funds exactly one claim");
-
-        _repayTo(f, loanId, 64e9); // dust: ~2e9 of claim left on each of the 32 ticks
-        assertEq(_liveTicks(f, loanId), 1, "fixture: the partial repay left the loan ONE live claim, which is all it ever holds");
-        assertLt(f.read.loan(loanId).debt, f.ace.idToMarketParams(f.id).minDebt, "fixture: debt is inside the dust window");
-
-        uint256 line = _withdrawToTheLine(f, loanId);
-        uint256 need = _need(f, loanId);
-
-        emit log_named_uint("n_eff", _liveTicks(f, loanId));
-        emit log_named_uint("debt", f.read.loan(loanId).debt);
-        emit log_named_uint("unitScale", f.unitScale);
-        emit log_named_uint("fundingFloor", f.read.fundingFloor(f.id, loanId));
-        emit log_named_uint("withdrawLine (gate line)", line);
-        emit log_named_uint("_collateralNeeded", need);
-
-        assertLe(need, line, "a loan on the withdrawal gate's line must still cover settlement");
-    }
+    /// @dev DELETED: `test_WithdrawToTheLine_OnDustDebt_LeavesTheLoanCoveredAtSettlement`, which repaid under a 10e18 floor.
+    /// @dev Its sibling `test_RepayRoute_OnAPermissiveMinDebt_StaysCoveredWithNoDustWindow` runs the same quantities at a legal debt.
 
     /// @notice The same sequence read off the CONTRACT, with no mirrored arithmetic anywhere.
     /// @notice A loan withdrawn only to the line, then force-closed at tenor, must record no bad debt.
     /// @dev The lens is only a MIRROR of the hub's own sum, so this asserts on `shortfallOf`, which `_settle` writes.
-    /// @dev It is the ground truth for the sibling above: if the mirror were wrong, this would still be right.
+    /// @dev It is the ground truth for the sibling below: if the mirror were wrong, this would still be right.
     function test_ForceClose_AfterWithdrawingToTheLine_RecordsNoShortfall() public {
-        Fx memory f = _deploy(8, 18, 1e18, 10e18);
+        Fx memory f = _deploy(8, 18, 1e18, 1e5); // a floor that admits the 64e9 debt
         uint256 loanId = _open(f, 1e18, 8e9);
 
         _repayTo(f, loanId, 64e9);
@@ -195,18 +170,17 @@ contract AceWithdrawCoverageDustTest is Test {
 
     /* ============== the same posture with NO dust window at all ============== */
 
-    /// @notice THE SEPARATION: the same debt on a market whose `minDebt` admits it is not dust at all.
-    /// @notice So the coverage property is a fact about the ARITHMETIC, not about the dust window.
-    /// @dev `minDebt` is creator-chosen and bounded only by `originationFee(minDebt) < minDebt`, so 1e5
+    /// @notice THE PROPERTY: a loan withdrawn to the gate's own line still covers every claim it created.
+    /// @notice On an 8-dec collateral against an 18-dec quote, at a debt whose `minPrincipal` admits it, so it is legal, not dust.
+    /// @dev `minPrincipal` is creator-chosen and bounded only by `originationFee(minPrincipal) < minPrincipal`, so 1e5
     /// @dev wei of an 18-dec quote is a legal floor. Unusual, but a permissionless creator may pick it.
-    /// @dev Every quantity the gate and settlement read is identical to the sibling above; only `minDebt` moves.
-    /// @dev No `src` site reads `minDebt` on the repay, gate or settlement paths, and this pins that.
+    /// @dev No `src` site reads `minPrincipal` on the gate or settlement paths; the repay reads it only to admit the debt.
     function test_RepayRoute_OnAPermissiveMinDebt_StaysCoveredWithNoDustWindow() public {
         Fx memory f = _deploy(8, 18, 1e18, 1e5);
         uint256 loanId = _open(f, 1e18, 8e9);
 
         _repayTo(f, loanId, 64e9);
-        assertGt(f.read.loan(loanId).debt, f.ace.idToMarketParams(f.id).minDebt, "fixture: this debt is legal, not dust");
+        assertGt(f.read.loan(loanId).debt, f.ace.idToMarketParams(f.id).minPrincipal, "fixture: this debt is legal, not dust");
         assertEq(_liveTicks(f, loanId), 1, "fixture: the partial repay left the loan ONE live claim, which is all it ever holds");
 
         uint256 line = _withdrawToTheLine(f, loanId);
@@ -220,7 +194,7 @@ contract AceWithdrawCoverageDustTest is Test {
     /// @dev wei buys almost no quote. The per-tick ceilings are then negligible beside the `k` margin.
     /// @dev Its job is to show the failure above is the DECIMAL/PRICE regime and not the fixture's plumbing.
     function test_Control_WideUnitScale_StaysCoveredOnTheSameSequence() public {
-        Fx memory f = _deploy(18, 6, 1e6, 10e6);
+        Fx memory f = _deploy(18, 6, 1e6, 1e4); // a floor that admits the 32_000 debt
         uint256 loanId = _open(f, 1e6, 8e19);
         assertEq(f.read.claimCount(f.id, loanId), 1, "fixture: the draw funded, and a draw funds exactly one claim");
 

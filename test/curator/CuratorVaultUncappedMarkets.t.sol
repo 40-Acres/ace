@@ -25,7 +25,7 @@ contract CuratorVaultUncappedMarketsTest is CuratorVaultBase {
     uint256 internal constant MANY = 40;
 
     /// @dev One door market per record print: the door prices at the row's buffered minimum, so a print 1% lower per step is a fresh price and id.
-    /// @dev `minDebt` is the vault's immutable now, so the print is the differentiator; each market carries a loan, since nothing rests.
+    /// @dev `minPrincipal` is the vault's immutable now, so the print is the differentiator; each market carries a loan, since nothing rests.
     function _marketAt(CuratorVault v, uint256 i) internal returns (bytes32) {
         MockPersistenceRecord r = MockPersistenceRecord(v.rowOf(address(collateral)).record);
         r.setMinPrice(AceFixtures.px(2e18 - i * 2e16, address(usdc), address(collateral)));

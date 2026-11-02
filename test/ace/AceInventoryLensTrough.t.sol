@@ -88,7 +88,7 @@ contract AceInventoryLensTroughTest is CuratorVaultBase, DeleverageCrank {
     /// @dev Genesis demands a record only on a live decline channel, so the band stays 0 here.
     function _recordlessMarket() internal returns (bytes32) {
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(collateral));
-        p.minDebt = 11e6; // its own id, without disturbing the rig's default market
+        p.minPrincipal = 11e6; // its own id, without disturbing the rig's default market
         return ace.createMarket(p);
     }
 

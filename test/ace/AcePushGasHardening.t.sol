@@ -8,7 +8,6 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Ace, PushGasOutOfRange} from "../../src/ace/hub/Ace.sol";
 import {Lender} from "../../src/ace/hub/Lender.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockHostileGasERC20} from "../mocks/MockHostileGasERC20.sol";
 import {BurnAllRecord} from "../mocks/UntrustedDependencyMocks.sol";
@@ -134,7 +133,7 @@ contract AcePushGasRestoreTest is PushGasProbeRig {
     /// @dev The pool at the push is read off an honest run's `Collected`, so nothing here restates the close's own credit arithmetic.
     /// @dev `LenderPushFailed` names that same amount, the lender receives nothing, and the push was attempted.
     function test_Fallback_RestoresThePoolExactly_AtTheLeastAdmittedLimitAndAtAFatOne() public {
-        for (uint8 door; door < 4; door++) {
+        for (uint8 door; door < DOORS; door++) {
             (uint256 id, address who, bytes memory data) = _door(door);
             Seen memory honest = _probe(who, data, HI, id);
             assertTrue(honest.r.collected, "premise: an honest close pays the lender");
@@ -162,7 +161,7 @@ contract AcePushGasRestoreTest is PushGasProbeRig {
     /// @dev `pushCalls == 0` pins the check AHEAD of the call: a post-check would also refuse, but only after the quote had run.
     /// @dev The CEI clear sits before the check, so the pool, the loan, the debt and the sweep's stamp and counter must all read as before.
     function test_PreCheck_AShortLimitNeverCallsTheQuoteAndMovesNothing() public {
-        for (uint8 door; door < 4; door++) {
+        for (uint8 door; door < DOORS; door++) {
             _shortRows(door);
         }
     }
@@ -267,10 +266,14 @@ contract AcePushGasInertSweepTest is PushGasProbeRig {
 /// @notice AN EMPTY POOL DEMANDS NOTHING, AND A FUNDED ONE DEMANDS EXACTLY THE PUBLISHED `PUSH_FLOOR`, on ONE close in two states.
 /// @dev The subject is a DUST loan whose close credits nothing (fee escrow rounds to zero), the recorded residual case.
 /// @dev State A: the lender collected, so the close pushes nothing. State B: a stranger's partial repay credited the pair.
-/// @dev The close's own work is the same in both, so their least limits differ by the floor, give or take the empty close's epilogue.
+/// @dev The close's own work is the same in both, so their least limits differ by the floor, short by what `EDGE_SLACK` absorbs.
+/// @dev A's least limit is bound by EIP-150's 1/64 retention at the `Settlement.forceClose` delegatecall, not by its total use; B's by the push gate.
+/// @dev So the gap falls short of the floor by that retention less B's work between the library's return and the gate.
+/// @dev About 320-360 gas of the gap is the keeper-sliver credit `forceClose` makes inside the delegatecall; the rest predates that credit.
+/// @dev The slack therefore caps the settle body: at 3,000 the row goes red near (3,000 + 501) x 63, about 220k gas of library work.
 contract AcePushGasDemandTest is PushGasProbeRig {
     uint256 internal constant DUST = 9_000; // atoms: at baseBps 1 and tenor == minTenor the fee is 1 and its lender escrow 0
-    uint256 internal constant EDGE_SLACK = 2_000; // the empty close's epilogue less the CEI clear: measured 988 under the floor
+    uint256 internal constant EDGE_SLACK = 3_000; // the hub's 1/64 kept at the Settlement delegatecall, less B's pre-gate work: measured 2,026 under the floor
     bytes32 internal dustMid;
 
     function _newQuote() internal override returns (address) {
@@ -285,7 +288,7 @@ contract AcePushGasDemandTest is PushGasProbeRig {
         p.minTenor = 7 days;
         p.maxTenor = TEN30;
         p.baseBps = 1;
-        p.minDebt = 2;
+        p.minPrincipal = 2;
         dustMid = ace.createMarket(p);
         IRigQuote(quote).mint(alice, DEPOSIT);
         vm.startPrank(alice);
@@ -301,12 +304,12 @@ contract AcePushGasDemandTest is PushGasProbeRig {
     function test_PushGate_AnEmptyPoolDemandsNothing_AndACreditedOneDemandsThePublishedFloor() public {
         uint256 other = _open(TEN30);
         uint256 dust = _openDust();
-        bytes memory data = abi.encodeCall(Ace.settleExpired, (dust));
+        bytes memory data = abi.encodeCall(Ace.forceClose, (dust));
         uint256 leastA = _leastEmpty(dust, data);
         uint256 leastB = _leastCredited(other, dust, data);
 
-        emit log_named_uint("dust settleExpired, empty pool, lands from   ", leastA);
-        emit log_named_uint("dust settleExpired, credited pool, lands from", leastB);
+        emit log_named_uint("dust forceClose, empty pool, lands from   ", leastA);
+        emit log_named_uint("dust forceClose, credited pool, lands from", leastB);
         emit log_named_uint("PUSH_FLOOR                                   ", ace.PUSH_FLOOR());
         uint256 d = leastB - leastA;
         assertGe(d + EDGE_SLACK, ace.PUSH_FLOOR(), "the push demands less than its published floor");
@@ -314,14 +317,14 @@ contract AcePushGasDemandTest is PushGasProbeRig {
         assertEq(_probe(keeper, data, leastB - 1, dust).r.out, SHORT, "one under the credited close's least limit is not PushGasShort");
     }
 
-    /// @dev The dust loan, warped past its roll window, with the lender's pool collected to zero.
+    /// @dev The dust loan, warped one second past its expiry, with the lender's pool collected to zero.
     function _openDust() internal returns (uint256 dust) {
         coll.mint(borrower, COLL);
         vm.startPrank(borrower);
         coll.approve(address(pm), COLL);
         dust = ace.open(dustMid, COLL, DUST, 7 days, borrower, OpenBounds(0, 0, 0));
         vm.stopPrank();
-        _warpTo(uint256(read.loan(dust).expiry) + MarketInit.autoRefinanceWindow(read.loan(dust).tenor) + 1);
+        _warpTo(uint256(read.loan(dust).expiry) + 1);
         vm.prank(alice);
         ace.collect(quote, alice);
         assertEq(_owed(), 0, "premise: the pool is empty");
@@ -457,7 +460,7 @@ contract AcePushGasAnyLimitTest is PushGasProbeRig {
     // One door, one quote shape (honest, burning, refusing) and one limit per run, each outcome checked against the money it moved.
     /// forge-config: default.fuzz.runs = 64
     function testFuzz_AnyLimit_ACloseAccountsForItsPushOrMovesNothing(uint8 doorSeed, uint8 shapeSeed, uint256 gSeed) public {
-        (uint256 id, address who, bytes memory data) = _door(doorSeed % 4);
+        (uint256 id, address who, bytes memory data) = _door(doorSeed % DOORS);
         uint8 shape = shapeSeed % 3;
         if (shape == 1) usdc.setBurnAll(true);
         if (shape == 2) usdc.setReverting(true);
@@ -515,7 +518,8 @@ contract AcePushGasRailDemandTest is PushGasDoorRig {
         return address(new MockERC20("USD Coin", "USDC", 6));
     }
 
-    /// @dev A fresh hub at `pushGas` with this rig's market, one loan past its roll window, its least settling limit and its floor.
+    /// @dev A fresh hub at `pushGas` with this rig's market, one loan in proven distress, its least `finalize` limit and its floor.
+    /// @dev `finalize` carries no sweep, so nothing but the lender push's floor differs between two hubs.
     function _leastSettleAt(uint256 pushGas) internal returns (uint256 g, uint256 floor) {
         uint256 snap = vm.snapshotState();
         MarketParams memory p = AceFixtures.marketParams(quote, address(coll));
@@ -526,7 +530,7 @@ contract AcePushGasRailDemandTest is PushGasDoorRig {
         AceFixtures.Deployment memory d = PushGasRig.deploy(p, treasury, pushGas);
         (ace, pm, read, mid) = (d.ace, d.positionManager, d.read, d.id);
         _lend(DEPOSIT);
-        (uint256 id, address who, bytes memory data) = _door(SETTLE);
+        (uint256 id, address who, bytes memory data) = _door(FINALIZE);
         g = _least(who, data, id, LO, HI, P_DONE);
         floor = ace.PUSH_FLOOR();
         vm.revertToState(snap);
@@ -552,10 +556,10 @@ contract AcePushGasRailDemandTest is PushGasDoorRig {
     }
 }
 
-/// @title AcePushGasFoldWindowPush
-/// @notice `AcePushGasFoldWindow.test_A2b`'s scenario, asking the one thing that row does not: did the close actually push the lender?
-/// @dev A2b asserts only that the fold settled at the tx cap; a close that pushed nothing would never have charged the lender floor it budgets.
-contract AcePushGasFoldWindowPushTest is WarpClock {
+/// @title AcePushGasBurningRecordPush
+/// @notice A record that burns every unit of gas it is handed cannot stop `forceClose`, which calls no record: at the tx cap it settles and pays.
+/// @dev The row asks whether the close actually pushed the lender, since a close that pushed nothing would never charge the floor it budgets.
+contract AcePushGasBurningRecordPushTest is WarpClock {
     MockERC20 internal usdc;
     MockERC20 internal coll;
     BurnAllRecord internal burnRecord;
@@ -577,8 +581,8 @@ contract AcePushGasFoldWindowPushTest is WarpClock {
         burnRecord = new BurnAllRecord(address(usdc), address(coll));
     }
 
-    /// @notice AT THE TX CAP, AT THE FIXTURE BUDGET AND AT THE RAIL'S CEILING, THE BURNING-RECORD FOLD SETTLES AND PAYS THE LENDER.
-    function test_A2b_TheFoldAtTheTxCapPushesTheLender() public {
+    /// @notice AT THE TX CAP, AT THE FIXTURE BUDGET AND AT THE RAIL'S CEILING, `forceClose` UNDER A BURNING RECORD SETTLES AND PAYS THE LENDER.
+    function test_ForceCloseUnderABurningRecordAtTheTxCapPushesTheLender() public {
         _assertPushes(PushGasRig.PUSH_GAS);
         _assertPushes(PushGasRig.MAX_PUSH_GAS);
     }
@@ -597,7 +601,6 @@ contract AcePushGasFoldWindowPushTest is WarpClock {
         vm.startPrank(borrower);
         coll.approve(address(d.positionManager), COLL);
         uint256 loanId = d.ace.open(d.id, COLL, PRINCIPAL, TEN7, borrower, OpenBounds(0, 0, 0));
-        d.ace.setAutoRefinance(loanId, TEN7, 0, 0);
         vm.stopPrank();
         _warpTo(d.read.loan(loanId).expiry + 1);
         burnRecord.setBurning(true);
@@ -606,12 +609,12 @@ contract AcePushGasFoldWindowPushTest is WarpClock {
         vm.prank(keeper);
         (bool ok,) = address(d.ace).call{gas: TX_GAS_CAP}(abi.encodeCall(Ace.forceClose, (loanId)));
         VmSafe.Log[] memory logs = vm.getRecordedLogs();
-        assertTrue(ok && d.read.loan(loanId).closedAt != 0, "premise: the fold settled at the tx cap");
+        assertTrue(ok && d.read.loan(loanId).closedAt != 0, "premise: forceClose settled at the tx cap");
         bool collected;
         for (uint256 i; i < logs.length; i++) {
             if (logs[i].emitter == address(d.ace) && logs[i].topics.length > 0 && logs[i].topics[0] == Lender.Collected.selector) collected = true;
         }
-        assertTrue(collected, "the fold settled without pushing: A2b never charged the lender floor it budgets");
+        assertTrue(collected, "forceClose settled without pushing, so it never charged the lender floor it budgets");
         assertGt(usdc.balanceOf(alice), had, "and the lender received nothing");
         burnRecord.setBurning(false);
         vm.revertToState(snap);

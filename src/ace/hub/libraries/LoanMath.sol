@@ -22,7 +22,7 @@ library LoanMath {
     /// @notice The borrower's ALL-IN origination cost: the lender's rate with ACE's share charged on top.
     /// @notice Priced for `tenor`, normalized against the market's SHORTEST term.
     /// @notice `baseBps` is the LENDER's rate; the borrower pays it plus the protocol share.
-    /// @dev ACE has no accrual, so duration is priced here explicitly, never off elapsed time.
+    /// @dev ACE has no accrual: duration is priced here explicitly, a term booked up front or the time an extension adds.
     /// @dev ONE ceil, on the FUSED product, and that single rounding is what bounds the fee by the principal.
     /// @dev Ceiling the lender leg and flooring ACE's on top instead would overshoot the principal by a wei.
     function originationFee(uint256 principal, uint64 tenor, uint256 baseBps, uint64 minTenor) internal pure returns (uint256) {
@@ -53,21 +53,17 @@ library LoanMath {
         return lenderCut(fee) - escrowCut(fee);
     }
 
-    /// @notice The smallest draw whose payout still clears `owed`; the origination fee's inverse.
-    /// @notice EXACT against `originationFee`: the derived draw's payout IS `owed`, never a wei over.
-    /// @dev Rounds UP: down leaves the continuation a wei short of the old debt and every migration reverts.
-    /// @dev The caller must hold `feeFundable`, or the denominator underflows.
-    function principalForOwed(uint256 owed, uint64 tenor, uint256 baseBps, uint64 minTenor) internal pure returns (uint256) {
-        uint256 d = 10000 * 10000 * uint256(minTenor);
-        return FullMath.mulDivRoundingUp(owed, d, d - baseBps * uint256(tenor) * (10000 + Constants.PROTOCOL_SHARE_BPS));
-    }
-
     /// @notice Whether a term's all-in fee stays inside `MAX_FEE_SHARE_BPS` of the draw it prices.
     /// @notice At maxTenor it bounds every shorter term too, because the fee is monotone in tenor.
-    /// @notice THE rail the payout subtraction and the inverse both rest on, so genesis checks it once.
+    /// @notice THE rail the payout subtraction rests on, so genesis checks it once.
     /// @dev It bounds the PRODUCT of rate and term multiple; neither dial alone can bound the fee.
-    /// @dev It implies `d - n > 0`, so `principalForOwed`'s no-underflow precondition holds by construction.
     function feeFundable(uint256 baseBps, uint64 tenor, uint64 minTenor) internal pure returns (bool) {
         return 10000 * baseBps * uint256(tenor) * (10000 + Constants.PROTOCOL_SHARE_BPS) <= Constants.MAX_FEE_SHARE_BPS * 10000 * 10000 * uint256(minTenor);
+    }
+
+    /// @notice The live debt floor: no repay leaves a live loan under it, and a crank that would closes the loan.
+    /// @dev Half the smallest loan, rounded DOWN, so a loan born at `minPrincipal` always holds at least twice it.
+    function debtFloor(uint256 minPrincipal) internal pure returns (uint256) {
+        return minPrincipal / 2;
     }
 }

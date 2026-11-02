@@ -27,7 +27,7 @@ contract CuratorVaultDrainGuardTest is CuratorVaultBase, ITokenReceiveHook {
         VaultConfig memory cfg = _cfg(0);
         cfg.asset = address(tok);
         cfg.guardian = address(this);
-        v = new CuratorVault(cfg, RIG_MIN_DEBT, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, new Listing[](0), "Hooked", "cHOOK");
+        v = new CuratorVault(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, new Listing[](0), "Hooked", "cHOOK");
         tok.mint(address(this), 10_000e6);
         tok.approve(address(v), type(uint256).max);
         tok.setHookTarget(address(this));

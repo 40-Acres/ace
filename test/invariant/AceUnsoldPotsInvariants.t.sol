@@ -9,7 +9,7 @@ import {BookedQuote} from "../utils/BookedQuote.sol";
 import {AceUnsoldPotsHandler} from "./AceUnsoldPotsHandler.sol";
 
 /// @title AceUnsoldPotsInvariants
-/// @notice THE UNSOLD-POT COUNT, WALKED: every settle door, every emptying verb, a roll and an empty-pot buy between them.
+/// @notice THE UNSOLD-POT COUNT, WALKED: every settle door, every emptying verb, a holder's extension and an empty-pot buy between them.
 /// @notice g. The pair's count EQUALS the loans whose pot holds units, counted by a ghost that reads each pot raw.
 /// @notice h. Every action moves the count by exactly the pots it filled minus the pots it emptied (the step law).
 /// @notice i. A buy at or over `AceInventoryLens.clearingBudget` always empties the pot.
@@ -26,16 +26,17 @@ contract AceUnsoldPotsInvariantsTest is StdInvariant, Test {
         handler = new AceUnsoldPotsHandler();
         AceLens lens = new AceLens(address(handler.ace()));
         handler.setInventoryLens(new AceInventoryLens(address(handler.ace()), address(lens)));
-        bytes4[] memory sel = new bytes4[](27);
+        bytes4[] memory sel = new bytes4[](26);
         sel[0] = AceUnsoldPotsHandler.tForceClose.selector;
         sel[1] = AceUnsoldPotsHandler.tForceClose.selector;
         sel[2] = AceUnsoldPotsHandler.tForceClose.selector;
         sel[3] = AceUnsoldPotsHandler.tFinalize.selector;
         sel[4] = AceUnsoldPotsHandler.tFinalize.selector;
         sel[5] = AceUnsoldPotsHandler.tFinalize.selector;
-        sel[6] = AceUnsoldPotsHandler.tSettleExpired.selector;
-        sel[7] = AceUnsoldPotsHandler.tSettleExpired.selector;
-        sel[8] = AceUnsoldPotsHandler.tSettleExpired.selector;
+        /// @dev The deleted unpaid backstop's three slots: `forceClose` is the one expiry door, so it keeps the settle third.
+        sel[6] = AceUnsoldPotsHandler.tForceClose.selector;
+        sel[7] = AceUnsoldPotsHandler.tForceClose.selector;
+        sel[8] = AceUnsoldPotsHandler.tForceClose.selector;
         sel[9] = AceUnsoldPotsHandler.tEmptyWhole.selector;
         sel[10] = AceUnsoldPotsHandler.tEmptyWhole.selector;
         sel[11] = AceUnsoldPotsHandler.tEmptyWhole.selector;
@@ -50,10 +51,9 @@ contract AceUnsoldPotsInvariantsTest is StdInvariant, Test {
         sel[20] = AceUnsoldPotsHandler.tBuyEmpty.selector;
         sel[21] = AceUnsoldPotsHandler.tBuyEmpty.selector;
         sel[22] = AceUnsoldPotsHandler.tRepay.selector;
-        sel[23] = AceUnsoldPotsHandler.tArmRoll.selector;
-        sel[24] = AceUnsoldPotsHandler.tWarp.selector;
-        sel[25] = AceUnsoldPotsHandler.tRollAtExpiry.selector;
-        sel[26] = AceUnsoldPotsHandler.tCollect.selector;
+        sel[23] = AceUnsoldPotsHandler.tWarp.selector;
+        sel[24] = AceUnsoldPotsHandler.tExtendBeforeExpiry.selector;
+        sel[25] = AceUnsoldPotsHandler.tCollect.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: sel}));
         targetContract(address(handler));
     }
@@ -147,21 +147,21 @@ contract AceUnsoldPotsInvariantsTest is StdInvariant, Test {
     function test_Coverage_EachVerbMovesTheCountByItsOwnPots() public {
         uint256 c0 = _count();
         assertEq(c0, 3, "PREMISE: the baseline leaves one unsold pot per market");
-        uint256 rolls = handler.rollsLanded();
-        handler.tRollAtExpiry(0);
-        assertEq(handler.rollsLanded(), rolls + 1, "PREMISE: the armed loan rolled into a successor rather than settling");
-        assertEq(_count(), c0, "a roll at expiry writes no pot, so the count stands");
+        uint256 extends = handler.extendsLanded();
+        handler.tExtendBeforeExpiry(0);
+        assertEq(handler.extendsLanded(), extends + 1, "PREMISE: the holder's cash extension in the term's last second landed in place");
+        assertEq(_count(), c0, "an extension writes no pot, so the count stands");
 
         handler.tFinalize(0);
         assertEq(handler.finalizesLanded(), 1, "PREMISE: finalize settled a live loan");
         assertEq(_count(), c0 + 1, "a distress settlement that leaves a pot counts one");
-        handler.tSettleExpired(0);
-        assertEq(handler.settleExpiredsLanded(), 1, "PREMISE: the backstop settled a live loan");
-        assertEq(_count(), c0 + 2, "the unpaid backstop's pot counts one");
         uint256 settles = handler.settlesLanded();
         handler.tForceClose(0);
-        assertEq(handler.settlesLanded(), settles + 1, "PREMISE: the paid expiry door settled a live loan");
-        assertEq(_count(), c0 + 3, "the paid expiry door's pot counts one");
+        assertEq(handler.settlesLanded(), settles + 1, "PREMISE: the expiry door settled a live loan");
+        assertEq(_count(), c0 + 2, "the expiry door's pot counts one");
+        handler.tForceClose(0);
+        assertEq(handler.settlesLanded(), settles + 2, "PREMISE: the expiry door settled a second live loan");
+        assertEq(_count(), c0 + 3, "and its pot counts one more");
 
         handler.tEmptyWhole(0, 0);
         assertEq(_count(), c0 + 2, "a buy at the exact clearing budget empties its pot and takes one off");
@@ -222,22 +222,22 @@ contract AceUnsoldPotsInvariantsTest is StdInvariant, Test {
     /// @dev Deterministic, so each verb's direction is pinned on no seed's luck; j asserts the same law after every fuzzed call.
     function test_Coverage_EachVerbMovesSettledByItsOwnFills() public {
         uint256 s0 = _settled();
-        uint256 rolls = handler.rollsLanded();
-        handler.tRollAtExpiry(0);
-        assertEq(handler.rollsLanded(), rolls + 1, "PREMISE: the armed loan rolled into a successor rather than settling");
-        assertEq(_settled(), s0, "a roll settles nothing");
+        uint256 extends = handler.extendsLanded();
+        handler.tExtendBeforeExpiry(0);
+        assertEq(handler.extendsLanded(), extends + 1, "PREMISE: the holder's cash extension in the term's last second landed in place");
+        assertEq(_settled(), s0, "an extension settles nothing");
 
         handler.tFinalize(0);
         assertEq(handler.finalizesLanded(), 1, "PREMISE: finalize settled a live loan");
         assertEq(_settled(), s0 + 1, "a distress settlement counts one");
-        handler.tSettleExpired(0);
-        assertEq(handler.settleExpiredsLanded(), 1, "PREMISE: the backstop settled a live loan");
-        assertEq(_settled(), s0 + 2, "the unpaid backstop counts one");
         uint256 settles = handler.settlesLanded();
         handler.tForceClose(0);
-        assertEq(handler.settlesLanded(), settles + 1, "PREMISE: the paid expiry door settled a live loan");
-        assertEq(handler.rollsLanded(), rolls + 1, "PREMISE: and did not roll it");
-        assertEq(_settled(), s0 + 3, "the paid expiry door counts one");
+        assertEq(handler.settlesLanded(), settles + 1, "PREMISE: the expiry door settled a live loan");
+        assertEq(_settled(), s0 + 2, "the expiry door counts one");
+        handler.tForceClose(0);
+        assertEq(handler.settlesLanded(), settles + 2, "PREMISE: the expiry door settled a second live loan");
+        assertEq(handler.extendsLanded(), extends + 1, "PREMISE: and extended neither");
+        assertEq(_settled(), s0 + 3, "and it counts one more");
 
         uint256 emptied = handler.potsEmptied();
         handler.tEmptyWhole(0, 0);
@@ -264,14 +264,13 @@ contract AceUnsoldPotsInvariantsTest is StdInvariant, Test {
         console2.log("count / ghost now     ", _count(), handler.nonEmptyPots());
         console2.log("forceClose calls      ", handler.callCount("forceClose"));
         console2.log("finalize calls/landed ", handler.callCount("finalize"), handler.finalizesLanded());
-        console2.log("settleExpired c/landed", handler.callCount("settleExpired"), handler.settleExpiredsLanded());
         console2.log("  settles landed, all ", handler.settlesLanded());
         console2.log("emptyWhole calls/buys ", handler.callCount("emptyWhole"), handler.clearingBuys());
         console2.log("redeems landed        ", handler.redeemsLanded());
         console2.log("buy calls / fills     ", handler.callCount("buy"), handler.fillsLanded());
         console2.log("empty-pot buys counted", handler.emptyPotBuys());
-        console2.log("rollAtExpiry calls    ", handler.callCount("rollAtExpiry"));
-        console2.log("arms / rolls landed   ", handler.armsLanded(), handler.rollsLanded());
+        console2.log("extendBeforeExpiry calls", handler.callCount("extendBeforeExpiry"));
+        console2.log("extends landed        ", handler.extendsLanded());
         console2.log("open calls / landed   ", handler.callCount("open"), handler.opensLanded());
         console2.log("repays landed         ", handler.repaysLanded());
         console2.log("isolated split moves  ", handler.isolatedMoves());

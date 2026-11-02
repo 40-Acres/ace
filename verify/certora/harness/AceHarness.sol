@@ -2,15 +2,15 @@
 pragma solidity 0.8.36;
 
 import {Ace} from "../../../src/ace/hub/Ace.sol";
-import {Loan, Market, Storage} from "../../../src/ace/hub/Types.sol";
-import {MarketInit} from "../../../src/ace/hub/MarketInit.sol";
+import {LenderUnresolved, Loan, Market, Storage} from "../../../src/ace/hub/Types.sol";
+import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
 
 /// @title AceHarness
 /// @notice The hub plus read-only views, so a spec reads namespaced storage through the hub's own accessors.
 /// @notice The prover does not resolve an ERC-7201 annotation on a FILE-LEVEL struct, which is where Types.sol keeps them.
 /// @notice It adds views and no state, so the layout is the hub's and every method under test is its own.
 contract AceHarness is Ace {
-    constructor(address treasury, address positionManager, uint256 pushGas) Ace(treasury, positionManager, pushGas) {}
+    constructor(address treasury, address positionManager, uint256 pushGas, uint256 policyGas) Ace(treasury, positionManager, pushGas, policyGas) {}
 
     /// @notice One market's protocol revenue pot.
     function protocolRevenueOf(bytes32 id) external view returns (uint256) {
@@ -27,10 +27,9 @@ contract AceHarness is Ace {
         return Storage.book().count;
     }
 
-    /// @notice The first instant the unpaid backstop admits a loan: `settleExpired`'s own window test.
-    function backstopOpensAt(uint256 loanId) external view returns (uint256) {
-        Loan storage L = Storage.book().loans[loanId];
-        return uint256(L.expiry) + MarketInit.autoRefinanceWindow(L.tenor);
+    /// @notice A loan's expiry: the first instant `forceClose` admits it.
+    function loanExpiryOf(uint256 loanId) external view returns (uint64) {
+        return Storage.book().loans[loanId].expiry;
     }
 
     /// @notice A loan's debt.
@@ -80,9 +79,19 @@ contract AceHarness is Ace {
         return Storage.markets()[id].claim[loanId];
     }
 
-    /// @notice The smallest debt a market issues, which genesis refuses at zero.
-    function marketMinDebtOf(bytes32 id) external view returns (uint256) {
-        return Storage.markets()[id].p.minDebt;
+    /// @notice The smallest loan a market opens, which genesis refuses under two.
+    function marketMinPrincipalOf(bytes32 id) external view returns (uint256) {
+        return Storage.markets()[id].p.minPrincipal;
+    }
+
+    /// @notice A market's live debt floor, half its `minPrincipal` rounded down, through the hub's own helper.
+    function marketDebtFloorOf(bytes32 id) external view returns (uint256) {
+        return LoanMath.debtFloor(Storage.markets()[id].p.minPrincipal);
+    }
+
+    /// @notice The principal a loan was born with, written once at the birth and never cleared.
+    function principalOfLoan(uint256 loanId) external view returns (uint256) {
+        return Storage.book().principalOf[loanId];
     }
 
     /// @notice The hash of a market's stored params, the preimage `createMarket` derives its id from.
@@ -105,9 +114,25 @@ contract AceHarness is Ace {
         return Storage.byCollateralOf(Storage.markets()[id].p).lent;
     }
 
-    /// @notice A loan's armed continuation tenor; zero is disarmed.
-    function autoTenorOf(uint256 loanId) external view returns (uint64) {
-        return Storage.book().autoPolicyOf[loanId].tenor;
+    /// @notice A market's lender's unsold units of that market's collateral, which a settlement leaving a pot raises by the pot.
+    function marketUnsoldUnitsOf(bytes32 id) external view returns (uint256) {
+        return Storage.byCollateralOf(Storage.markets()[id].p).unsoldUnits;
+    }
+
+    /// @notice A market's pair counts of unsold and settled pots, each of which a settlement leaving a pot raises by one.
+    function marketPotCountsOf(bytes32 id) external view returns (uint256 unsoldPots, uint256 settledPots) {
+        LenderUnresolved storage u = Storage.unresolvedOf(Storage.markets()[id].p);
+        return (u.unsoldPots, u.settledPots);
+    }
+
+    /// @notice When a market's protocol revenue was last swept, which the keeper piggyback adds its period to.
+    function marketLastSweptAtOf(bytes32 id) external view returns (uint64) {
+        return Storage.markets()[id].s.lastSweptAt;
+    }
+
+    /// @notice A market's keeper sliver rate, which every settlement prices off the debt.
+    function marketSettleBountyBpsOf(bytes32 id) external view returns (uint256) {
+        return Storage.markets()[id].p.settleBountyBps;
     }
 
     /// @notice A digest of everything one market holds, so "untouched" is one comparison.
@@ -141,6 +166,11 @@ contract AceHarness is Ace {
     /// @notice A market's quote token; zero for a market never created.
     function marketQuoteOf(bytes32 id) external view returns (address) {
         return Storage.markets()[id].p.quote;
+    }
+
+    /// @notice A market's one named lender, whose roll policy every extension of its loans asks.
+    function marketLenderOf(bytes32 id) external view returns (address) {
+        return Storage.markets()[id].p.lender;
     }
 
     /// @notice One claimant's quote claim on one loan, as a single word.

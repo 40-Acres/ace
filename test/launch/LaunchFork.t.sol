@@ -29,7 +29,6 @@ import {
     PoolParameters,
     PositionDefinition
 } from "../../src/interfaces/ILaunchAuction.sol";
-import {InitializerHook} from "../../vendor/launcher/InitializerHook.sol";
 import {VestingWallet} from "@openzeppelin/contracts/finance/VestingWallet.sol";
 import {LaunchLock, Leg} from "../../src/entities/launch/LaunchLock.sol";
 import {LaunchOpsBudget} from "../../src/entities/launch/LaunchOpsBudget.sol";
@@ -47,7 +46,7 @@ import {RunwaySalt} from "./RunwayMocks.sol";
 /// @notice The factory's shape as registered, the hook's gate through the strategy's own migration, the budget's settlement, refunds and fees.
 /// @notice Plus B5 and L4: the real auction against the lock.
 /// @dev Skipped cleanly when ALCHEMY_API_KEY is absent, as every fork suite here is.
-/// @dev The strategy's auction factory is NOT the one the auction repo's README lists, so these rows check BEHAVIOUR, not source.
+/// @dev The strategy's auction factory is continuous-clearing-auction v2.1.0's, but these rows check BEHAVIOUR, not source.
 contract LaunchForkTest is WarpClock {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
@@ -329,10 +328,12 @@ contract LaunchForkTest is WarpClock {
     // ---- the hook, through the deployed strategy ----
 
     /// @notice The hook the factory deployed carries the before-initialize and before-swap bits alone, admits the strategy, and names the factory.
+    /// @notice Outside a launch it authorizes no registration.
     function test_Fork_TheHookCarriesInitializeAndSwapAlone() public {
         if (!live) return vm.skip(true);
         assertEq(uint160(address(hook)) & Hooks.ALL_HOOK_MASK, Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG, "the address carries other bits");
-        assertEq(hook.authorized(), STRATEGY, "the hook admits another initializer");
+        assertEq(hook.STRATEGY(), STRATEGY, "the hook admits another initializer");
+        assertEq(hook.authorized(), address(0), "the hook authorizes a registration outside a launch");
         assertEq(address(hook.FACTORY()), address(factory), "the hook names another factory");
         assertEq(address(hook.poolManager()), address(pm), "the hook is on another PoolManager");
     }
@@ -353,7 +354,7 @@ contract LaunchForkTest is WarpClock {
     function test_Fork_AStrangerCannotOpenTheRecordedPool() public {
         if (!live) return vm.skip(true);
         Launch memory L = _launch();
-        bytes memory reason = abi.encodeWithSelector(InitializerHook.InvalidInitializer.selector, stranger, STRATEGY);
+        bytes memory reason = abi.encodeWithSelector(RunwayHook.InvalidInitializer.selector, stranger, STRATEGY);
         vm.prank(stranger);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -378,7 +379,7 @@ contract LaunchForkTest is WarpClock {
     }
 
     /// @notice A distribution NOT made by the factory, naming the Runway hook, never gets a pool behind it.
-    /// @notice Its migration's initialize is refused, so the strategy falls into its own recovery branch: its recipient gets the raise and the reserve.
+    /// @notice The strategy refuses its registration, since the hook authorizes none outside a launch: nothing is reserved or taken.
     function test_Fork_ADistributionOutsideTheFactoryGetsNoPool() public {
         if (!live) return vm.skip(true);
         MockERC20 t = new MockERC20("Outside", "OUT", 18);
@@ -412,29 +413,25 @@ contract LaunchForkTest is WarpClock {
         });
         t.mint(address(this), 2 * uint256(SUPPLY));
         t.approve(STRATEGY, 2 * uint256(SUPPLY));
-        vm.recordLogs();
+        vm.expectRevert(_invalidHook());
         ILBPStrategyLaunch(STRATEGY).initializeDistribution(address(t), 2 * uint256(SUPPLY), abi.encode(m, abi.encode(p)), bytes32(0));
-        address a = _logged();
-
-        _fundBidder(bidder, a, BID);
-        vm.roll(b + 2);
-        vm.prank(bidder);
-        ICcaBidding(a).submitBid(P_MID, BID, bidder, "");
-        vm.roll(b + 103);
-        uint256 next = IPositionsView(posm).nextTokenId();
-        ILBPStrategyLaunch(STRATEGY).migrate(a);
-        assertEq(IPositionsView(posm).nextTokenId(), next, "the outside distribution minted a position");
-        assertEq(_sqrtP(_key(address(t), address(hook))), 0, "a pool opened behind the Runway hook for a token the factory never launched");
-        assertEq(t.balanceOf(recipient), SUPPLY, "the recovery did not return the whole reserve");
-        assertGt(IERC20(USDC).balanceOf(recipient), 0, "the recovery did not return the raise");
+        PoolKey memory k = _key(address(t), address(hook));
+        assertEq(IPoolIdReservations(STRATEGY).registeredPoolIds(k.toId()), address(0), "the refused distribution reserved the key");
+        assertEq(_sqrtP(k), 0, "a pool opened behind the Runway hook for a token the factory never launched");
+        assertEq(t.balanceOf(address(this)), 2 * uint256(SUPPLY), "the refused distribution took the token");
     }
 
-    // ---- the time gate: past launchBy, nothing opens the launch's key ----
+    /// @dev The strategy's refusal of a registration whose hook does not authorize it.
+    function _invalidHook() internal view returns (bytes memory) {
+        return abi.encodeWithSignature("InvalidHook(address)", address(hook));
+    }
+
+    // ---- the registration gate: no distribution but the launch's own opens the launch's key ----
 
     address internal squatter = address(0x5017);
 
-    /// @dev A holder of `amount` of the launch token runs its OWN strategy distribution naming the launch's exact key, bids into it,
-    /// @dev and migrates it, with itself as recipient and LP owner: the attack a key-only gate admitted.
+    /// @dev A holder of `amount` of the launch token registers its OWN distribution on the launch's exact key, as recipient and LP owner.
+    /// @dev It is the attack a key-only gate admitted; the strategy now refuses it at registration.
     function _secondDistribution(Launch memory L, uint256 amount) internal {
         uint64 b = uint64(vm.getBlockNumber());
         LiquidityAllocationBracket[] memory br = new LiquidityAllocationBracket[](1);
@@ -464,18 +461,11 @@ contract LaunchForkTest is WarpClock {
             auctionStepsData: abi.encodePacked(uint24(100_000), uint40(100))
         });
         deal(L.token, squatter, amount);
-        vm.recordLogs();
         vm.startPrank(squatter);
         IERC20(L.token).approve(STRATEGY, amount);
+        vm.expectRevert(_invalidHook());
         ILBPStrategyLaunch(STRATEGY).initializeDistribution(L.token, amount, abi.encode(m, abi.encode(p)), keccak256("squat"));
         vm.stopPrank();
-        address a = _logged();
-        _fundBidder(squatter, a, BID);
-        vm.roll(b + 2);
-        vm.prank(squatter);
-        ICcaBidding(a).submitBid(P_MID, BID, squatter, "");
-        vm.roll(b + 103);
-        ILBPStrategyLaunch(STRATEGY).migrate(a);
     }
 
     /// @notice After an ungraduated launch, a holder of a few tokens cannot open the launch's key through a distribution of their own.
@@ -487,15 +477,15 @@ contract LaunchForkTest is WarpClock {
         _bidAt(L, buyerA, L.start, P_MID, BID);
         vm.roll(L.end + 1);
         ILBPStrategyLaunch(STRATEGY).migrate(L.auction);
-        _pastLaunchBy(L); // no launch token is liquid before launchBy
         _secondDistribution(L, 2e18);
         assertEq(_sqrtP(L.key), 0, "the launch's key opened for a distribution that is not the launch's");
+        _pastLaunchBy(L);
         L.budget.settle();
         assertFalse(L.budget.live(), "an ungraduated launch read live");
     }
 
-    /// @notice A migration that runs after launchBy is refused by the hook and recovers: no pool, the whole raise and reserve to the budget,
-    /// @notice settlement reads failed, and the bids are refunded whole.
+    /// @notice A migration that runs after launchBy is refused by the hook and recovers: no pool, the whole raise and reserve to the budget.
+    /// @notice Settlement then reads failed, and the bids are refunded whole.
     function test_Fork_ALateMigrationRecoversAndRefundsWhole() public {
         if (!live) return vm.skip(true);
         Launch memory L = _launch();
@@ -524,12 +514,162 @@ contract LaunchForkTest is WarpClock {
         if (!live) return vm.skip(true);
         (Launch memory L,) = _failedLaunch();
         uint256 received = IERC20(USDC).balanceOf(address(L.budget));
-        _pastLaunchBy(L); // no launch token is liquid before launchBy
         _secondDistribution(L, 2e18);
         assertEq(_sqrtP(L.key), 0, "the launch's key opened after its own migration failed");
+        _pastLaunchBy(L);
         L.budget.settle();
         assertFalse(L.budget.live(), "a failed launch read live after the flip");
         assertEq(IERC20(USDC).balanceOf(address(_wallet(L))), 0, "the team took currency from a failure");
+        assertEq(L.budget.refundPool(), received, "the bids do not share the whole raise");
+    }
+
+    /// @dev A holder of USDC alone registers a strategy distribution SELLING USDC for the launch token, one-sided so its LP needs no launch token.
+    /// @dev Its pool key sorts to the launch's own: same pair, fee, spacing and hook. The strategy refuses the registration.
+    function _usdcSoldDistribution(Launch memory L) internal {
+        uint64 b = uint64(vm.getBlockNumber());
+        uint128 sold = 1_000e6;
+        uint256 tick = 1e12 << 96;
+        PositionDefinition[] memory pd = new PositionDefinition[](1);
+        pd[0] = USDC < L.token
+            ? PositionDefinition({offsetLower: SPACING, offsetUpper: 10 * SPACING, weight: 1e7, overridePositionRecipient: address(0)})
+            : PositionDefinition({offsetLower: -10 * SPACING, offsetUpper: -SPACING, weight: 1e7, overridePositionRecipient: address(0)});
+        LiquidityAllocationBracket[] memory br = new LiquidityAllocationBracket[](1);
+        br[0] = LiquidityAllocationBracket({lowerThreshold: 0, rate: 1e7});
+        MigratorParameters memory m = MigratorParameters({
+            token: USDC,
+            currency: L.token,
+            migrationBlock: b + 103,
+            reservedTokenAmountForLP: sold,
+            recipient: squatter,
+            positionRecipient: squatter,
+            poolParameters: PoolParameters({fee: FEE, tickSpacing: SPACING, hook: address(hook)}),
+            positionDefinitions: abi.encode(pd),
+            lpAllocationSchedule: abi.encode(br)
+        });
+        AuctionParameters memory p = AuctionParameters({
+            currency: L.token,
+            tokensRecipient: squatter,
+            fundsRecipient: address(1),
+            startBlock: b + 2,
+            endBlock: b + 102,
+            claimBlock: b + 102,
+            tickSpacing: tick,
+            validationHook: address(0),
+            floorPrice: 100 * tick,
+            requiredCurrencyRaised: 0,
+            auctionStepsData: abi.encodePacked(uint24(100_000), uint40(100))
+        });
+        deal(USDC, squatter, 2 * uint256(sold));
+        vm.startPrank(squatter);
+        IERC20(USDC).approve(STRATEGY, 2 * uint256(sold));
+        vm.expectRevert(_invalidHook());
+        ILBPStrategyLaunch(STRATEGY).initializeDistribution(USDC, 2 * uint256(sold), abi.encode(m, abi.encode(p)), keccak256("usdc-sold"));
+        vm.stopPrank();
+    }
+
+    /// @dev A two-atom USDC-only registration whose currency is `t`, an address with no code yet, and which could never migrate.
+    /// @dev It names `t`'s launch pool id, so admitted it reserves that id for good; unless `admitted`, the strategy must refuse it.
+    function _squatPoolId(address t, bool admitted) internal returns (address a) {
+        uint64 b = uint64(vm.getBlockNumber());
+        LiquidityAllocationBracket[] memory br = new LiquidityAllocationBracket[](1);
+        br[0] = LiquidityAllocationBracket({lowerThreshold: 0, rate: 1e7});
+        MigratorParameters memory m = MigratorParameters({
+            token: USDC,
+            currency: t,
+            migrationBlock: type(uint64).max,
+            reservedTokenAmountForLP: 1,
+            recipient: squatter,
+            positionRecipient: squatter,
+            poolParameters: PoolParameters({fee: FEE, tickSpacing: SPACING, hook: address(hook)}),
+            positionDefinitions: abi.encode(new PositionDefinition[](0)),
+            lpAllocationSchedule: abi.encode(br)
+        });
+        AuctionParameters memory p = AuctionParameters({
+            currency: t,
+            tokensRecipient: squatter,
+            fundsRecipient: address(1),
+            startBlock: b + 1,
+            endBlock: b + 3,
+            claimBlock: b + 3,
+            tickSpacing: TICK,
+            validationHook: address(0),
+            floorPrice: 1 << 96,
+            requiredCurrencyRaised: 0,
+            auctionStepsData: abi.encodePacked(uint24(5_000_000), uint40(2))
+        });
+        deal(USDC, squatter, 2);
+        vm.recordLogs();
+        vm.startPrank(squatter);
+        IERC20(USDC).approve(STRATEGY, 2);
+        if (!admitted) vm.expectRevert(_invalidHook());
+        ILBPStrategyLaunch(STRATEGY).initializeDistribution(USDC, 2, abi.encode(m, abi.encode(p)), keccak256("squat-next"));
+        vm.stopPrank();
+        if (admitted) a = _logged();
+        assertEq(IPoolIdReservations(STRATEGY).registeredPoolIds(_key(t, address(hook)).toId()), a, "the squat's reservation");
+    }
+
+    /// @notice Audit RC-01, fixed: a registration of the factory's NEXT pool id is refused, so it reserves nothing and the launch lands on it.
+    function test_RC01_ARegistrationOfTheNextPoolIdIsRefusedAndTheLaunchLands() public {
+        if (!live) return vm.skip(true);
+        address next = vm.computeCreateAddress(address(factory), vm.getNonce(address(factory)));
+        _squatPoolId(next, false);
+        Launch memory L = _launch();
+        assertEq(L.token, next, "fixture: the launch landed off the predicted token");
+        assertEq(IPoolIdReservations(STRATEGY).registeredPoolIds(L.key.toId()), L.auction, "the launch did not reserve its own pool id");
+    }
+
+    /// @notice Audit RC-01, fixed: once a launch lands, the factory's next pool id still cannot be registered from outside.
+    function test_RC01_AfterOneLaunchTheNextPoolIdCannotBeRegistered() public {
+        if (!live) return vm.skip(true);
+        _launch();
+        address next = vm.computeCreateAddress(address(factory), vm.getNonce(address(factory)));
+        _squatPoolId(next, false);
+        assertEq(_launch().token, next, "fixture: the second launch landed off the predicted token");
+    }
+
+    /// @notice Audit RC-12, the read the gate rests on: registration reads the hook's authorized(), and admits the strategy's name alone.
+    /// @notice With the answer mocked, a stranger is refused and the strategy is admitted, so authorized() is what decides.
+    function test_RC12_RegistrationAdmitsOnlyAHookAuthorizingTheStrategy() public {
+        if (!live) return vm.skip(true);
+        address next = vm.computeCreateAddress(address(factory), vm.getNonce(address(factory)));
+        vm.mockCall(address(hook), abi.encodeWithSignature("authorized()"), abi.encode(stranger));
+        _squatPoolId(next, false);
+        vm.mockCall(address(hook), abi.encodeWithSignature("authorized()"), abi.encode(STRATEGY));
+        assertTrue(_squatPoolId(next, true) != address(0), "a hook authorizing the strategy was refused");
+    }
+
+    /// @notice Audit RC-02, fixed: an ungraduated launch's recovery frees its key, but no USDC-only distribution can register it, so settle reads failed.
+    function test_RC02_AnUngraduatedLaunchsFreedKeyCannotBeRegistered() public {
+        if (!live) return vm.skip(true);
+        LaunchTokenFactory.LaunchInput memory p = _input();
+        p.requiredRaise = type(uint128).max / 2;
+        Launch memory L = _launch(p);
+        _bidAt(L, buyerA, L.start, P_MID, BID);
+        vm.roll(L.end + 1);
+        ILBPStrategyLaunch(STRATEGY).migrate(L.auction);
+        assertEq(IPoolIdReservations(STRATEGY).registeredPoolIds(L.key.toId()), address(0), "premise: the recovery freed the key");
+        assertLe(block.timestamp, _launchBy(L), "premise: still before launchBy");
+        _usdcSoldDistribution(L);
+        assertEq(_sqrtP(L.key), 0, "the freed key opened for a distribution that is not the launch's");
+        _pastLaunchBy(L);
+        L.budget.settle();
+        assertFalse(L.budget.live(), "an ungraduated launch reads live");
+    }
+
+    /// @notice Audit RSCA-01, fixed: after the launch's own migration failed, no USDC-only distribution can register its key, before launchBy or after.
+    /// @notice Settlement then reads failed, and the bids share the whole raise.
+    function test_RSCA01_AUsdcSoldDistributionCannotOpenAFailedLaunchsKey() public {
+        if (!live) return vm.skip(true);
+        (Launch memory L,) = _failedLaunch();
+        uint256 received = IERC20(USDC).balanceOf(address(L.budget));
+        assertLe(block.timestamp, _launchBy(L), "premise: still before launchBy");
+        _usdcSoldDistribution(L);
+        _pastLaunchBy(L);
+        _usdcSoldDistribution(L);
+        assertEq(_sqrtP(L.key), 0, "the failed launch's key opened for a distribution that is not the launch's");
+        L.budget.settle();
+        assertFalse(L.budget.live(), "the failed launch reads live");
+        assertEq(IERC20(USDC).balanceOf(address(_wallet(L))), 0, "the team took currency from a failed launch");
         assertEq(L.budget.refundPool(), received, "the bids do not share the whole raise");
     }
 
@@ -735,7 +875,7 @@ contract LaunchForkTest is WarpClock {
         id = ace.createMarket(
             LaunchMarketParams.launchParams(
                 LaunchMarketParams.Ctx({
-                    quote: USDC, token: t, lender: lender, price: AceFixtures.px(0.01e18, USDC, t), baseBps: 40, minDebt: 10e6, minCoverageWad: 1.4e18
+                    quote: USDC, token: t, lender: lender, price: AceFixtures.px(0.01e18, USDC, t), baseBps: 40, minPrincipal: 10e6, minCoverageWad: 1.4e18
                 })
             )
         );
@@ -1126,6 +1266,11 @@ contract LaunchForkTest is WarpClock {
         uint256 want = Math.mulDiv(sold, 20_000 - SHARE - CUT, 10_000) + TEAM_ALLOC + OPS;
         assertApproxEqRel(IERC20(L.token).totalSupply(), want, 1e12, "the supply is not sold * (2 - share - cut) plus the allocations");
     }
+}
+
+/// @notice The deployed strategy's pool-id reservations: the auction holding each id, zero once free.
+interface IPoolIdReservations {
+    function registeredPoolIds(PoolId id) external view returns (address);
 }
 
 /// @notice The two blacklist doors on mainnet USDC (FiatTokenV2_2), callable only by its blacklister.

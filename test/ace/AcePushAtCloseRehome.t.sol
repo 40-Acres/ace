@@ -5,7 +5,6 @@ import {Test, Vm} from "forge-std/Test.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {Lender} from "../../src/ace/hub/Lender.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {ITokenReceiveHook, MockHookERC20} from "../mocks/MockHookERC20.sol";
@@ -83,10 +82,9 @@ abstract contract AcePushAtCloseRehomeRig is Test {
         vm.stopPrank();
     }
 
-    /// @dev Past the whole roll window, which is what `settleExpired` requires; expiry alone is not enough.
-    function _warpPastTheRollWindow(uint256 loanId) internal {
-        uint64 tenor = read.loan(loanId).tenor;
-        vm.warp(uint256(read.loan(loanId).expiry) + MarketInit.autoRefinanceWindow(tenor) + 1);
+    /// @dev One second past expiry, where `forceClose` settles.
+    function _warpPastExpiry(uint256 loanId) internal {
+        vm.warp(uint256(read.loan(loanId).expiry) + 1);
     }
 
     /// @dev Whether the hub emitted `sig` in `logs`, and that event's one-word amount.
@@ -107,10 +105,10 @@ contract AcePushAtCloseLeastBudgetTest is AcePushAtCloseRehomeRig {
 
     /// @notice At the least budget that settles, the push is called once and pays the whole pool.
     /// @dev The pre-check refuses any limit that cannot hand the push its fixed budget, so the least settling one funds it.
-    /// @dev `expectCall(..., 1)` pins the one attempt; the old starved branch, which called nothing, is gone.
-    function test_SettleExpired_TheLeastBudgetThatSettlesPaysTheLender() public {
+    /// @dev `expectCall(..., 1)` pins the one attempt: the best-effort sweep behind the push cannot fund itself at this budget.
+    function test_ForceClose_TheLeastBudgetThatSettlesPaysTheLender() public {
         uint256 loanId = _open(TEN30);
-        _warpPastTheRollWindow(loanId);
+        _warpPastExpiry(loanId);
         uint256 cap = _leastBudgetThatSettles(loanId);
         uint256 aliceHad = quote.balanceOf(alice);
         uint256 owedBefore = _owed();
@@ -118,7 +116,7 @@ contract AcePushAtCloseLeastBudgetTest is AcePushAtCloseRehomeRig {
         vm.expectCall(address(ace), abi.encodeWithSelector(Ace.pushToken.selector), 1);
         vm.recordLogs();
         vm.prank(keeper);
-        ace.settleExpired{gas: cap}(loanId);
+        ace.forceClose{gas: cap}(loanId);
         Vm.Log[] memory logs = vm.getRecordedLogs();
         (bool failed,) = _seen(logs, PUSH_FAILED_SIG);
         (bool paid, uint256 amount) = _seen(logs, COLLECTED_SIG);
@@ -131,7 +129,7 @@ contract AcePushAtCloseLeastBudgetTest is AcePushAtCloseRehomeRig {
         assertEq(quote.balanceOf(alice) - aliceHad, amount, "delivered");
     }
 
-    /// @dev Bisect the least outer budget at which `settleExpired` settles. The bounds are guards, never tuning knobs.
+    /// @dev Bisect the least outer budget at which `forceClose` settles. The bounds are guards, never tuning knobs.
     function _leastBudgetThatSettles(uint256 loanId) internal returns (uint256) {
         uint256 lo = 60_000; // under the door's own body, so below the floor on either build profile
         uint256 hi = 8_000_000;
@@ -149,7 +147,7 @@ contract AcePushAtCloseLeastBudgetTest is AcePushAtCloseRehomeRig {
     function _settlesAt(uint256 loanId, uint256 cap) internal returns (bool ok) {
         uint256 snap = vm.snapshotState();
         vm.prank(keeper);
-        try ace.settleExpired{gas: cap}(loanId) {
+        try ace.forceClose{gas: cap}(loanId) {
             ok = read.loan(loanId).closedAt != 0;
         } catch {}
         vm.revertToState(snap);

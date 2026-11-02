@@ -13,6 +13,8 @@ import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
 import {DeleverageCrank} from "../utils/DeleverageCrank.sol";
+import {_extended} from "../utils/Extended.sol";
+import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {GUARD_TRIP} from "../utils/GuardTrip.sol";
 
 /// @title AceLenderByCollateral
@@ -321,7 +323,7 @@ contract AceLenderByCollateralTest is WarpClock, DeleverageCrank {
         _assertSettled(mx, my, id);
     }
 
-    /// @notice `forceClose` on an unarmed loan at expiry settles it, with the same split.
+    /// @notice `forceClose` at expiry settles the loan, with the same split.
     function test_Settle_ForceCloseMovesTheClaimOutAndThePotIn() public {
         Mkt memory mx = _market(usdc, collX, lender, true);
         Mkt memory my = _market(usdc, collY, lender, true);
@@ -330,18 +332,6 @@ contract AceLenderByCollateralTest is WarpClock, DeleverageCrank {
         _warpTo(read.loan(id).expiry + 1);
         vm.prank(keeper);
         ace.forceClose(id);
-        _assertSettled(mx, my, id);
-    }
-
-    /// @notice The unpaid backstop `settleExpired` settles with the same split.
-    function test_Settle_SettleExpiredMovesTheClaimOutAndThePotIn() public {
-        Mkt memory mx = _market(usdc, collX, lender, true);
-        Mkt memory my = _market(usdc, collY, lender, true);
-        _borrow(my, PY);
-        uint256 id = _borrow(mx, PX);
-        _warpTo(read.loan(id).expiry + 1 days);
-        vm.prank(keeper);
-        ace.settleExpired(id);
         _assertSettled(mx, my, id);
     }
 
@@ -365,11 +355,12 @@ contract AceLenderByCollateralTest is WarpClock, DeleverageCrank {
     function test_Migrate_AHomeRefinanceLandsOnTheSuccessorsPrincipal() public {
         Mkt memory mx = _market(usdc, collX, lender, true);
         Mkt memory my = _market(usdc, collY, lender, true);
+        AceFixtures.installYesPolicy(ace, lender); // the home claim recycles only on the lender's policy yes
         _borrow(my, PY);
         uint256 id = _borrow(mx, PX);
         uint256 newP = PX + 1_000e6;
         vm.prank(borrower);
-        uint256 next = ace.refinance(id, newP, 0, OFF);
+        uint256 next = ace.refinanceTo(MigrateArgs(id, mx.id, newP, 0, OFF, 0, address(0)));
         assertTrue(read.loan(id).closedAt != 0, "PREMISE: the old loan retired");
         (uint256 x,) = _split(mx);
         assertEq(read.claimOf(mx.id, next), newP, "PREMISE: the successor's claim is its principal");
@@ -378,26 +369,33 @@ contract AceLenderByCollateralTest is WarpClock, DeleverageCrank {
         _assertSplit(my, "home refinance, Y");
     }
 
-    /// @notice An ARMED loan rolls at expiry through the fold, and the total follows it onto the successor.
-    function test_Migrate_TheExpiryFoldRollsTheTotalOntoTheSuccessor() public {
+    /// @notice A cash extension in place, a second before expiry, leaves the total exactly where it was: the claim does not move.
+    function test_Migrate_ACashExtensionLeavesTheTotalUnmoved() public {
         Mkt memory mx = _market(usdc, collX, lender, true);
         Mkt memory my = _market(usdc, collY, lender, true);
+        AceFixtures.installYesPolicy(ace, lender); // an extension lands only on its lender's yes
         _borrow(my, PY);
         uint256 id = _borrow(mx, PX);
-        uint64 tenor = read.loan(id).tenor; // read before the prank, which the next external call spends
-        vm.prank(borrower);
-        ace.setAutoRefinance(id, tenor, 0, 0);
-        _warpAtLeastTo(read.loan(id).expiry);
+        uint64 tenor = read.loan(id).tenor;
+        uint64 x0 = read.loan(id).expiry;
+        _warpTo(uint256(x0) - 1);
         uint256 n = read.loanCount();
-        vm.prank(keeper);
-        ace.forceClose(id);
-        assertEq(read.loanCount(), n + 1, "PREMISE: the fold rolled into a successor");
+        uint256 claim0 = read.claimOf(mx.id, id);
+        uint256 fee = LoanMath.originationFee(read.debtOf(id), tenor, ace.idToMarketParams(mx.id).baseBps, ace.idToMarketParams(mx.id).minTenor);
+        usdc.mint(borrower, fee);
+        vm.startPrank(borrower);
+        usdc.approve(address(ace), fee);
+        ace.extend(id, 0, "");
+        vm.stopPrank();
+        assertTrue(_extended(read, id, x0), "PREMISE: the borrower extended the loan in place");
+        assertEq(read.loanCount(), n, "minting no successor");
         (uint256 x, uint256 ux) = _split(mx);
-        assertEq(x, read.claimOf(mx.id, n + 1), "the total is the successor's claim");
+        assertEq(read.claimOf(mx.id, id), claim0, "the claim did not move");
+        assertEq(x, claim0, "so neither did the total");
         assertGt(x, 0, "PREMISE: which is live");
-        assertEq(ux, 0, "and a roll leaves no pot");
-        _assertSplit(mx, "fold");
-        _assertSplit(my, "fold, Y");
+        assertEq(ux, 0, "and an extension leaves no pot");
+        _assertSplit(mx, "extension");
+        _assertSplit(my, "extension, Y");
     }
 
     /// @notice `refinanceTo` into the same lender's other X market keeps the total in X, at the new principal.
@@ -582,7 +580,7 @@ contract AceLenderByCollateralTest is WarpClock, DeleverageCrank {
         _buy(my, y, 500e6);
         _walkCheck(mx, my, mz, colls, "partial buy Y");
         vm.prank(borrower);
-        ace.refinance(z, PZ + 300e6, 0, OFF);
+        ace.refinanceTo(MigrateArgs(z, mz.id, PZ + 300e6, 0, OFF, 0, address(0)));
         _walkCheck(mx, my, mz, colls, "refinance Z");
         _repay(mx, x, read.debtOf(x));
         _walkCheck(mx, my, mz, colls, "full repay X");

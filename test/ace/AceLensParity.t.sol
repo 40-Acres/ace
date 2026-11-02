@@ -12,7 +12,6 @@ import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {MockStakeVault} from "../mocks/MockStakeVault.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
-import {ProtocolPolicy} from "../../src/config/Defaults.sol";
 
 /// @title AceLensParity
 /// @notice `AceLens` must agree with `AceReader`, view for view, against real market state.
@@ -188,34 +187,7 @@ contract AceLensParityTest is Test {
         assertGt(lens.feeEscrowOf(loanId), 0, "the fixture loan really carries an escrow to compare");
     }
 
-    /// @dev `autoPolicyOf` is the LAST packed-field decoder either mirror still hardcodes by shift,
-    /// @dev and it sits outside the byte-offset block `scripts/layout-check.sh` runs, so nothing else
-    /// @dev in the tree would catch a one-sided edit to its `>> 64`.
-    function test_Parity_AutoPolicy() public view {
-        (uint64 lt, uint16 lb, uint16 lf) = lens.autoPolicyOf(loanId);
-        (uint64 rt, uint16 rb, uint16 rf) = read.autoPolicyOf(loanId);
-        assertEq(lt, rt, "tenor");
-        assertEq(lb, rb, "minBufferBps");
-        assertEq(lf, rf, "maxFeeBps");
-    }
-
-    /// @dev The parity above runs on a DISARMED policy, where every packed field is zero, so it would
-    /// @dev pass against a decoder that had never learned the higher field at all.
-    /// @dev This leg writes a non-zero value into EVERY field and re-asks the same question.
-    /// @dev `maxFeeBps` is the highest and newest, so a decoder that stopped at `>> 64` reads it as zero here.
-    function test_Parity_AutoPolicy_NonDefaultFields() public {
-        vm.prank(borrower);
-        ace.setAutoRefinance(loanId, ProtocolPolicy.MIN_TENOR, 750, 125);
-
-        (uint64 lt, uint16 lb, uint16 lf) = lens.autoPolicyOf(loanId);
-        (uint64 rt, uint16 rb, uint16 rf) = read.autoPolicyOf(loanId);
-        assertEq(lt, ProtocolPolicy.MIN_TENOR, "the fixture really carries an armed tenor");
-        assertEq(lb, 750, "and a non-default buffer floor");
-        assertEq(lf, 125, "and a non-default fee ceiling, so a decoder short of `>> 80` fails here");
-        assertEq(lt, rt, "tenor");
-        assertEq(lb, rb, "minBufferBps");
-        assertEq(lf, rf, "maxFeeBps");
-    }
+    // the two `autoPolicyOf` rows went with the view and the `LoanBook` member it decoded
 
     /// @dev DELETED: `test_Parity_RearmOf` and `test_Parity_RearmOf_IsKeyedPerLenderAndQuote`. They walked the
     /// @dev lender's standing re-rest policy through both mirrors, pinning `market` in particular because it sat

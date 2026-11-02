@@ -71,7 +71,7 @@ contract BurnAllRecord is IPersistenceRecord {
     }
 
     /// @notice The windowed minimum, which every judgment-spending verb reads.
-    /// @dev The one burning read: the draw cap, the fold's predicate and the disposal floor all come through here.
+    /// @dev The one burning read: the draw cap, the extension's predicate and the disposal floor all come through here.
     function minPrice(address, address) external view returns (uint256) {
         if (burning) _burnAll();
         return windowMin;

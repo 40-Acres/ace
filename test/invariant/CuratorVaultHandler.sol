@@ -82,7 +82,6 @@ contract CuratorVaultHandler is CuratorVaultBase {
     bool public claimPastExitable; // a claim paid more than the exitable cash before it
     bool public claimUnderMin; // a claim landed paying under its own minimum
     bool public heldTakenByAnExit; // an instant exit while lending paid past exitable less what the requests hold
-    bool public payUnderRollHold; // an exit or a claim left idle under the roll hold
     bool public drainLeftLendable; // a drain switched on and left anything lendable
     bool public keyBroke; // the drain answered a key wrong: a stranger or the guardian's off landed, or the curator was refused
     bool public lapsedEarly; // a lapse landed inside the lease
@@ -123,7 +122,7 @@ contract CuratorVaultHandler is CuratorVaultBase {
 
     /// @dev The state a pay is judged against, read before it.
     struct Pay {
-        uint256 exitable; // idle past the roll hold: what a claim may take
+        uint256 exitable; // all of idle: what a claim may take
         uint256 gross;
         uint256 supply;
         uint256 h; // the fee high-water the pay sees, after its own collection
@@ -258,12 +257,11 @@ contract CuratorVaultHandler is CuratorVaultBase {
         if (p.supply != 0 && nav > p.h) p.h = nav; // the verb's collection lifts it first
     }
 
-    /// @dev Book a pay: the gap allowance, a clamp the high-water forgave, zero supply, the roll hold, and the last holders out.
+    /// @dev Book a pay: the gap allowance, a clamp the high-water forgave, zero supply, and the last holders out.
     function _notePay(Pay memory p, uint256 paid, uint256 burned) internal {
         _pays++;
         if (paid > p.h) _clampForgiven += paid - p.h;
         if (vault.totalSupply() == 0) _crossedZero = true;
-        if (vault.idle() < vault.rollHoldNow()) payUnderRollHold = true;
         if (_allExitCapableSharesGone() && burned != 0) _noteLastOut(p.gross, p.supply);
     }
 
@@ -848,16 +846,15 @@ contract CuratorVaultHandler is CuratorVaultBase {
         if (_loanIds.length >= MAX_LOANS) return;
         uint256 principal = bound(drawSeed, 20e6, 300e6);
         if (principal <= vault.lendable()) loanTries++;
-        _doorBorrow(principal, false);
+        _doorBorrow(principal);
     }
 
-    /// @dev One door borrow of `principal` against `COLL`, armed when `arm`; tracked and tallied when it lands, else the refusal is swallowed.
-    function _doorBorrow(uint256 principal, bool arm) internal returns (uint256 loanId) {
+    /// @dev One door borrow of `principal` against `COLL`; tracked and tallied when it lands, else the refusal is swallowed.
+    function _doorBorrow(uint256 principal) internal returns (uint256 loanId) {
         collateral.mint(borrower, COLL);
         vm.startPrank(borrower);
         collateral.approve(address(vault), COLL);
         BorrowRequest memory r = _request(address(collateral), COLL, principal);
-        r.arm = arm;
         try vault.borrow(r, "", "") returns (uint256 id) {
             loanId = id;
             _track(id);

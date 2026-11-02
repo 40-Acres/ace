@@ -73,7 +73,7 @@ abstract contract CuratorVaultExitsRig is CuratorVaultBase {
         (, held) = v.holds();
     }
 
-    /// @dev Idle cash no exit may take is the roll hold; what is left is exitable.
+    /// @dev Exitable cash: all of idle, as no roll holds any back.
     function _exitable(CuratorVault v) internal view returns (uint256 exitable) {
         (exitable,) = v.holds();
     }

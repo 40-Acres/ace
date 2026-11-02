@@ -74,7 +74,7 @@ abstract contract AceAskDriftFuzzBase is WarpClock {
         p.record = address(rec);
         p.baseBps = 1;
         p.settleBountyBps = 0;
-        p.minDebt = 10 * _one();
+        p.minPrincipal = 10 * _one();
         p.fillFeeBps = FEE;
         AceFixtures.Deployment memory d = AceFixtures.deploy(p);
         (ace, positionManager, read, id) = (d.ace, d.positionManager, d.read, d.id);

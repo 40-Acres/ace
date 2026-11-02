@@ -12,6 +12,7 @@ import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {MarketParams} from "../ace/hub/Types.sol";
 import {IAceLenderOps} from "../interfaces/IAceLenderOps.sol";
+import {Extension, IRollPolicy} from "../interfaces/IRollPolicy.sol";
 import {AceVaultFlows, BorrowRequest, Ctx, Request, Terms, VaultLayout} from "./AceVaultFlows.sol";
 
 /// @notice Everything a deploy fixes about one vault: EVERY FIELD IS WRITE-ONCE, with no setter, no pause and no upgrade.
@@ -30,20 +31,21 @@ struct VaultConfig {
 /// @title AceVault
 /// @notice An ERC-4626 that HOLDS ITS CASH and lends it through one priced door, into markets that name it as their one lender.
 /// @notice NAV is the asset balance plus what the hub holds for this vault in that asset, less the unvested pile; it reads no price.
-/// @notice THE DOOR rests all idle, opens the loan to the vault, arms if the product's terms do, withdraws every resting unit, then pays and hands title over.
-/// @notice NOTHING RESTS ACROSS A CALL: a market's cash is zero between calls, and its armed loans' reservations stand on paper only.
-/// @notice SO A ROLL DRAWING CASH RUNS ONLY THROUGH `roll`: it rests the cover, rolls by policy and withdraws every unit, while the vault lends at the price.
-/// @notice TWO HOLDS: the roll hold, idle no exit may take, and the requests' hold, exitable cash no placement may take.
+/// @notice THE DOOR rests all idle, opens the loan to the vault, withdraws every resting unit, then pays and hands title over.
+/// @notice NOTHING RESTS ACROSS A CALL: a market's cash is zero between calls.
+/// @notice THE VAULT IS ITS OWN ROLL POLICY: a loan extends in place at the hub while the vault would lend there now and idle covers its exit requests.
+/// @notice An extension draws no cash and promises nothing: a borrower who wants more time extends before expiry, paying the fee in cash.
+/// @notice ONE HOLD: the requests' hold, idle no placement may take.
 /// @notice ENTRY is pro-rata; it shuts at zero NAV with shares out, while a gain over GATE_BPS vests, and while a settled pot or seized goods are unsold.
-/// @notice EXIT IS INSTANT from exitable cash the requests do not hold; `claimExit` pays a request from exitable cash, first come, at the claim's own price.
+/// @notice EXIT IS INSTANT from idle the requests do not hold; `claimExit` pays a request from idle, first come, at the claim's own price.
 /// @notice While a gain vests the last free holder requests instead of exiting; for an LP, the curator's shares do not count as free.
-/// @notice THE DRAIN stops lending: no placement, no promised successor, entry shut; exits take all of exitable first come; the roll hold stays.
+/// @notice THE DRAIN stops lending: no placement, no extension, entry shut; exits take all of idle first come.
 /// @notice NO upgrade: every address, the fee and the vest window fix at deploy.
 /// @dev The asset must be non-fee-on-transfer, non-rebasing and hookless: NAV counts its balance, and a deposit pulls before it books.
 /// @dev A raw landing of the asset is a COUNTED DONATION: it vests, can refuse the last free holder's instant exit, and can shut entry for the vest.
 /// @dev The hub is held as `IAceLenderOps`, so `redeemInKind` and `multicall` are out of reach; a product taking forfeits in kind declares a wider handle.
 /// @dev Capital held at `CURATOR` never blocks an LP's release, so it can lose its share of a vesting gain to a last requester: seed from another address.
-/// @dev PRODUCT HOOKS over the door and roll: `_borrowTerms`, `_priceAdmits`, `_rollAdmits`, `_room`, `_prime`, `_unprime`, `_afterBorrow`, `_afterRoll`.
+/// @dev PRODUCT HOOKS over the door and the roll policy: `_borrowTerms`, `_priceAdmits`, `_legsAdmit`, `_room`, `_prime`, `_unprime`, `_afterBorrow`.
 /// @dev PRODUCT HOOKS over entry and doors: `_entryCap`, `_holdsSeized`, `_exemptDeadPots`, `_setDrain`, `door`, `lends` and `_delegate`.
 abstract contract AceVault is ERC4626, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
@@ -66,9 +68,6 @@ abstract contract AceVault is ERC4626, ReentrancyGuardTransient {
     error InventoryUnsold(); // a settled pot or a held seizure of this vault's has not sold: entry waits for the sale
     error NotGuardian(); // only the guardian exempts a dead pot, and a vault with none has no override
     error PotsMoved(uint256 settledPots); // a pot settled since the guardian read the count: re-read and resubmit
-    error NotOurLoan(); // the loan's market does not name this vault as its one lender
-    error RollUnfunded(); // the vault never promised this loan's roll, or already ran it
-    error NotLending(); // the vault would no longer lend at this loan's price, so it does not roll it
 
     uint16 public constant MAX_PERF_FEE_BPS = 5000; // < 10000 is load-bearing: at 100% a zero high-water makes the fee all of NAV, and the mint divides by zero
     uint64 public constant REQUEST_LEASE = 30 days; // a request lapses this long after it was last made or renewed
@@ -113,6 +112,7 @@ abstract contract AceVault is ERC4626, ReentrancyGuardTransient {
         PERF_FEE_BPS = cfg.perfFeeBps;
         VEST_WINDOW = cfg.vestWindow;
         VEST_FLOOR = uint256(10) ** (decimals() - _decimalsOffset());
+        IAceLenderOps(cfg.ace).setRollPolicy(address(this)); // the vault is its own roll policy: `admitsExtension` below
         emit VaultDeployed(cfg.curator, cfg.asset);
     }
 
@@ -134,31 +134,21 @@ abstract contract AceVault is ERC4626, ReentrancyGuardTransient {
         return (r.shares, r.expiresAt);
     }
 
-    /// @notice Whether lending is stopped: no placement, no promised successor, and entry shut.
+    /// @notice Whether lending is stopped: no placement, no extension, and entry shut.
     function draining() public view returns (bool) {
         return AceVaultFlows.layout().draining;
     }
 
-    /// @notice A loan's recorded reservation: an upper bound on its roll need, and whether the vault promised to fund that roll.
-    function rollOf(uint256 loanId) external view returns (uint128 need, bool funded) {
-        return (AceVaultFlows.layout().rollOf[loanId].need, AceVaultFlows.layout().rollOf[loanId].funded);
-    }
+    // ---- valuation and the requests' hold ----
 
-    /// @notice The exact sum of every recorded reservation; an entry leaves at the vault's roll, at a product's forfeit door, or by `crank(closed)`.
-    function rollHold() external view returns (uint256) {
-        return AceVaultFlows.layout().rollHold;
-    }
-
-    // ---- valuation and the holds ----
-
-    /// @notice Gross NAV less the unvested pile: a fall passes through at once and a rise vests, so a sync never moves it.
+    /// @notice Gross NAV less the unvested pile: a rise vests, and a fall burns the pile first and passes the rest through, so a sync never moves it.
     /// @dev An override MAY lower it and MUST NOT add value: a rise counted outside `grossNav` would skip the vest.
     function totalAssets() public view virtual override returns (uint256) {
         return _totalAssetsAt(grossNav());
     }
 
     /// @dev `totalAssets` at a gross the caller already read; not virtual, so always the base's own figure.
-    /// @dev The door and the roll price the requests' hold at it, off the gross their sync read: neither prices a share.
+    /// @dev The door prices the requests' hold at it, off the gross its sync read; it prices no share.
     function _totalAssetsAt(uint256 g) internal view returns (uint256) {
         return Math.saturatingSub(g, _pendingUnvested(g));
     }
@@ -169,24 +159,17 @@ abstract contract AceVault is ERC4626, ReentrancyGuardTransient {
         return idle() + IAceLenderOps(ACE).lenderAssets(address(this), asset());
     }
 
-    /// @notice The asset the vault holds: every unit an exit, a claim, a placement or a roll's cover can reach, held cash included.
+    /// @notice The asset the vault holds: every unit an exit, a claim or a placement can reach, held cash included.
     function idle() public view returns (uint256) {
         return IERC20(asset()).balanceOf(address(this));
     }
 
-    /// @notice The roll hold: zero on an empty book, else three times the recorded sum plus the largest minDebt booked since the book was last empty.
-    /// @dev That minDebt term only rises while any record stands and resets when the sum reaches zero, so it may over-hold, never under-hold.
-    function rollHoldNow() public view returns (uint256) {
-        VaultLayout storage $ = AceVaultFlows.layout();
-        return AceVaultFlows.holdNow($.rollHold, $.rollFloor);
-    }
-
-    /// @notice What a placement may take: idle past the roll hold, less what the standing requests hold; nothing while draining.
+    /// @notice What a placement may take: idle less what the standing requests hold; nothing while draining.
     function lendable() public view returns (uint256) {
         return draining() ? 0 : _instantCashAt(totalAssets());
     }
 
-    /// @notice Idle past the roll hold, and the part of it the standing requests hold at their worth now; they hold nothing while draining.
+    /// @notice Idle, and the part of it the standing requests hold at their worth now; they hold nothing while draining.
     /// @return exitable What a claim may take.
     /// @return heldReq What instant exits and placements leave for the requests.
     function holds() public view returns (uint256 exitable, uint256 heldReq) {
@@ -196,14 +179,24 @@ abstract contract AceVault is ERC4626, ReentrancyGuardTransient {
     /// @dev `holds` at a NAV the caller already read, so a verb prices the requests' hold without reading the hub again.
     function _holdsAt(uint256 a) internal view returns (uint256 exitable, uint256 heldReq) {
         exitable = _exitable();
-        VaultLayout storage $ = AceVaultFlows.layout();
-        if ($.draining) return (exitable, 0);
-        heldReq = Math.min(exitable, Math.mulDiv($.requestedShares, a + 1, _quoteSupply(a)));
+        if (AceVaultFlows.layout().draining) return (exitable, 0);
+        heldReq = Math.min(exitable, _requestWorth(a));
     }
 
-    /// @dev Idle past the roll hold: what a claim may take, which no NAV moves.
+    /// @dev The standing requests' worth at NAV `a`, rounded down, over the supply a quote at `a` prices against.
+    function _requestWorth(uint256 a) internal view returns (uint256) {
+        return Math.mulDiv(AceVaultFlows.layout().requestedShares, a + 1, _quoteSupply(a));
+    }
+
+    /// @dev THE EXIT GATE: whether idle covers the requests' worth at the last sync's NAV; storage and one balance, never a hub view.
+    function _exitsCovered() internal view returns (bool) {
+        VaultLayout storage $ = AceVaultFlows.layout();
+        return $.requestedShares == 0 || _requestWorth(_totalAssetsAt($.navMark)) <= idle();
+    }
+
+    /// @dev What a claim may take: all of idle, which no NAV moves; the exit gate reserves none of it, and only refuses a lengthening.
     function _exitable() internal view returns (uint256) {
-        return Math.saturatingSub(idle(), rollHoldNow());
+        return idle();
     }
 
     /// @dev What an instant exit may take at NAV `a`: exitable less the requests' hold, all of exitable while draining.
@@ -247,17 +240,17 @@ abstract contract AceVault is ERC4626, ReentrancyGuardTransient {
     /// @notice A VIEW: it holds no cash authority, and the core checks the market is this vault's, in its asset, at a zero settle bounty.
     function _borrowTerms(BorrowRequest calldata r, bytes calldata data) internal view virtual returns (MarketParams memory mp, Terms memory t);
 
-    /// @notice Product hook: whether the vault would still lend at this market's price, which gates the CURRENT roll; none by default.
-    function _priceAdmits(MarketParams memory, uint256, bytes calldata) internal view virtual returns (bool) {
+    /// @notice Product hook: whether the vault would still lend at the extended loan's price; none by default.
+    function _priceAdmits(Extension calldata, bytes calldata) internal view virtual returns (bool) {
         return false;
     }
 
-    /// @notice Product hook: whether the curator's legs admit funding a successor's next roll; none by default.
-    function _rollAdmits(MarketParams memory) internal view virtual returns (bool) {
+    /// @notice Product hook: whether the curator's legs still admit new lending in the extended loan's market; none by default.
+    function _legsAdmit(Extension calldata) internal view virtual returns (bool) {
         return false;
     }
 
-    /// @notice Product hook: the room a placement against this market's collateral has under the product's cap; no cap by default.
+    /// @notice Product hook: the room a NEW placement against this market's collateral has under the product's cap; no cap by default; no extension reads it.
     function _room(MarketParams memory) internal view virtual returns (uint256) {
         return type(uint256).max;
     }
@@ -270,9 +263,6 @@ abstract contract AceVault is ERC4626, ReentrancyGuardTransient {
 
     /// @notice Product hook: the door's last step, after the title is handed over; it holds no cash authority.
     function _afterBorrow(uint256, BorrowRequest calldata) internal virtual {}
-
-    /// @notice Product hook: the roll's last step, after every unit came home; it holds no cash authority.
-    function _afterRoll(MarketParams memory, uint256, uint256) internal virtual {}
 
     /// @dev The cap entry reads: zero while draining, else the product's own.
     function _cap(address receiver) private view returns (uint256) {
@@ -291,9 +281,9 @@ abstract contract AceVault is ERC4626, ReentrancyGuardTransient {
         return false;
     }
 
-    /// @notice Product hook: bracket a product's forfeit, sale or exit door, after `nonReentrant`.
+    /// @notice Product hook: bracket a product's forfeit, sale, renewal or exit door, after `nonReentrant`.
     /// @notice It opens with a sync and closes by collecting the hub's credit into idle.
-    /// @notice MUST NOT mint, burn or move shares, write `VaultLayout` save through `AceVaultFlows.endLoan`, or sit on an internal function.
+    /// @notice MUST NOT mint, burn or move shares, write `VaultLayout`, or sit on an internal function.
     /// @dev BASE CHECK, else `DoorBroke`: the guard is held; a malicious body is not sandboxed.
     modifier door() {
         if (!_reentrancyGuardEntered()) revert DoorBroke();
@@ -315,9 +305,9 @@ abstract contract AceVault is ERC4626, ReentrancyGuardTransient {
         return Address.functionDelegateCall(lib, data);
     }
 
-    // ---- the door and the roll ----
+    // ---- the door and the roll policy ----
 
-    /// @notice Borrow against collateral at the product's terms: the vault opens to itself, arms where the terms do, then pays and hands title over.
+    /// @notice Borrow against collateral at the product's terms: the vault opens to itself, then pays and hands title over.
     /// @param r What the borrower asks; the product's `_borrowTerms` decides what it admits.
     /// @param data The product's own payload, such as a signed quote.
     /// @param permit2 A Permit2 SignatureTransfer for the collateral, or empty to pull on allowance.
@@ -325,7 +315,7 @@ abstract contract AceVault is ERC4626, ReentrancyGuardTransient {
     function borrow(BorrowRequest calldata r, bytes calldata data, bytes calldata permit2) external nonReentrant lends returns (uint256 loanId) {
         uint256 g = _sync();
         (MarketParams memory mp, Terms memory t) = _borrowTerms(r, data);
-        bytes32 id = AceVaultFlows.place(Ctx(ACE, asset(), MANAGER, false, _instantCashAt(_totalAssetsAt(g)), _room(mp)), mp, t, permit2);
+        bytes32 id = AceVaultFlows.place(Ctx(asset(), MANAGER, _instantCashAt(_totalAssetsAt(g)), _room(mp)), mp, t, permit2);
         _prime(mp, 0, data);
         loanId = _lend(id, mp, t, r.minPayout, r.deadline);
         _afterBorrow(loanId, r);
@@ -341,26 +331,22 @@ abstract contract AceVault is ERC4626, ReentrancyGuardTransient {
         IERC721(TITLE).transferFrom(address(this), msg.sender, loanId);
     }
 
-    /// @notice Roll a loan whose roll the vault promised: permissionless and unpaid, inside the window and best-effort after it until a settle.
-    /// @notice It runs only while the vault would still lend at the loan's price; the successor's next roll is promised only where the curator's legs admit it.
-    /// @param loanId The loan to roll.
-    /// @param data The product's own payload, such as a signed appraisal.
-    /// @return newId The successor, titled to the loan's holder.
-    function roll(uint256 loanId, bytes calldata data) external nonReentrant returns (uint256 newId) {
-        uint256 g = _sync();
-        IAceLenderOps hub = IAceLenderOps(ACE);
-        bytes32 id = hub.loanMarket(loanId);
-        MarketParams memory mp = hub.idToMarketParams(id);
-        if (mp.lender != address(this)) revert NotOurLoan();
-        if (!AceVaultFlows.layout().rollOf[loanId].funded) revert RollUnfunded();
-        if (!_priceAdmits(mp, loanId, data)) revert NotLending();
-        bool legs = _rollAdmits(mp) && !draining();
-        Ctx memory c = Ctx(ACE, asset(), address(0), legs, legs ? _instantCashAt(_totalAssetsAt(g)) : 0, legs ? _room(mp) : 0);
-        _prime(mp, loanId, data);
-        newId = AceVaultFlows.roll(c, loanId, id, mp);
-        _unprime(mp);
-        _afterRoll(mp, loanId, newId);
-        _sync();
+    /// @notice The vault is its own roll policy: it consents to one of its loans running longer exactly while it would lend there now.
+    /// @notice Its own market, the product's price leg, the curator's legs, no drain, and the exit gate on any ask that lengthens the loan.
+    /// @notice THE EXIT GATE: idle must cover the standing requests' worth at the NAV of the last sync; any shortfall refuses.
+    /// @notice It checks at the moment of asking and reserves nothing: while entry is open, a deposit, extend, request and claim step around it.
+    /// @notice A request outweighing idle is its holder's revocable veto: paying down the shortfall and `crank()` lift it.
+    /// @notice `lapseExit` clears a lapsed request, but one made in a loan's last `REQUEST_LEASE` outlasts that loan.
+    /// @notice The hub also asks it before a `refinanceTo` in the loan's own market reuses the claim; a no draws fresh cash, which a vault does not rest.
+    /// @notice Vault markets pay no settle bounty, so the curator settles at expiry itself; from expiry the borrower can only repay until it does.
+    /// @dev A PLAIN VIEW, blind to `caller`: the hub asks it under its lock from `extend` and `refinanceTo`, unlocked from `tryExtend`.
+    /// @dev The gate reads no hub view, so it answers alike under the lock and in the preview; it leaves out the last requester's vest pile.
+    /// @param e The extension the hub asks about.
+    /// @param data The caller's payload.
+    /// @return The selector to consent; zero refuses.
+    function admitsExtension(Extension calldata e, bytes calldata data) external view virtual returns (bytes4) {
+        bool yes = e.dst.lender == address(this) && _priceAdmits(e, data) && _legsAdmit(e) && !draining() && (e.newExpiry <= e.expiry || _exitsCovered());
+        return yes ? IRollPolicy.admitsExtension.selector : bytes4(0);
     }
 
     /// @notice The market a `borrow` with this request and payload would land in, and the draw the product admits; refuses as the door would.
@@ -370,16 +356,6 @@ abstract contract AceVault is ERC4626, ReentrancyGuardTransient {
     function previewTerms(BorrowRequest calldata r, bytes calldata data) external view returns (bytes32 id, MarketParams memory mp, Terms memory t) {
         (mp, t) = _borrowTerms(r, data);
         id = keccak256(abi.encode(mp));
-    }
-
-    /// @notice Whether the vault would roll a loan in this market now, and whether it would promise that roll's successor.
-    /// @dev The amount legs are checked in the verbs; both answers are false for a market that is not this vault's.
-    /// @dev It passes the price leg no payload, so a pawn market reads (false, false): its leg needs a signed ROLL appraisal; simulate `roll` with one.
-    function wouldLend(bytes32 market) external view returns (bool price, bool rearm) {
-        MarketParams memory mp = IAceLenderOps(ACE).idToMarketParams(market);
-        if (mp.lender != address(this)) return (false, false);
-        price = _priceAdmits(mp, 0, msg.data[0:0]);
-        rearm = price && _rollAdmits(mp) && !draining();
     }
 
     // ---- the ERC-4626 entry path ----
@@ -670,8 +646,7 @@ abstract contract AceVault is ERC4626, ReentrancyGuardTransient {
     // ---- the curator surface ----
 
     /// @notice Stop or resume lending: ON by the curator or the guardian, OFF by the curator alone, each at once.
-    /// @notice While it stands no placement opens, no successor's next roll is promised, entry shuts, and exits take all of exitable first come.
-    /// @notice It never stops a current promised roll, and it never releases the roll hold.
+    /// @notice While it stands no placement opens, the vault consents to no extension, entry shuts, and exits take all of idle first come.
     /// @notice SETTLE FIRST, THEN DRAIN: a drain thrown before a loss is booked pays exits at the pre-loss price.
     /// @notice TRUST: an ON reorders exits; the curator may drain, exit and lift in one bundle.
     function setDrain(bool on) external nonReentrant {
@@ -694,7 +669,7 @@ abstract contract AceVault is ERC4626, ReentrancyGuardTransient {
     }
 
     /// @notice Product hook: the override's body; a product with no guardian MAY replace it with a bare `NotGuardian`, which folds the body out.
-    /// @dev It writes only the snapshot and reads no NAV, so unlike every other base verb it does not sync first.
+    /// @dev It writes only the snapshot and reads no NAV, so it never syncs.
     function _exemptDeadPots(uint256 expectedSettled) internal virtual {
         if (GUARDIAN == address(0) || _msgSender() != GUARDIAN) revert NotGuardian();
         (uint256 u, uint256 s) = _hubCounts();
@@ -707,21 +682,6 @@ abstract contract AceVault is ERC4626, ReentrancyGuardTransient {
 
     /// @notice Collect everything the hub has credited this vault, every market at once, into idle; NAV-neutral. PERMISSIONLESS.
     function crank() external nonReentrant {
-        _sweepCredit();
-    }
-
-    /// @notice Drop the roll records of loans the hub reports closed, then collect as `crank()` does. PERMISSIONLESS.
-    /// @notice A live loan's entry, or an id with none, is skipped, so a stale or repeated id costs only its read.
-    /// @param closed Loan ids to check: repaid, settled, or rolled by someone other than this vault.
-    function crank(uint256[] calldata closed) external nonReentrant {
-        VaultLayout storage $ = AceVaultFlows.layout();
-        for (uint256 i; i < closed.length; i++) {
-            uint256 need = $.rollOf[closed[i]].need;
-            if (need == 0 || !IAceLenderOps(ACE).isClosed(closed[i])) continue;
-            delete $.rollOf[closed[i]];
-            $.rollHold -= need;
-        }
-        if ($.rollHold == 0) $.rollFloor = 0;
         _sweepCredit();
     }
 

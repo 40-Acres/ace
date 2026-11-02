@@ -6,6 +6,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
@@ -37,13 +38,16 @@ import {RunwayHook} from "./RunwayHook.sol";
 /// @notice launchBy is the migration block at MAX_BLOCK_SECONDS a block, plus MIGRATION_WINDOW; every schedule starts there.
 /// @notice Each team leg waits at least 30 days past launchBy to unlock and at least 90 to be whole; the buyer schedule vests over 30 days or more.
 /// @notice It records each launch's pool with its launchBy: the hook admits that key, from the strategy, only until then.
+/// @notice It flags its own registration, the hook's one window to authorize the strategy, so no outside distribution can name the hook.
 /// @dev THE ASSUMPTION: blocks until the migration average at most MAX_BLOCK_SECONDS; a migration later than launchBy fails into the strategy's recovery.
 /// @dev The strategy is pinned and trusted: it must take exactly its amount and register this auction for this token, or the launch reverts.
+/// @dev The strategy must read the hook's authorized() only at registration, as liquidity-launcher v3.3.0's does: later it reads zero, so a re-pin re-checks.
 /// @dev The auction's address comes from the strategy's auction factory, since the strategy's distribution returns nothing.
 /// @dev Redeployable: a new strategy version, or a new hub, is a new factory.
 contract LaunchTokenFactory is ReentrancyGuardTransient {
     using PoolIdLibrary for PoolKey;
     using SafeERC20 for IERC20;
+    using TransientSlot for *;
 
     uint256 public constant MIN_TEAM_CLIFF = 30 days; // no team unit unlocks sooner after launchBy
     uint256 public constant MIN_TEAM_VEST = 90 days; // no team leg is whole sooner after launchBy
@@ -53,6 +57,7 @@ contract LaunchTokenFactory is ReentrancyGuardTransient {
     uint256 public constant MAX_CUT_BPS = 300; // the protocol's cut of a live launch's raise is at most 3%
     uint256 public constant MIGRATION_WINDOW = 1 days; // launchBy runs this long past the migration block's assumed time
     address internal constant MSG_SENDER = address(1); // the auction factory's placeholder for its caller, here the strategy
+    bytes32 internal constant LAUNCHING = keccak256("runway.LaunchTokenFactory.launching"); // transient: set around the registration alone, not all of launch
 
     error ZeroBlockSeconds(); // with no block time, launchBy ignores the auction's length, so the key can close before the migration block
     error BadPoolFee(); // above v4's highest static LP fee, the dynamic-fee flag included
@@ -63,11 +68,12 @@ contract LaunchTokenFactory is ReentrancyGuardTransient {
     error BuyerVestTooShort(); // a buyer schedule vesting over less than MIN_BUYER_VEST
     error BadWindow(); // the auction must start after this block and end after it starts, and its blocks must divide its whole
     error ShareOverCap(); // a team share above MAX_TEAM_SHARE_BPS
-    error ZeroOperator(); // a budget with no operator has no one to vest to
+    error ZeroOperator(); // no operator, or v4's TAKE sentinel address(1) or address(2), which pay the budget itself or the PositionManager
     error BadLeg(); // a leg of nothing, unlocking within MIN_TEAM_CLIFF of launchBy, or whole within MIN_TEAM_VEST
     error OpsOverCap(); // an ops amount above MAX_OPS_BPS of the supply
     error WrongAuction(); // the strategy did not register this auction for the new token
     error SupplyLeft(); // the factory still holds supply once every allocation is paid: the strategy took less than its amount, or gave some back
+    error FeeChargingAuction(); // the auction factory can charge a fee, which the strategy takes out of a raise the budget splits gross
 
     /// @notice Everything a launch chooses; the factory fixes the rest.
     struct LaunchInput {
@@ -119,6 +125,7 @@ contract LaunchTokenFactory is ReentrancyGuardTransient {
     /// @param hookSalt The salt that lands the hook, deployed here, at an address carrying exactly the before-initialize and before-swap bits.
     /// @param cutRecipient Where every launch's budget pays the protocol's cut; nonzero whenever the cut is.
     /// @param cutBps The protocol's cut of every live launch's raise, at most MAX_CUT_BPS; zero takes none.
+    /// @dev The fee check runs once: it holds for an auction factory whose controller is fixed at construction, as the pinned one's is.
     constructor(
         address hub,
         address strategy,
@@ -139,9 +146,16 @@ contract LaunchTokenFactory is ReentrancyGuardTransient {
         IPoolManager pm = IV4PositionManager(posm).poolManager();
         (HUB, STRATEGY, QUOTE, MAX_BLOCK_SECONDS, POOL_FEE, POOL_TICK_SPACING) = (hub, strategy, quote, maxBlockSeconds, poolFee, poolTickSpacing);
         CUT_BPS = cutBps;
-        AUCTION_FACTORY = ILBPStrategy(strategy).initializerFactory();
+        address auctions = ILBPStrategy(strategy).initializerFactory();
+        if (ICcaFactory(auctions).protocolFeeController() != address(0)) revert FeeChargingAuction();
+        AUCTION_FACTORY = auctions;
         HOOK = new RunwayHook{salt: hookSalt}(pm, strategy);
         BUDGET_IMPL = address(new LaunchOpsBudget(quote, address(pm), posm, cutRecipient, cutBps));
+    }
+
+    /// @notice Whether a launch is registering its distribution right now: the hook authorizes the strategy only then.
+    function launching() external view returns (bool) {
+        return LAUNCHING.asBoolean().tload();
     }
 
     /// @notice Launch a token: born holding its whole supply, the strategy's two halves distributed, then every allocation paid to its contract.
@@ -171,7 +185,7 @@ contract LaunchTokenFactory is ReentrancyGuardTransient {
     function _supply(LaunchInput calldata p) private pure returns (uint256 supply) {
         if (p.auctionSupply == 0) revert ZeroSupply();
         if (p.teamShareBps > MAX_TEAM_SHARE_BPS) revert ShareOverCap();
-        if (p.operator == address(0)) revert ZeroOperator();
+        if (uint160(p.operator) <= 2) revert ZeroOperator();
         if (p.buyerDuration < MIN_BUYER_VEST) revert BuyerVestTooShort();
         supply = 2 * uint256(p.auctionSupply) + p.opsAmount;
         for (uint256 i; i < p.legs.length; ++i) {
@@ -189,13 +203,16 @@ contract LaunchTokenFactory is ReentrancyGuardTransient {
     }
 
     /// @dev The strategy takes its two halves and registers the auction its factory's oracle names, for this token; a short take is SupplyLeft.
+    /// @dev LAUNCHING is set around initializeDistribution alone, the hook's one window to authorize the strategy: keep every other call outside it.
     function _distribute(address token, LaunchInput calldata p, address lock, address budget) private returns (address auction) {
         uint256 amount = 2 * uint256(p.auctionSupply);
         bytes memory auctionData = abi.encode(_auctionParams(p, lock, budget));
         MigratorParameters memory m = _migratorParams(token, p, budget);
         auction = ICcaFactory(AUCTION_FACTORY).getAddress(token, p.auctionSupply, auctionData, keccak256(abi.encode(bytes32(0), m)), STRATEGY);
         IERC20(token).forceApprove(STRATEGY, amount);
+        LAUNCHING.asBoolean().tstore(true);
         ILBPStrategy(STRATEGY).initializeDistribution(token, amount, abi.encode(m, auctionData), bytes32(0));
+        LAUNCHING.asBoolean().tstore(false);
         if (ILBPStrategy(STRATEGY).initializers(auction).token != token) revert WrongAuction();
     }
 

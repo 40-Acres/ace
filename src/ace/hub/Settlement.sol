@@ -9,39 +9,22 @@ import {Borrower} from "./Borrower.sol";
 
 import {LoanAccounting} from "./libraries/LoanAccounting.sol";
 import {Recipients} from "./libraries/Recipients.sol";
-import {MarketInit} from "./MarketInit.sol";
-import {
-    AutoPolicy,
-    Cfg,
-    LenderCollateral,
-    LenderUnresolved,
-    Loan,
-    LoanBook,
-    Market,
-    MigrateArgs,
-    OpenBounds,
-    PreAdmitted,
-    RollFrames,
-    Shortfall,
-    Storage
-} from "./Types.sol";
+import {Cfg, LenderCollateral, LenderUnresolved, Loan, LoanBook, Market, Shortfall, Storage} from "./Types.sol";
 import {IPositionManager} from "../../interfaces/IPositionManager.sol";
 
 error LoanClosed(); // the loan is retired: no settlement verb touches it
 error NotExpired(); // the tenor has not run out yet
 error NoRecord(); // record-less market: distress is unknowable, so finalize never opens; the loan still settles at tenor
 error NotSettleable(); // not YET settleable: callers retry on this one
-error RollWindowOpen(); // the unpaid backstop is not open yet: the paid door still owes this loan a roll
 error NoClaimLeg(); // both destinations zero: one zero skips a leg, two claim nothing and is a caller bug
 
 /* ========================================================================= */
 /*  TABLE OF CONTENTS                                                        */
-/*  1. EXPIRY   the tenor ran out: roll the loan forward, or hand it over    */
-/*  2. SETTLE   the terminal crank: title moves, claims convert, loan closes */
+/*  1. SETTLE   the terminal crank: title moves, claims convert, loan closes */
 /* ========================================================================= */
 
 /// @title Settlement
-/// @notice Where a loan ENDS: the expiry fold, and the title transfer that closes it for good.
+/// @notice Where a loan ENDS: the title transfer that closes it for good, on distress or at expiry.
 /// @notice Liquidation here is a title transfer, not a trade -- selling against a LIVE loan is `Deleverage`.
 /// @dev Every `msg.sender` here is the EXTERNAL caller of the crank, which a periphery sponsor pays against.
 library Settlement {
@@ -51,63 +34,11 @@ library Settlement {
     event Finalized(uint256 indexed id, uint256 collateralUnits, uint256 badDebt, address indexed executor);
     /// @dev `collateralUnits` is the lot net of the keeper sliver, which the executor is credited separately.
     event ForceClosed(uint256 indexed id, uint256 collateralUnits, uint256 badDebt, address indexed executor);
-    event SettledUnpaid(uint256 indexed id, uint256 collateralUnits, uint256 badDebt, address indexed executor);
-    /// @dev `sliverUnits` is the in-kind keeper bounty the roll credited, deducted before the successor draws.
-    event ExpiryRolled(uint256 indexed oldId, uint256 indexed newId, uint256 sliverUnits, address indexed executor);
     /// @notice A zero destination on either leg means the claimant declined it and its credit is still outstanding.
     /// @dev So `toUnits == 0` and `units == 0` say different things: declined, versus asked and there was nothing.
     event OwedClaimed(uint256 indexed loanId, address indexed claimant, address toUnits, address toQuote, uint256 units, uint256 amount);
 
-    /* ====== 1. EXPIRY: settle, or roll the loan forward on an armed policy ====== */
-
-    /// @notice forceClose with the policy fold: credit the sliver, then continue; settle only if inadmissible.
-    /// @dev Guards run BEFORE the policy read; the unarmed path performs one SLOAD and falls through whole.
-    /// @dev The sliver is credited on BOTH branches, same formula, so the crank's pay never turns on the branch.
-    /// @dev The predicate is TOTAL, so the branch is a function of loan state, bar the under-forwarding case below.
-    /// @dev A dependency that BURNS its frame answers not-ok, so the fold settles; with too little gas left the verb reverts instead.
-    /// @dev Under-forwarding gas picks the branch only for a read costing over 63 times the settle, which the 1/64 left must fund.
-    /// @dev `settleExpired` asks no predicate at all, so it is the backstop no dependency can starve.
-    /// @dev IT REPORTS THE BRANCH: a roll closes this loan too, so `closedAt` cannot tell the two apart.
-    /// @return settled True when the loan ENDED here; false when it rolled into a successor.
-    function forceCloseOrContinue(LoanBook storage B, mapping(bytes32 => Market) storage MM, Cfg memory c, uint256 id) public returns (bool settled) {
-        Loan storage L = B.loans[id];
-        if (L.closedAt != 0) revert LoanClosed();
-        if (block.timestamp < L.expiry) revert NotExpired();
-        Market storage M = MM[L.market];
-        AutoPolicy memory ap = B.autoPolicyOf[id];
-        if (ap.tenor == 0) {
-            forceClose(B, M, c, id);
-            return true;
-        }
-        uint256 units = L.collateralUnits;
-        uint256 sliver = LoanAccounting.sliverUnits(B, M, c, id, units);
-        /// @dev The fold never routes: one cache twice, and the loan's own market as the destination.
-        /// @dev A caller-named destination here would let a griefer SETTLE an admissible loan with a bad one.
-        (bool ok,, uint256 principal, uint256 cap) = Borrower.tryContinue(B, MM, RollFrames(c, c, L.market), id, units - sliver);
-        if (!ok) {
-            forceClose(B, M, c, id); // _settle credits its OWN sliver, same size
-            return true;
-        }
-        L.collateralUnits = units - sliver; // effect before the credit
-        if (sliver > 0) IPositionManager(c.positionManager).retireCustody(id, sliver);
-        LoanAccounting.creditUnits(B, id, msg.sender, sliver); // credited, so a refused crank address cannot stop the roll
-        emit ExpiryRolled(id, _roll(B, MM, c, id, principal, ap, cap), sliver, msg.sender);
-    }
-
-    /// @dev The roll's migration call, in its own frame: the linked call ABI-encodes its arguments (stack).
-    /// @dev `cap` is the predicate's own answer, the max sentinel on this always-home roll, so the open it commits to reads no dependency twice.
-    function _roll(LoanBook storage B, mapping(bytes32 => Market) storage MM, Cfg memory c, uint256 id, uint256 principal, AutoPolicy memory ap, uint256 cap)
-        private
-        returns (uint256)
-    {
-        /// @dev The zeroes are STRUCTURAL: an expiry roll supplies no caller numbers, so it can shed no collateral.
-        /// @dev Any field appended to `MigrateArgs` inherits this silence -- give it a zero that means "the roll declines it".
-        bytes32 market = B.loans[id].market;
-        MigrateArgs memory a = MigrateArgs(id, market, principal, ap.tenor, OpenBounds(0, uint256(ap.minBufferBps) * 1e14, 0), 0, address(0));
-        return Borrower.migrate(B, MM, c, c, a, PreAdmitted(true, market, cap, 0), false);
-    }
-
-    /* ====== 2. SETTLE: the terminal crank ====== */
+    /* ====== 1. SETTLE: the terminal crank ====== */
 
     /// @notice Settle a loan whose distress has persisted for the full settle window. Final.
     /// @dev The ONLY precondition is the derived one: a recovery print makes this revert, no verb.
@@ -121,16 +52,15 @@ library Settlement {
         uint256 units = L.collateralUnits;
         L.collateralUnits = 0;
         L.closedAt = uint64(block.timestamp);
-        (uint256 bad, uint256 left) = _settle(B, M, c, id, L.borrower, units, true);
+        (uint256 bad, uint256 left) = _settle(B, M, c, id, L.borrower, units);
         emit Finalized(id, left, bad, msg.sender);
     }
 
     /// @notice Settle an expired loan by claim conversion; equity above what the market takes is CREDITED to the borrower. Final.
     /// @notice A RECORDLESS market takes the whole coverage line rather than the claims' need, so its borrower may keep nothing.
-    /// @dev Consults NO external dependency on the settle branch; the ARMED branch asks the record through the predicate.
-    /// @dev The settle branch still BRANCHES on whether a record is WIRED, and that read is what widens the bound.
-    /// @dev `settleExpired` is the must-execute backstop: it consults no record, so it is what bounds worst-case at tenor.
-    /// @dev The SETTLE branch: the hub dispatches through `forceCloseOrContinue` above.
+    /// @notice THE one settle verb at tenor, from the expiry second; it extends nothing, and from that second no extension or refinance lands.
+    /// @dev MUST EXECUTE: it asks no roll policy and calls no record; it reads only whether a record is WIRED, which widens the bound.
+    /// @dev Its one external call is `retireCustody`, a storage hop; what can stop it is the caller's own limit, an id naming no loan, or the guard.
     function forceClose(LoanBook storage B, Market storage M, Cfg memory c, uint256 id) public {
         Loan storage L = B.loans[id];
         if (L.closedAt != 0) revert LoanClosed();
@@ -138,36 +68,17 @@ library Settlement {
         uint256 units = L.collateralUnits;
         L.collateralUnits = 0;
         L.closedAt = uint64(block.timestamp);
-        (uint256 bad, uint256 left) = _settle(B, M, c, id, L.borrower, units, true);
+        (uint256 bad, uint256 left) = _settle(B, M, c, id, L.borrower, units);
         emit ForceClosed(id, left, bad, msg.sender);
     }
 
-    /// @notice Settle an expired loan WITHOUT consulting the record, once the roll window has passed.
-    /// @notice Permissionless, and it pays the caller NOTHING: the sliver rides the paid doors alone.
-    /// @dev The must-execute path made unconditional: a dependency that cannot answer can DELAY settlement, never block it.
-    /// @dev The paid door never SHUTS, so a late roll still succeeds and this only ends a loan someone chose to end.
-    /// @dev Three pieces, three jobs: it EXISTS so the brick dies, it PAYS NOTHING so no keeper steers, it is CLOCKED so the borrower's roll survives.
-    /// @dev The window is the loan's own, not the market's floor: a longer tenor earns a proportionally longer roll window.
-    /// @dev No sweep: the sweep rides the paid crank; the hub's lender push is swallowed, so no quote or lender can fail this door.
-    function settleExpired(LoanBook storage B, Market storage M, Cfg memory c, uint256 id) public {
-        Loan storage L = B.loans[id];
-        if (L.closedAt != 0) revert LoanClosed();
-        if (block.timestamp < uint256(L.expiry) + MarketInit.autoRefinanceWindow(L.tenor)) revert RollWindowOpen();
-        uint256 units = L.collateralUnits;
-        L.collateralUnits = 0;
-        L.closedAt = uint64(block.timestamp);
-        (uint256 bad, uint256 left) = _settle(B, M, c, id, L.borrower, units, false);
-        emit SettledUnpaid(id, left, bad, msg.sender);
-    }
-
     /// @notice The CLEAN close: credit the collateral to the holder, credit the unearned fee escrow.
-    /// @dev REPAY is the one caller: a deleverage melt stops at `minDebt`, so it never closes a loan.
-    /// @dev The caller splits the fee escrow FIRST; this credits whatever the term did not earn.
-    /// @dev CREDITED, not pushed: a holder the collateral or the quote refuses must not brick a repay.
+    /// @dev Two callers: a closing `repay` and a closing deleverage sale.
+    /// @dev The caller split the fee escrow FIRST; this credits whatever the term did not earn.
+    /// @dev CREDITED, not pushed: a holder the collateral or the quote refuses must not brick the close.
     function closeClean(LoanBook storage B, Market storage M, Cfg memory c, uint256 id) internal {
         Loan storage L = B.loans[id];
         L.closedAt = uint64(block.timestamp);
-        Borrower.releaseReserve(B, M, id); // a repaid loan rolls nowhere, so its reserved cash is lendable again
         uint256 units = L.collateralUnits;
         L.collateralUnits = 0;
         if (units > 0) IPositionManager(c.positionManager).retireCustody(id, units);
@@ -175,25 +86,22 @@ library Settlement {
         LoanAccounting.refundFeeEscrow(B, M, id, L.borrower);
     }
 
-    /// @dev The shared title-transfer core: the keeper sliver off the top when paid, then the claim.
+    /// @dev The shared title-transfer core: the keeper sliver off the top, none where the market pays no bounty, then the claim.
     /// @dev The claim bears its own write-down; what the market's bound leaves is CREDITED to the borrower.
     /// @dev MAKES NO EXTERNAL COLLATERAL TRANSFER: every leg is a ledger write, so settlement is total.
     /// @dev A short close RECORDS what the claim did not get, post-sliver: per loan, plus the market's total.
     /// @dev `retireCustody` is the ONE external call, and both records are written AFTER it, never before.
-    /// @dev `pay` false suppresses the sliver, and those units fall through to the claims and the borrower.
-    /// @dev Only the unpaid backstop passes false, so waiting for it costs a keeper the sliver the paid doors credit.
-    function _settle(LoanBook storage B, Market storage M, Cfg memory c, uint256 id, address borrower, uint256 units, bool pay)
+    function _settle(LoanBook storage B, Market storage M, Cfg memory c, uint256 id, address borrower, uint256 units)
         private
         returns (uint256 badDebt, uint256 unitsAfterSliver)
     {
-        /// @dev FIRST, and before any external call: _finalizeLoanFor zeroes the claims this credits.
+        /// @dev Before any external call: _finalizeLoanFor zeroes the claims this credits.
         /// @dev Settlement earns the whole fee escrow -- the lender bore the outcome, so none is refundable.
         LoanAccounting.earnFeeEscrowFully(B, M, id);
-        Borrower.releaseReserve(B, M, id); // `M` is the loan's own market on every caller, where its reservation sits
         /// @dev ONE custody move, and it moves no token: the whole lot leaves the live ledger at once.
         /// @dev What the hub does next is pure bookkeeping over units the custodian already holds for this loan.
         if (units > 0) IPositionManager(c.positionManager).retireCustody(id, units);
-        uint256 sliver = pay ? LoanAccounting.sliverUnits(B, M, c, id, units) : 0;
+        uint256 sliver = LoanAccounting.sliverUnits(B, M, c, id, units);
         if (sliver > 0) LoanAccounting.creditUnits(B, id, msg.sender, sliver);
         units -= sliver;
 
@@ -273,8 +181,8 @@ library Settlement {
     /// @dev How much of the lot the market side takes: the claims' need, or the whole coverage where there is no record.
     /// @dev CLASS, NEVER LIVENESS: this turns on whether a record was ever WIRED, which genesis fixes and no party can flip.
     /// @dev A RECORDLESS LENDER HAS NO EARLY SEIZURE AT ALL and prices that when they rest; the coverage is what pays for it.
-    /// @dev A recordless loan cannot arm, so no refused roll reaches this bound: only its tenor running out does.
-    /// @dev A wired record that stops answering closes every judgment-spending door -- draw, roll, withdrawal, deleverage -- and moves no value.
+    /// @dev A recordless loan reaches this bound only by its tenor running out: `finalize` refuses `NoRecord` there.
+    /// @dev A wired record that stops answering closes every judgment-spending door -- draw, extension, withdrawal, deleverage -- and moves no value.
     /// @dev Some classes keep answering the below-question through silence, so title can still move; that is theirs to rule, not this bound's.
     /// @dev Reading liveness HERE would price a loan off a transient answer whose moment the settling caller picks.
     /// @dev Priced BEFORE `_finalizeLoanFor`, which deletes the funding floor this reads.

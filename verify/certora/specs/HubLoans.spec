@@ -9,7 +9,11 @@
 
 methods {
     function FullMath.mulDiv(uint256 a, uint256 b, uint256 d) internal returns (uint256) => fmDown(a, b, d);
-    function FullMath.mulDivRoundingUp(uint256 a, uint256 b, uint256 d) internal returns (uint256) => fmUp(a, b, d);
+    // NO SUMMARY FOR `mulDivRoundingUp`, AND IT MUST NOT BE GIVEN ONE: via-IR inlines that 4-line wrapper, so a
+    // requested summary cannot bind and the prover fails the run outright rather than warning (674 errors, every verb).
+    // Its body calls `mulDiv`, which IS summarized, so the 512-bit nonlinear core is still uninterpreted; what runs is
+    // `fmDown(a,b,d)` plus a `mulmod` ceil step. That is STRICTLY more faithful than a free `fmUp` ghost, which let the
+    // ceiling and the floor drift apart arbitrarily instead of tying ceil to floor plus a remainder bit.
     function Math.mulDiv(uint256 x, uint256 y, uint256 d) internal returns (uint256) => ozPlain(x, y, d);
     function Math.mulDiv(uint256 x, uint256 y, uint256 d, Math.Rounding r) internal returns (uint256) => ozRounded(x, y, d, r);
     function Mul512.gt512(uint256 a, uint256 b, uint256 c, uint256 d) internal returns (bool) => gt512Ghost(a, b, c, d);
@@ -29,7 +33,6 @@ methods {
 }
 
 persistent ghost fmDown(uint256, uint256, uint256) returns uint256;
-persistent ghost fmUp(uint256, uint256, uint256) returns uint256;
 persistent ghost ozPlain(uint256, uint256, uint256) returns uint256;
 persistent ghost ozFloor(uint256, uint256, uint256) returns uint256;
 persistent ghost ozCeil(uint256, uint256, uint256) returns uint256;
@@ -61,12 +64,8 @@ rule aClosedLoanStaysClosed(env e, method f, calldataarg args, uint256 loanId)
 }
 
 // `pushToken` is out of both invariants: its one door is the hub's own self-call, vacuous with the hub barred as caller.
-// THE POLICY BATCH IS OUT AS MULTICALL IS: its loop body is `refinanceByPolicy`'s verbatim -- the same market cache, the
-// same frames, the same library call, under the same held guard -- so it preserves whatever that verb does, and that verb
-// is checked. Run whole, its two-leg unrolling exhausted an 8-hour budget on both invariants (UNKNOWN, never FAIL).
 definition freshIdVerb(method f) returns bool = !f.isView && f.contract == currentContract && notMulticall(f)
-    && f.selector != sig:pushToken(address,address,uint256).selector
-    && f.selector != sig:refinanceByPolicies(uint256[]).selector;
+    && f.selector != sig:pushToken(address,address,uint256).selector;
 
 // MARKET ZERO IS NEVER CREATED: a market id is the hash of its params, and the hub's market cache refuses one with no
 // quote. Without it the prover settles a blank loan, whose market is zero, against a market zero it made up.
@@ -101,19 +100,12 @@ rule theIdCounterNeverMovesBack(env e, method f, calldataarg args)
     assert idCount() >= before, "the id counter moved backwards";
 }
 
-// THE ONE REFUSAL HubLeanGates.spec's partial `tryContinue` summary keeps, proven here on the REAL predicate (this
-// spec summarizes no gate): a closed loan never continues, home or routed. The leg is the predicate's first and reads
-// no other argument, so the two views cover every internal caller -- the fold and refinanceByPolicy alike.
-rule aClosedLoanNeverContinues(env e, uint256 id) {
+// THE CLOSED-LOAN LEG of the extension predicate, proven here on the REAL code (this spec summarizes no gate): a closed
+// loan never extends. `tryExtend` runs `extend`'s own predicate for any caller, and the leg is its first and reads no
+// other argument. HubLeanGates.spec keeps that leg real in `extend`.
+rule aClosedLoanNeverExtends(env e, uint256 id, uint256 minBufferWad, bytes data, address caller) {
     require closedAtOf(id) != 0;
-    bool ok; bytes4 reason; uint256 principal;
-    ok, reason, principal = tryContinue(e, id);
-    assert !ok, "the continuation predicate admitted a closed loan";
-}
-
-rule aClosedLoanNeverContinuesTo(env e, uint256 id, bytes32 dst) {
-    require closedAtOf(id) != 0;
-    bool ok; bytes4 reason; uint256 principal;
-    ok, reason, principal = tryContinueTo(e, id, dst);
-    assert !ok, "the routed continuation predicate admitted a closed loan";
+    bool ok; bytes4 reason; uint256 fee;
+    ok, reason, fee = tryExtend(e, id, minBufferWad, data, caller);
+    assert !ok, "the extension predicate admitted a closed loan";
 }

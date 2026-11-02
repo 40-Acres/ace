@@ -215,7 +215,7 @@ contract AceInventoryAskRecordlessTwinTest is WarpClock {
         usdc = new MockERC20("USD Coin", "USDC", 6);
         item = new MockERC20("Item", "ITEM", 18);
         pm = new PositionManager(vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1));
-        ace = new Ace(address(0x7EA5), address(pm), PocDeployConfig.PUSH_GAS);
+        ace = new Ace(address(0x7EA5), address(pm), PocDeployConfig.PUSH_GAS, AceFixtures.POLICY_GAS);
         read = new AceReader(address(ace));
 
         MarketParams memory p;
@@ -226,7 +226,7 @@ contract AceInventoryAskRecordlessTwinTest is WarpClock {
         p.baseBps = 40;
         p.minTenor = 7 days;
         p.maxTenor = 30 days;
-        p.minDebt = 10e6;
+        p.minPrincipal = 10e6;
         p.lender = lender;
         offId = ace.createMarket(p);
         p.inventoryAsk = true;

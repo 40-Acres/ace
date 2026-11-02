@@ -14,7 +14,7 @@ library PriceGrid {
     int24 internal constant TICKS = 50; // the grid's step, about 0.5%
     uint256 internal constant Q96 = 1 << 96; // the hub's price frame
 
-    /// @notice The highest price on the grid at or under `p`; zero for a zero price or one under the grid's range.
+    /// @notice The highest grid price at or under `p`, except a grid price whose root is inexact, which floors one step down; zero under the grid.
     /// @dev The root floors and the tick floors twice, in `getTickAtSqrtPrice` and `compress`, so the result never exceeds `p`.
     function down(uint256 p) public pure returns (uint256) {
         if (p == 0) return 0;

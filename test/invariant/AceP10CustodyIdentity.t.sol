@@ -33,7 +33,7 @@ contract AceP10CustodyIdentityTest is StdInvariant, Test {
         read = handler.read();
         pm = handler.positionManager();
 
-        bytes4[] memory sel = new bytes4[](25);
+        bytes4[] memory sel = new bytes4[](24);
         sel[0] = AceHandler.deposit.selector;
         sel[1] = AceHandler.withdraw.selector;
         /// @dev The three receipt verbs are gone and `collect` is the one credit door that replaced them.
@@ -56,17 +56,17 @@ contract AceP10CustodyIdentityTest is StdInvariant, Test {
         sel[18] = AceHandler.claimOwed.selector;
         sel[19] = AceHandler.transferTitle.selector;
         sel[20] = AceHandler.migrate.selector;
-        sel[21] = AceHandler.armPolicy.selector;
-        sel[22] = AceHandler.refinanceByPolicy.selector;
-        sel[23] = AceHandler.refinanceByPolicies.selector;
-        sel[24] = AceHandler.createMarket.selector;
+        /// @dev The extension verbs: a cash extension moves no unit, so (A) and (B) must both read it as nothing.
+        sel[21] = AceHandler.extend.selector;
+        sel[22] = AceHandler.setRollPolicy.selector;
+        sel[23] = AceHandler.createMarket.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: sel}));
         targetContract(address(handler));
     }
 
     /// @dev Every address the handler ever lets a close or a settlement credit units to.
     /// @dev Borrowers take the residual and the clean-close return; the keeper takes the settle sliver.
-    /// @dev The handler itself cranks the ctor's baseline fold unpranked, so it holds that one sliver.
+    /// @dev The handler itself cranks the ctor's baseline settle unpranked, so it holds that one sliver.
     function _claimants() internal view returns (address[4] memory) {
         return [handler.borrowers(0), handler.borrowers(1), handler.keeper(), address(handler)];
     }

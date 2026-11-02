@@ -43,7 +43,7 @@ interface IAllowanceTransfer {
 /// @notice EXIT: pro rata in kind once home; the curator takes FEE_BPS of USDC paid out above the 1:1 basis, never of tokens.
 /// @dev The quote is min(24-36h block-start window, clearing) x (1 - d) on PriceGrid's step; in-block spot can only lower the borrower's own.
 /// @dev Room per account is its auction spend at the final clearing price, never its balance: a donation buys no room.
-/// @dev Cash rests across calls on purpose: a recordless loan cannot arm, a lock account cannot re-term, and no reservation's price stands stale.
+/// @dev Cash rests across calls on purpose: an extension draws none, a lock account cannot re-term, and no reservation's price stands stale.
 /// @dev RESERVE_TTL bounds a price's age, not a reservation's: a top-up re-prices, a new quote is a new market, and a window drop frees it to anyone.
 /// @dev The vault never sells or swaps the launch token; it leaves only through `exit`.
 contract LaunchVault is ReentrancyGuardTransient {
@@ -55,7 +55,7 @@ contract LaunchVault is ReentrancyGuardTransient {
     uint64 public constant MIN_TENOR = 7 days;
     uint64 public constant MAX_TENOR = 30 days;
     uint256 public constant COVERAGE_WAD = 1.25e18; // every market's minCoverageWad
-    uint256 public constant MIN_DEBT = 10e6; // every market's minDebt, in quote atoms
+    uint256 public constant MIN_PRINCIPAL = 10e6; // every market's minPrincipal, in quote atoms
     uint256 public constant FEE_BPS = 1000; // the curator's share of USDC paid out above the 1:1 basis
     uint24 public constant MIN_D_TICKS = 1054; // a discount of at least 10%
     uint24 public constant MAX_D_TICKS = 6932; // a discount of at most 50%
@@ -76,7 +76,7 @@ contract LaunchVault is ReentrancyGuardTransient {
     error AlreadyCredited();
     error NotLending(); // reservations open from openAt to lendEnd, on a live launch, until the curator stops
     error NoQuote();
-    error BelowMinDebt(); // the room left, the cash free or the ask is under one minimum ticket
+    error BelowMinPrincipal(); // the room left, the cash free or the ask is under one minimum ticket
     error NoReservation();
     error NotRecallable(); // the reservation is fresh, priced at or under the block-start quote, the term runs and no stop
     error NotCurator();
@@ -216,7 +216,7 @@ contract LaunchVault is ReentrancyGuardTransient {
         MarketParams memory p = _params(a, account, price);
         id = _switch(account, keccak256(abi.encode(p)));
         reserved = Math.min(Math.min(assets, _room(account, price, id)), Math.saturatingSub(IERC20(QUOTE).balanceOf(address(this)), feeOwed));
-        if (reserved < MIN_DEBT) revert BelowMinDebt();
+        if (reserved < MIN_PRINCIPAL) revert BelowMinPrincipal();
         if (ILaunchVaultHub(HUB).idToMarketParams(id).quote == address(0)) ILaunchVaultHub(HUB).createMarket(p);
         IERC20(QUOTE).forceApprove(HUB, reserved);
         ILaunchVaultHub(HUB).deposit(id, reserved);
@@ -299,7 +299,7 @@ contract LaunchVault is ReentrancyGuardTransient {
         if (curator == address(0)) revert ZeroCurator();
         if (
             dTicks < MIN_D_TICKS || dTicks > MAX_D_TICKS || baseBps < Constants.MIN_BASE_BPS || !LoanMath.feeFundable(baseBps, MAX_TENOR, MIN_TENOR)
-                || LoanMath.originationFee(MIN_DEBT, MAX_TENOR, baseBps, MIN_TENOR) >= MIN_DEBT
+                || LoanMath.originationFee(MIN_PRINCIPAL, MAX_TENOR, baseBps, MIN_TENOR) >= MIN_PRINCIPAL
         ) revert BadTerms();
         Terms memory c;
         (c.token, c.curator, c.dTicks, c.baseBps, c.tokenIs0) = (token, curator, dTicks, baseBps, token < QUOTE);
@@ -377,7 +377,7 @@ contract LaunchVault is ReentrancyGuardTransient {
     /// @dev `account`'s recordless market at `price`: this vault the lender, the account the one borrower, every channel and bounty off.
     function _params(Terms memory a, address account, uint256 price) private view returns (MarketParams memory p) {
         (p.quote, p.collateral, p.borrower, p.price, p.lender) = (QUOTE, a.token, account, price, address(this));
-        (p.minCoverageWad, p.baseBps, p.minTenor, p.maxTenor, p.minDebt) = (COVERAGE_WAD, a.baseBps, MIN_TENOR, MAX_TENOR, MIN_DEBT);
+        (p.minCoverageWad, p.baseBps, p.minTenor, p.maxTenor, p.minPrincipal) = (COVERAGE_WAD, a.baseBps, MIN_TENOR, MAX_TENOR, MIN_PRINCIPAL);
     }
 
     /// @dev Withdraw everything resting in `id`; an empty market is skipped, since the hub refuses to withdraw nothing.

@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Ace, InventoryHeld, LoanClosed, LoanMatured, NoMarket, NotBorrower, ZeroWithdrawal} from "../../src/ace/hub/Ace.sol";
-import {BelowMinDebt, DrawBelowDebt, MarketPairMismatch, QuoteMismatch, ZeroWithdrawTo} from "../../src/ace/hub/Borrower.sol";
+import {BelowMinPrincipal, DrawBelowDebt, MarketPairMismatch, QuoteMismatch, ZeroWithdrawTo} from "../../src/ace/hub/Borrower.sol";
 import {EmptyPot, ExitToHub, Lender, NotTheLender} from "../../src/ace/hub/Lender.sol";
 import {ExitToCustodian} from "../../src/ace/hub/libraries/Recipients.sol";
 import {NotMaker, OrderClosed, Orders} from "../../src/ace/hub/Orders.sol";
@@ -716,8 +716,8 @@ contract AceRefinanceWithdrawRecipientRailsTest is AceRefinanceWithdrawFixture {
         vm.expectCall(address(pm), abi.encodeWithSelector(IPositionManager.carryOut.selector), 0);
         vm.expectCall(address(pm), abi.encodeWithSelector(IPositionManager.release.selector), 0);
         _refuses(_args(oldId, flat, P / 2, TAKE_R, address(ace)), ExitToHub.selector, "the hub before a draw that cannot retire the debt");
-        _refuses(_args(oldId, flat, 1, TAKE_R, address(0)), ZeroWithdrawTo.selector, "zero before a draw under minDebt");
-        _refuses(_args(oldId, flat, 1, TAKE_R, address(pm)), ExitToCustodian.selector, "the custodian before a draw under minDebt");
+        _refuses(_args(oldId, flat, 1, TAKE_R, address(0)), ZeroWithdrawTo.selector, "zero before a draw under minPrincipal");
+        _refuses(_args(oldId, flat, 1, TAKE_R, address(pm)), ExitToCustodian.selector, "the custodian before a draw under minPrincipal");
         _assertRollUnmoved(oldId, s);
     }
 
@@ -725,7 +725,7 @@ contract AceRefinanceWithdrawRecipientRailsTest is AceRefinanceWithdrawFixture {
     function test_RefinanceToDrawRailsStillSpeakForAValidRecipient() public {
         uint256 oldId = _open(flat, COLL_R, P);
         _refuses(_args(oldId, flat, P / 2, TAKE_R, sink), DrawBelowDebt.selector, "control: the netting refuses a short draw");
-        _refuses(_args(oldId, flat, 1, TAKE_R, sink), BelowMinDebt.selector, "control: the open refuses a dust draw");
+        _refuses(_args(oldId, flat, 1, TAKE_R, sink), BelowMinPrincipal.selector, "control: the open refuses a dust draw");
     }
 
     /// @notice A NAMED recipient is checked even with zero units: naming the hub or the custodian is refused.

@@ -14,7 +14,7 @@ import {MockStakeVault} from "../mocks/MockStakeVault.sol";
 contract CuratorVaultMarketAdmissionTest is CuratorVaultBase {
     /// @dev A vault listing the rig collateral on `l`, with no market created at the hub yet.
     function _bare(uint16 fee, Listing[] memory l) internal returns (CuratorVault v) {
-        v = new CuratorVault(_cfg(fee), RIG_MIN_DEBT, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, "Curator", "cVLT");
+        v = new CuratorVault(_cfg(fee), RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, "Curator", "cVLT");
     }
 
     function _bare(uint16 fee) internal returns (CuratorVault v) {

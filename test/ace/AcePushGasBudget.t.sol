@@ -7,7 +7,6 @@ import {Ace} from "../../src/ace/hub/Ace.sol";
 import {Lender} from "../../src/ace/hub/Lender.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {RevenueRouter} from "../../src/ace/treasury/RevenueRouter.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
@@ -52,7 +51,7 @@ contract GasHookLender {
 }
 
 /// @title PushGasDoorRig
-/// @notice A funded market whose one lender is `alice`, and the four terminal doors driven at a chosen gas limit.
+/// @notice A funded market whose one lender is `alice`, and the repay, finalize and forceClose doors driven at a chosen gas limit.
 /// @dev Every probe runs from a snapshot and is classified, then the chain is put back: a bisection never moves state.
 /// @dev THE LEAST LIMIT a door completes at is what an estimator lands on, so it is the number these rows reason about.
 abstract contract PushGasDoorRig is WarpClock {
@@ -78,9 +77,9 @@ abstract contract PushGasDoorRig is WarpClock {
     uint256 internal constant FROM_ZERO_MARGIN = 20_000; // SSTORE_SET: what one credit slot emptied before inclusion can add
 
     uint8 internal constant REPAY = 0; // the closing repay
-    uint8 internal constant FINALIZE = 1;
-    uint8 internal constant FORCE = 2; // forceClose's settle branch
-    uint8 internal constant SETTLE = 3; // settleExpired
+    uint8 internal constant FINALIZE = 1; // the one door no sweep rides
+    uint8 internal constant FORCE = 2; // forceClose, the settle verb at tenor
+    uint8 internal constant DOORS = 3; // how many terminal doors this rig drives; the closing crank, the fourth, is pinned in AceDeleverageClosesDust
 
     uint8 internal constant OK = 0; // completed, no sweep event
     uint8 internal constant OK_SWEPT = 1; // completed with a sweep event
@@ -164,8 +163,7 @@ abstract contract PushGasDoorRig is WarpClock {
     function _name(uint8 door) internal pure returns (string memory) {
         if (door == REPAY) return "repay";
         if (door == FINALIZE) return "finalize";
-        if (door == FORCE) return "forceClose";
-        return "settleExpired";
+        return "forceClose";
     }
 
     /// @dev A fresh loan positioned for `door`, with its caller and calldata. Arm any hostility AFTER this: the open pays out.
@@ -183,12 +181,8 @@ abstract contract PushGasDoorRig is WarpClock {
             record.setBelow(true);
             return (loanId, keeper, abi.encodeCall(Ace.finalize, (loanId)));
         }
-        if (door == FORCE) {
-            _warpTo(uint256(read.loan(loanId).expiry) + 1);
-            return (loanId, keeper, abi.encodeCall(Ace.forceClose, (loanId)));
-        }
-        _warpTo(uint256(read.loan(loanId).expiry) + MarketInit.autoRefinanceWindow(read.loan(loanId).tenor) + 1);
-        return (loanId, keeper, abi.encodeCall(Ace.settleExpired, (loanId)));
+        _warpTo(uint256(read.loan(loanId).expiry) + 1);
+        return (loanId, keeper, abi.encodeCall(Ace.forceClose, (loanId)));
     }
 
     /// @dev One probe at `g` from `who`, classified, with the chain restored after.
@@ -271,7 +265,7 @@ abstract contract PushGasDoorRig is WarpClock {
 }
 
 /// @title AcePushGasBudget
-/// @notice THE FIXED PUSH BUDGET at the four terminal closes: strict on the caller, lenient on the callee.
+/// @notice THE FIXED PUSH BUDGET at the repay, finalize and forceClose closes: strict on the caller, lenient on the callee.
 /// @notice A limit that cannot hand the lender push its whole budget plus the tail reverts `PushGasShort`, so an estimate includes the push.
 /// @notice Once admitted, no quote, hook or drift INSIDE the push can revert the close: the callee spends at most the budget.
 /// @notice Drift in the close's own work before the check can still cost a from-zero write each; that residual is pinned below.
@@ -290,7 +284,7 @@ contract AcePushGasBudgetTest is PushGasDoorRig {
     /// @dev Never a success under the least limit, and never a silent skip: the estimate cannot land on a close that does not pay.
     /// @dev The revert is the bare selector, so a wrapper forwarding it copies four bytes.
     function test_PreCheck_UnderTheFloorRevertsPushGasShort() public {
-        for (uint8 door; door < 4; door++) {
+        for (uint8 door; door < DOORS; door++) {
             (uint256 id, address who, bytes memory data) = _door(door);
             uint256 g = _least(who, data, id, LO, HI, P_DONE);
             Run memory under = _run(who, data, g - 1, id);
@@ -318,7 +312,7 @@ contract AcePushGasBudgetTest is PushGasDoorRig {
     }
 
     function _tailRows(bool burn) internal {
-        for (uint8 door; door < 4; door++) {
+        for (uint8 door; door < DOORS; door++) {
             (uint256 id, address who, bytes memory data) = _door(door);
             if (burn) usdc.setBurnAll(true);
             else usdc.setSpinFloor(300);
@@ -458,9 +452,9 @@ contract AcePushGasBudgetTest is PushGasDoorRig {
     /// @dev Both shapes take the same catch path, so the difference is what the callee consumed and nothing else.
     function test_Hostile_ABurningQuoteBurnsAtMostTheBudgetPerPush() public {
         uint256 budget = PushGasRig.PUSH_GAS;
-        (uint256 a, address w1, bytes memory settle) = _door(SETTLE);
+        (uint256 a, address w1, bytes memory settle) = _door(FINALIZE);
         uint256 one = _burnOverRefusal(w1, settle, a);
-        emit log_named_uint("settleExpired: a full burn over a refusal (one push)", one);
+        emit log_named_uint("finalize: a full burn over a refusal (one push)", one);
         assertLe(one, budget, "a burning quote spent more than the budget on the one push");
         assertGe(one, (budget * 9) / 10, "and the push was really handed the budget");
 
@@ -487,7 +481,7 @@ contract AcePushGasBudgetTest is PushGasDoorRig {
 
     /// @notice A STARVED LEG BUBBLES `PushGasShort` THROUGH `multicall`, the four bytes and nothing else.
     function test_Multicall_AStarvedLegBubblesPushGasShort() public {
-        (uint256 id,, bytes memory leg) = _door(SETTLE);
+        (uint256 id,, bytes memory leg) = _door(FINALIZE);
         bytes[] memory legs = new bytes[](1);
         legs[0] = leg;
         bytes memory data = abi.encodeCall(Ace.multicall, (legs));
@@ -526,13 +520,13 @@ contract AcePushGasBudgetTest is PushGasDoorRig {
     function test_Floor_ThePublishedFloorIsTheDemandAndRoundsUpByOneGas() public {
         (uint256 exact, uint256 floorExact) = _leastSettleOnAHubAt(63_000);
         (uint256 over, uint256 floorOver) = _leastSettleOnAHubAt(63_001);
-        emit log_named_uint("settleExpired least limit at a 63,000 budget", exact);
-        emit log_named_uint("settleExpired least limit at a 63,001 budget", over);
+        emit log_named_uint("finalize least limit at a 63,000 budget", exact);
+        emit log_named_uint("finalize least limit at a 63,001 budget", over);
         assertEq(over - exact, floorOver - floorExact, "the least limit does not track the published PUSH_FLOOR");
         assertEq(floorOver - floorExact, 2, "the floor no longer takes the ruled ceil on 63,001 x 64/63");
     }
 
-    /// @dev A fresh hub at `pushGas` with this rig's market, one loan past its roll window, its least settling limit and its floor.
+    /// @dev A fresh hub at `pushGas` with this rig's market, one loan in proven distress, its least `finalize` limit and its floor.
     function _leastSettleOnAHubAt(uint256 pushGas) internal returns (uint256 g, uint256 floor) {
         uint256 snap = vm.snapshotState();
         (Ace saved, PositionManager savedPm, AceReader savedRead, bytes32 savedMid) = (ace, pm, read, mid);
@@ -544,7 +538,7 @@ contract AcePushGasBudgetTest is PushGasDoorRig {
         AceFixtures.Deployment memory d = PushGasRig.deploy(p, treasury, pushGas);
         (ace, pm, read, mid) = (d.ace, d.positionManager, d.read, d.id);
         _lend(DEPOSIT);
-        (uint256 id, address who, bytes memory data) = _door(SETTLE);
+        (uint256 id, address who, bytes memory data) = _door(FINALIZE);
         g = _least(who, data, id, LO, HI, P_DONE);
         floor = ace.PUSH_FLOOR();
         (ace, pm, read, mid) = (saved, savedPm, savedRead, savedMid);
@@ -558,7 +552,7 @@ contract AcePushGasBudgetTest is PushGasDoorRig {
     /// @dev A close that credits nothing pushes only when someone else has credited the pair, and demands the budget only then.
     /// @dev That close EXISTS: a dust loan whose origination fee rounds to 1 escrows nothing. A recorded residual, not a fixture.
     function test_Close_EveryTerminalCloseCreditsThePoolItPushes() public {
-        for (uint8 door; door < 4; door++) {
+        for (uint8 door; door < DOORS; door++) {
             (uint256 id, address who, bytes memory data) = _door(door);
             vm.prank(alice);
             ace.collect(quote, alice);
@@ -645,7 +639,7 @@ contract AcePushGasShapesTest is PushGasDoorRig {
     /// @dev forceClose's due sweep is skipped there, stamp and counter untouched: the least limit funds the lender alone.
     function test_Estimate_EveryDoorPushesAtItsLeastLimit() public {
         for (uint8 shape; shape < 2; shape++) {
-            for (uint8 door; door < 4; door++) {
+            for (uint8 door; door < DOORS; door++) {
                 (uint256 id, address who, bytes memory data) = _door(door);
                 uint64 stamp = read.marketState(mid).lastSweptAt;
                 uint256 banked = read.protocolRevenue(mid);
@@ -670,8 +664,8 @@ contract AcePushGasShapesTest is PushGasDoorRig {
     /// @notice THE TWO SHAPES' LEAST LIMITS AGREE at the doors whose path to the push touches no quote.
     /// @dev The demand is the fixed floor, so a dearer token moves nothing an estimator sees; only the paying frame costs more.
     function test_PreCheck_TheLimitIsSetByTheBudgetNotTheNeed() public {
-        uint8[3] memory doors = [FINALIZE, FORCE, SETTLE];
-        for (uint256 i; i < 3; i++) {
+        uint8[2] memory doors = [FINALIZE, FORCE];
+        for (uint256 i; i < 2; i++) {
             (uint256 a, address wa, bytes memory da) = _door(doors[i]);
             uint256 gUsdc = _least(wa, da, a, LO, HI, P_DONE);
             assertTrue(_run(wa, da, gUsdc, a).collected, "premise: the usdc shape pays at its least limit");
@@ -703,7 +697,7 @@ contract AcePushGasHookTest is PushGasDoorRig {
     /// @notice A HOOK THAT BURNS AT INCLUSION, OFF AT THE ESTIMATE, CANNOT REVERT THE CLOSE: one attempt, the fallback, `collect` later.
     function test_Drift_AHookThatBurnsAtInclusionCannotRevertTheClose() public {
         vm.etch(alice, type(GasHookLender).runtimeCode);
-        (uint256 id, address who, bytes memory data) = _door(SETTLE);
+        (uint256 id, address who, bytes memory data) = _door(FINALIZE);
         uint256 g = _least(who, data, id, LO, HI, P_DONE);
         assertTrue(_run(who, data, g, id).collected, "premise: with the hook off the estimate pays");
 

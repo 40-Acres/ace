@@ -299,13 +299,13 @@ contract AceNoRecordPriceFailClosedTest is Test {
 }
 
 /// @title AceRecordDoors
-/// @notice FOUR doors read the same record for the same market, and must name that state ALIKE.
+/// @notice FOUR doors read the same record for the same market, and must name a record with no usable price ALIKE.
 /// @notice `open` and `previewOpen` reach it through the draw walk's cap; the two lens forwarders
-/// @notice reach it through `previewOpen` and through the continuation predicate.
-/// @notice The pair below is the whole assertion: a record with NO usable price and a record with a
-/// @notice usable one and no cash must never collapse onto one selector, nor split across the doors.
+/// @notice reach it through `previewOpen` and through the borrower's extension predicate.
+/// @notice The pair below is the whole assertion: a record with NO usable price and a record with a usable one and no cash never collapse.
+/// @notice An extension draws no cash, so over an empty ladder the three draw doors say `InsufficientCash` and the extension door admits.
 /// @dev Both answers are gathered BEFORE any assertion, so one run names every door that disagrees.
-/// @dev A predicate-only fix passes the continuation row and fails the three draw rows, by construction.
+/// @dev The lender names a yes-policy, so the extension door's answer turns on the record alone.
 contract AceRecordDoorsTest is Test {
     Ace internal ace;
     AceLens internal lens;
@@ -325,7 +325,7 @@ contract AceRecordDoorsTest is Test {
     uint256 internal constant PRINCIPAL = 4_000e6;
     uint64 internal constant TENOR = ProtocolPolicy.MIN_TENOR;
 
-    uint256 internal loanId; // armed and inside its window, so the continuation door reaches the record leg
+    uint256 internal loanId; // at its expiry second, so the borrower's extension door reaches the record leg
 
     OpenBounds internal OFF = OpenBounds(0, 0, 0);
 
@@ -356,11 +356,10 @@ contract AceRecordDoorsTest is Test {
         usdc.approve(address(ace), LADDER);
         ace.deposit(id, LADDER);
         vm.stopPrank();
+        AceFixtures.installYesPolicy(ace, alice);
 
         loanId = _open();
-        vm.prank(borrower);
-        ace.setAutoRefinance(loanId, TENOR, 0, 0);
-        vm.warp(read.loan(loanId).expiry - 1); // inside the refinance window and still before expiry
+        vm.warp(read.loan(loanId).expiry - 1); // the last second in which the loan extends, so every door is asked of a live term
     }
 
     /// @notice #270. A record with no usable price is ONE state, and all four doors must name it.
@@ -373,13 +372,13 @@ contract AceRecordDoorsTest is Test {
         assertEq(o, NoRecordPrice.selector, "ace.open blamed resting cash for the record");
         assertEq(pv, NoRecordPrice.selector, "ace.previewOpen blamed resting cash for the record");
         assertEq(q, NoRecordPrice.selector, "lens.tryQuoteOpen blamed resting cash for the record");
-        assertEq(k, NoRecordPrice.selector, "lens.tryContinue blamed resting cash for the record");
+        assertEq(k, NoRecordPrice.selector, "lens.tryExtend named some other state for the record");
     }
 
-    /// @notice THE NEGATIVE TWIN. A live cap over an emptied ladder is a CASH refusal at all four doors.
+    /// @notice THE NEGATIVE TWIN. A live cap over an emptied ladder is a CASH refusal at the three draw doors, and no refusal at the extension door.
     /// @notice Without it the row above could be satisfied by collapsing both states onto one selector,
     /// @notice which loses the discrimination a keeper acts on and is worse than the mis-attribution.
-    /// @dev Green today and green after: nothing in the fix touches a market whose record answers a price.
+    /// @dev An extension draws nothing, so it is never a cash door: an empty ladder leaves the borrower's extension admitted.
     function test_LiveRecordOverAnEmptyLadder_AllFourDoorsSayInsufficientCash() public {
         vm.prank(alice);
         ace.withdraw(id, type(uint256).max, alice, 0);
@@ -391,7 +390,7 @@ contract AceRecordDoorsTest is Test {
         assertEq(o, InsufficientCash.selector, "ace.open renamed a cash refusal");
         assertEq(pv, InsufficientCash.selector, "ace.previewOpen renamed a cash refusal");
         assertEq(q, InsufficientCash.selector, "lens.tryQuoteOpen renamed a cash refusal");
-        assertEq(k, InsufficientCash.selector, "lens.tryContinue renamed a cash refusal");
+        assertEq(k, bytes4(0), "lens.tryExtend refused an extension, which reads no resting cash");
     }
 
     /* ========================== helpers ========================== */
@@ -406,16 +405,16 @@ contract AceRecordDoorsTest is Test {
     }
 
     /// @dev Every door's answer for the CURRENT market state, gathered before anything is asserted.
-    function _fourDoors() internal returns (bytes4 openSel, bytes4 previewSel, bytes4 quoteSel, bytes4 continueSel) {
+    function _fourDoors() internal returns (bytes4 openSel, bytes4 previewSel, bytes4 quoteSel, bytes4 extendSel) {
         openSel = _openRefusal();
         previewSel = _previewRefusal();
         (, quoteSel,) = lens.tryQuoteOpen(id, COLL, PRINCIPAL, TENOR, borrower, OFF);
-        (, continueSel,) = lens.tryContinue(loanId);
+        (, extendSel,) = lens.tryExtend(loanId, 0, "", borrower);
         /// @dev Logged before the asserts, so a red run names every disagreeing door and not just the first.
         emit log_named_bytes32("ace.open          ", bytes32(openSel));
         emit log_named_bytes32("ace.previewOpen   ", bytes32(previewSel));
         emit log_named_bytes32("lens.tryQuoteOpen ", bytes32(quoteSel));
-        emit log_named_bytes32("lens.tryContinue  ", bytes32(continueSel));
+        emit log_named_bytes32("lens.tryExtend    ", bytes32(extendSel));
     }
 
     /// @dev The verb, reached raw: `expectRevert` would abort the run before the other doors answer.

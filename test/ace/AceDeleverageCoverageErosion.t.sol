@@ -33,8 +33,8 @@ import {PriceFrame} from "../utils/PriceFrame.sol";
 /// @dev The rail is pinned separately, for the job it actually does.
 /// @dev THE FIXTURES ARE HONEST DECLINES: every crank is armed one wei above the loan's own stop level.
 /// @dev `rises` asserts the armed level never moves UP across the sequence.
-/// @dev THE FIXTURES SIT AT THE LEAST `minDebt` GENESIS ADMITS: at a real floor `deleverage`'s `minDebt` cap ends the walk first.
-/// @dev That would leave the reserve with nothing to guard, so one row pins the cap at a real floor and the rest keep the reserve's subject.
+/// @dev THE FIXTURES SIT AT THE LEAST `minPrincipal` GENESIS ADMITS: at a real floor the walk ends in a close first.
+/// @dev That would leave the reserve with nothing to guard, so one row pins the close at a real floor and the rest keep the reserve's subject.
 /// @dev WHAT THEY DO NOT MODEL is the persistence WINDOW -- every crank fires at one timestamp here.
 /// @dev `AceDeleverageRestoreRace` models the clock and measures the restore rate against a real decline.
 contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
@@ -59,7 +59,7 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
     uint256 internal gasSpent; // gas the whole crank sequence burned, which is the extractor's real cost
 
     uint256 internal constant TENOR = 7 days;
-    uint256 internal constant MIN_DEBT_FLOOR = 2; // the least genesis admits: the minDebt cap never ends a decline before the reserve does
+    uint256 internal constant MIN_PRINCIPAL_FLOOR = 2; // the least genesis admits: a close fires only at a debt under two atoms
 
     /// @dev One market shape, so a fuzz seed and a hand-written row build through the same door.
     struct Shape {
@@ -73,7 +73,7 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
         uint8 qDec;
         uint256 lots; // WAS `maxClaimTicks`: the same number, now counting LOTS of cash rather than rungs
         uint256 lot;
-        uint256 minDebt;
+        uint256 minPrincipal;
     }
 
     function _deleverageQuote() internal view override returns (address) {
@@ -98,7 +98,7 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
         p.record = address(record);
         p.price = AceFixtures.priceAt(address(usdc), address(coll), top); // WAS the ladder's top rung, relative to par
         p.minCoverageWad = sh.k;
-        p.minDebt = sh.minDebt;
+        p.minPrincipal = sh.minPrincipal;
         p.deleverageFloorEpsBps = sh.eps;
         p.deleverageProtocolBps = sh.cut;
         p.deleverageBandBps = sh.band;
@@ -180,7 +180,7 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
         _market(sh, top);
         _seed(lots, sh.lot);
         uint256 principal = _maxPrincipal(units, lots * sh.lot);
-        assertGe(principal, sh.minDebt, "fixture: the position must admit a real draw");
+        assertGe(principal, sh.minPrincipal, "fixture: the position must admit a real draw");
         loanId = _open(units, principal);
         assertEq(_liveClaims(loanId), 1, "fixture: the draw must hold its claim to be the subject");
         assertLe(_need(loanId), read.loan(loanId).collateralUnits, "fixture: an admitted loan starts covered");
@@ -240,8 +240,8 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
     /// @dev The walk stops one atom clear of it, and the debt melts to dust on the way: under one collateral atom's first armed worth.
     /// @dev What stops it is the SIZING, not the reserve: at the worst fill `u = floor(C * 0.3 / 0.786)`, which is zero at `C = 2`.
     /// @dev With ONE claim this walk never brings the need near the position, so the reserve never binds on it.
-    /// @dev Measured: with the reserve AND the `minDebt` cap both mutated out this row stays green; the bind, rail-edge and sliver rows guard it.
-    /// @dev `_shipped` sets the least `minDebt` genesis admits, so the `minDebt` cap does not end the walk before the sizing does.
+    /// @dev Measured: with the reserve mutated out this row stays green; the bind, rail-edge and sliver rows guard it.
+    /// @dev `_shipped` sets the least `minPrincipal` genesis admits, so no close ends the walk before the sizing does.
     /// @dev Asserted on `shortfallOf`, which `_settle` itself writes: no mirrored arithmetic decides it.
     function test_ShippedShape_DeclineStopsOneAtomClearOfTheCoverageFloor() public {
         uint256 loanId = _decline(_shipped(), 0, 32, 60_000, 400);
@@ -271,26 +271,23 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
         assertEq(shortUnits, 0, "an admitted loan must not settle short at the SHIPPED tick cap either");
     }
 
-    /// @notice The SAME decline at a REAL `minDebt` of 1,000 USDC: the `minDebt` cap ends the walk on the floor, long before the reserve binds.
-    /// @notice So at a realistic floor the one-atom regime above is unreachable by cranking, and the loan still settles whole.
-    /// @dev The erosion rows above sit at the least `minDebt` genesis admits exactly so this cap stays out of their way.
-    function test_ShippedShape_AtARealMinDebt_TheCapEndsTheDeclineOnTheFloor() public {
+    /// @notice The SAME decline at a REAL `minPrincipal` of 1,000 USDC ends in a CLOSE, long before the reserve binds.
+    /// @notice Once a restore would leave the debt under the floor the crank sells the whole debt, so nothing is left to settle short.
+    /// @dev The erosion rows above sit at the least `minPrincipal` genesis admits exactly so the close stays out of their way.
+    function test_ShippedShape_AtARealMinDebt_TheDeclineEndsInAClose() public {
         Shape memory sh = _shipped();
-        sh.minDebt = 1_000e6;
+        sh.minPrincipal = 1_000e6;
         uint256 loanId = _decline(sh, 0, 32, 60_000, 400);
 
-        uint256 debt = read.debtOf(loanId);
-        uint256 need = _need(loanId);
-        assertGe(debt, sh.minDebt, "the decline bottomed out at the minDebt floor, never under it");
-        assertLt(debt - sh.minDebt, _oneAtomOfQuote(), "and within one collateral atom's worth of it");
-        assertGt(need, _liveClaims(loanId), "so the need never reached the one-atom floor the reserve guards");
-        assertGt(read.loan(loanId).collateralUnits, need + 1, "and the reserve never bound");
-        (uint256 shortUnits,) = _settleShortfall(loanId);
-        assertEq(shortUnits, 0, "an admitted loan must not settle short after a decline it survived");
+        assertGt(read.loan(loanId).closedAt, 0, "the decline ended in a close");
+        assertEq(read.debtOf(loanId), 0, "retiring the whole debt");
+        assertEq(_liveClaims(loanId), 0, "and its claim");
+        (uint256 shortUnits, uint256 badDebt) = read.shortfallOf(loanId);
+        assertEq(shortUnits + badDebt, 0, "a close is clean: no shortfall is recorded");
     }
 
-    /// @dev The quote one collateral atom fetched at the decline's HIGHEST armed price, ceiled: the coarsest the cap can land.
-    /// @dev The armed level only falls, so every capped crank in the sequence stopped within this of the floor.
+    /// @dev The quote one collateral atom fetched at the decline's HIGHEST armed price, ceiled: the coarsest step one unit's melt can take.
+    /// @dev The armed level only falls, so no later unit in the sequence fetched more.
     function _oneAtomOfQuote() internal view returns (uint256) {
         return FullMath.mulDivRoundingUp(firstPs, 1, unitScale);
     }
@@ -337,8 +334,9 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
     /// @dev Every market is built through `createMarket`, so genesis alone decides admissibility.
     /// @dev A seed genesis refuses is DISCARDED rather than clamped: clamping would invent an inadmissible market.
     /// @dev The position is fuzzed in ATOMS, not tokens, because the atom count is exactly what the defect spends.
-    /// @dev The lot is DERIVED from that count, so a seed opens a real loan at any decimals; `minDebt` is the least genesis admits.
+    /// @dev The lot is DERIVED from that count, so a seed opens a real loan at any decimals; `minPrincipal` is the least genesis admits.
     /// @dev Asserted on `shortfallOf`, the hub's own write, so no restated arithmetic can agree with the bug.
+    /// @dev OR CLOSED: measured, about 8 of 18 walks melt the debt to dust and the crank closes the loan clean instead.
     function testFuzz_DeleveragedLoan_IsAlwaysCoveredAtSettlement(uint256 dialSeed, uint256 decSeed, uint256 unitSeed) public {
         uint256 units = bound(unitSeed, 8, 4_000);
         Shape memory sh = _fuzzShape(dialSeed, decSeed, units);
@@ -348,8 +346,17 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
         if (loanId == 0) return; // the fixture could not open a loan at this shape
         reached++;
 
+        if (_assertClosedClean(loanId)) return;
         (uint256 shortUnits,) = _settleShortfall(loanId);
         assertEq(shortUnits, 0, "an admitted loan must not settle short after a decline it survived");
+    }
+
+    /// @dev True when a crank closed the loan, held to the close's own law: no debt and no recorded shortfall.
+    function _assertClosedClean(uint256 loanId) internal view returns (bool) {
+        if (read.loan(loanId).closedAt == 0) return false;
+        (uint256 shortUnits, uint256 badDebt) = read.shortfallOf(loanId);
+        assertEq(read.debtOf(loanId) + shortUnits + badDebt, 0, "or the decline closed it clean: no debt and no shortfall");
+        return true;
     }
 
     /// @notice The SINGLE-CRANK half of the property, stated separately so it cannot hide inside a sequence.
@@ -364,6 +371,7 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
         if (loanId == 0) return;
         reached++;
 
+        if (_assertClosedClean(loanId)) return;
         (uint256 shortUnits,) = _settleShortfall(loanId);
         assertEq(shortUnits, 0, "ONE deleverage crank must leave an admitted loan covered");
     }
@@ -387,12 +395,12 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
     /// @dev The decline, with the fixture's own preconditions turned into a skip rather than a failure.
     /// @dev Only the SUBJECT may fail here: a seed that funds nothing is a fixture miss, not a defect.
     function _declineOrSkip(Shape memory sh, uint256 units, uint256 cranks) internal returns (uint256 loanId) {
-        if (sh.lot == 0 || sh.minDebt == 0) return 0;
+        if (sh.lot == 0 || sh.minPrincipal == 0) return 0;
         if (!_creatable(sh)) return 0; // genesis refused the dials: not an admissible market, so not a subject
         _market(sh, 0);
         _seed(sh.lots, sh.lot);
         uint256 principal = _maxPrincipal(units, sh.lots * sh.lot);
-        if (principal < sh.minDebt) return 0;
+        if (principal < sh.minPrincipal) return 0;
         loanId = _open(units, principal);
         if (_liveClaims(loanId) == 0) return 0; // the draw funded nothing: a fixture miss, not a subject
         assertLe(_need(loanId), read.loan(loanId).collateralUnits, "fixture: an admitted loan starts covered");
@@ -406,7 +414,7 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
     }
 
     /// @dev A shape over the legal envelope; genesis is left to refuse the combinations it refuses.
-    /// @dev `lot` is sized off the position's own quote value, so no decimal pair goes vacuous; `minDebt` stays at the floor.
+    /// @dev `lot` is sized off the position's own quote value, so no decimal pair goes vacuous; `minPrincipal` stays at the floor.
     function _fuzzShape(uint256 dialSeed, uint256 decSeed, uint256 units) internal pure returns (Shape memory sh) {
         sh.k = bound(dialSeed, Constants.MIN_COVERAGE_WAD, Constants.MAX_COVERAGE_WAD);
         sh.eps = bound(uint256(keccak256(abi.encode(dialSeed, uint256(1)))), 1, Constants.MAX_DELEVERAGE_FLOOR_EPS_BPS);
@@ -419,7 +427,7 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
         /// @dev its whole depth is one balance -- and left unset this field defaulted to ZERO, which seeded
         /// @dev the market with nothing and made every run refuse `BelowMinLot` before reaching its subject.
         sh.lots = 1;
-        (sh.minDebt, sh.lot) = _sizes(sh, units);
+        (sh.minPrincipal, sh.lot) = _sizes(sh, units);
     }
 
     /// @dev The draw this position can carry at the market's price, and the deposit that funds it.
@@ -427,13 +435,13 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
     /// @dev IT PRICED AT THE SPAN'S LOWEST TICK -- `maxClaimTicks - 1` rungs under par -- and split the draw
     /// @dev into one lot per funded tick, because a draw walked down and the floor was wherever it stopped.
     /// @dev A market has one price, so par IS the floor and the whole draw funds from one balance.
-    function _sizes(Shape memory sh, uint256 units) internal pure returns (uint256 minDebt, uint256 lot) {
+    function _sizes(Shape memory sh, uint256 units) internal pure returns (uint256 minPrincipal, uint256 lot) {
         uint256 us = 1 << 96; // the hub's frame is a constant now, so no decimal pair moves it
         uint256 price = PriceFrame.priceAtStep(PriceFrame.parStep(sh.qDec, sh.cDec));
         uint256 draw = FullMath.mulDiv(FullMath.mulDiv(units, price, us), 1e18, sh.k);
         lot = draw;
-        minDebt = MIN_DEBT_FLOOR; // WAS `draw / 4`, which the minDebt cap turned into a floor every decline stopped on
-        if (draw < 16) (minDebt, lot) = (0, 0); // the position is worth too little quote to open anything
+        minPrincipal = MIN_PRINCIPAL_FLOOR; // WAS `draw / 4`, a floor every decline would now end on in a close
+        if (draw < 16) (minPrincipal, lot) = (0, 0); // the position is worth too little quote to open anything
     }
 
     /// @dev A legal `(collateral, quote)` decimal pair, over exactly the envelope MarketInit admits.
@@ -450,7 +458,7 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
         MarketParams memory p = AceFixtures.marketParams(address(q), address(c));
         p.record = address(new MockPersistenceRecord(address(q), address(c)));
         p.minCoverageWad = sh.k;
-        p.minDebt = sh.minDebt;
+        p.minPrincipal = sh.minPrincipal;
         p.deleverageFloorEpsBps = sh.eps;
         p.deleverageProtocolBps = sh.cut;
         p.deleverageBandBps = sh.band;
@@ -496,22 +504,12 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
         assertLt(soldLine, heldLine, "the reserve keeps the position off the sell-max edge the rail also bounds");
         assertEq(revLine, 0, "a reserve-capped crank does not restore, so it takes no cut");
         assertLe(_need(lineLoan), read.loan(lineLoan).collateralUnits, "and the loan still covers every live claim");
-        _assertSecuredBaseBoundNotTheMinDebtCap(lineLoan);
 
         (lastPs, rises, firstPs) = (0, 0, 0);
         (uint256 slackLoan, uint256 soldSlack, uint256 heldSlack, uint256 revSlack) = _oneCrank(_tightRail(), 71_412, 60);
         assertLt(soldSlack, heldSlack, "and slack above the line does not change it at the rail's edge");
         assertEq(revSlack, 0, "the reserve still binds at 60% of the admissible principal, so still no cut");
         assertLe(_need(slackLoan), read.loan(slackLoan).collateralUnits, "covered there too");
-        _assertSecuredBaseBoundNotTheMinDebtCap(slackLoan);
-    }
-
-    /// @dev Near the rail the sized sale's proceeds reach the whole debt, so the `minDebt` cap would ALSO stop it short.
-    /// @dev A cap-bound crank lands within one collateral atom's worth of quote of the floor; a `securedBase`-bound one lands far above.
-    /// @dev So a debt clear of that band names `securedBase` as the cap that bound, which the no-cut and hold-back asserts cannot.
-    /// @dev At the edge that is the RESERVE term (mutating it out lands the crank on the floor); under a violated rail it is bare `requiredAt`.
-    function _assertSecuredBaseBoundNotTheMinDebtCap(uint256 loanId) internal view {
-        assertGt(read.debtOf(loanId), MIN_DEBT_FLOOR + _oneAtomOfQuote(), "securedBase bound, not the minDebt cap: the debt stayed clear of the floor");
     }
 
     /// @notice THE RAIL PIN PROPER: with the rail HELD, the lowest admitted fill leaves the position.
@@ -553,7 +551,6 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
         assertLt(sold, held, "the reserve holds units back even under a rail genesis would have refused");
         assertEq(read.protocolRevenue(mid) - rev, 0, "RAIL VIOLATED: the crank cannot restore, so no cut is taken");
         assertLe(_need(loanId), read.loan(loanId).collateralUnits, "and the loan still covers every live claim");
-        _assertSecuredBaseBoundNotTheMinDebtCap(loanId);
     }
 
     /// @notice A RESERVE-CAPPED crank takes NO protocol cut, and this is a revenue consequence of the reserve.
@@ -668,7 +665,9 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
     /* ========================= the shipped shapes ========================= */
 
     function _shipped() internal pure returns (Shape memory sh) {
-        sh = Shape({k: 1.4e18, eps: 100, cut: 0, band: 3000, target: 4000, stop: 1000, cDec: 0, qDec: 6, lots: 32, lot: 2_200e6, minDebt: MIN_DEBT_FLOOR});
+        sh = Shape({
+            k: 1.4e18, eps: 100, cut: 0, band: 3000, target: 4000, stop: 1000, cDec: 0, qDec: 6, lots: 32, lot: 2_200e6, minPrincipal: MIN_PRINCIPAL_FLOOR
+        });
     }
 
     /// @dev k, eps and the cut at the corner where the sell-max rail is one bps from refusing the market.

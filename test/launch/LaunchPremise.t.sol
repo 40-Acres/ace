@@ -22,12 +22,13 @@ import {LaunchMarketParams} from "./LaunchFixture.sol";
 import {RunwayFixture} from "./RunwayFixture.sol";
 
 /// @title LaunchPremise
-/// @notice THE PREMISE THE TIME GATE RESTS ON, as a property: before launchBy no launch token is held outside the launch's own contracts.
+/// @notice THE PREMISE BEHIND THE TIME GATE, as a property: before launchBy no launch token is held outside the launch's own contracts.
 /// @notice Every token source is driven, by its holder and by strangers, at random times up to and AT launchBy, with the pool never opened.
 /// @notice Sources: team legs on two curves, buyer accounts, pledges and the lender's take, settle and the ops wallet, LP fees, sweeps.
 /// @notice Plus the boundary the gate couples: the first second a buyer's token vests is the first second the hook shuts the key.
 /// @dev Inside is the strategy, the auction, the budget, the ops wallet, the hub's custodian and the launch's lock accounts; a burn leaves the supply.
 /// @dev The auction is final and a failed migration has returned the reserve, so settle's only refusal before launchBy is TooEarly.
+/// @dev The premise does not keep an outside distribution off the key, since one selling USDC needs no launch token: the registration gate does.
 contract LaunchPremiseTest is RunwayFixture {
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
@@ -64,7 +65,7 @@ contract LaunchPremiseTest is RunwayFixture {
                     lender: lender,
                     price: AceFixtures.px(0.1e18, address(usdc), m.token),
                     baseBps: 40,
-                    minDebt: 10e6,
+                    minPrincipal: 10e6,
                     minCoverageWad: 1.4e18
                 })
             )

@@ -7,7 +7,6 @@ import {Lender} from "../../src/ace/hub/Lender.sol";
 import {DeleverageCrank} from "../utils/DeleverageCrank.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockHostileGasERC20} from "../mocks/MockHostileGasERC20.sol";
@@ -15,6 +14,7 @@ import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {ProtocolPolicy} from "../../src/config/Defaults.sol";
 import {AceReader} from "../utils/AceReader.sol";
+import {_extended} from "../utils/Extended.sol";
 
 /// @title AcePushAtClose
 /// @notice RED BY DESIGN, written before the push exists: at a TERMINAL close the hub attempts one transfer
@@ -122,13 +122,6 @@ contract AcePushAtCloseTest is Test {
         return false;
     }
 
-    /// @dev The whole roll window has to be out before `settleExpired` will take a loan: inside it the door
-    /// @dev answers `RollWindowOpen()`, because a paid roll still has standing. Expiry alone is NOT enough.
-    function _warpPastTheRollWindow(uint256 loanId) internal {
-        uint64 tenor = read.loan(loanId).tenor;
-        vm.warp(uint256(read.loan(loanId).expiry) + MarketInit.autoRefinanceWindow(tenor) + 1);
-    }
-
     function _open(uint64 tenor) internal returns (uint256 loanId) {
         coll.mint(borrower, COLL);
         vm.startPrank(borrower);
@@ -147,17 +140,9 @@ contract AcePushAtCloseTest is Test {
         vm.stopPrank();
     }
 
-    /// @dev An UNARMED loan one second past expiry: `forceClose` takes its settle branch, `settleExpired` settles.
-    function _expiredUnarmed() internal returns (uint256 loanId) {
+    /// @dev A loan one second past expiry: `forceClose` settles it.
+    function _expired() internal returns (uint256 loanId) {
         loanId = _open(TEN30);
-        vm.warp(uint256(read.loan(loanId).expiry) + 1);
-    }
-
-    /// @dev An ARMED loan past expiry whose continuation the gate admits: `forceClose` ROLLS rather than settling.
-    function _expiredArmed() internal returns (uint256 loanId) {
-        loanId = _open(TEN30);
-        vm.prank(borrower);
-        ace.setAutoRefinance(loanId, TEN30, 0, 0);
         vm.warp(uint256(read.loan(loanId).expiry) + 1);
     }
 
@@ -202,34 +187,18 @@ contract AcePushAtCloseTest is Test {
         assertGt(amount, 0, "and it announced a zero, which is not what moved");
     }
 
-    /// @notice `settleExpired` pushes, which FALSIFIES this door's own doctrine sentence, by ruling.
-    /// @dev "this door must not acquire a token transfer it can fail on" was the text; the user ruled the push
-    /// @dev anyway, because the UNITS leg stays a pure ledger write, so settleability at tenor survives by
-    /// @dev construction rather than by the door staying token-free. The hostile rows below are that claim's proof.
-    function test_SettleExpired_PushesTheWholePool() public {
-        uint256 loanId = _open(TEN30);
-        _warpPastTheRollWindow(loanId);
-        uint256 before = usdc.balanceOf(alice);
-
-        vm.prank(keeper);
-        ace.settleExpired(loanId);
-
-        assertGt(usdc.balanceOf(alice) - before, 0, "the unpaid settle door paid the lender nothing");
-        assertEq(_owed(), 0, "and left the pool it should have emptied");
-        assertTrue(read.loan(loanId).closedAt != 0, "premise: the loan really settled");
-    }
-
-    /// @notice `forceClose`'s SETTLE branch pushes. Its roll branch does not, which the exclusion row pins.
-    function test_ForceClose_TheSettleBranchPushesTheWholePool() public {
-        uint256 loanId = _expiredUnarmed();
+    /// @notice `forceClose` always settles, and pushes. An extension does not, which the exclusion row pins.
+    /// @dev The UNITS leg stays a pure ledger write, so settleability at tenor survives the push by construction; the hostile rows prove it.
+    function test_ForceClose_PushesTheWholePool() public {
+        uint256 loanId = _expired();
         uint256 before = usdc.balanceOf(alice);
 
         vm.prank(keeper);
         ace.forceClose(loanId);
 
-        assertGt(usdc.balanceOf(alice) - before, 0, "the paid settle door paid the lender nothing");
+        assertGt(usdc.balanceOf(alice) - before, 0, "the settle door paid the lender nothing");
         assertEq(_owed(), 0, "and left the pool it should have emptied");
-        assertTrue(read.loan(loanId).closedAt != 0, "premise: the loan really settled rather than rolling");
+        assertTrue(read.loan(loanId).closedAt != 0, "premise: the loan really settled");
     }
 
     /// @notice `finalize` pushes. It ALWAYS settles, so the implementation needs no terminal detection here at all.
@@ -286,25 +255,30 @@ contract AcePushAtCloseTest is Test {
         assertEq(_owed(), 0, "in full, leaving nothing queued behind it");
     }
 
-    /// @notice A ROLL does not push; the settle branch of the same verb does. The pair is the whole row.
-    /// @dev THE ROLL IS A CONTINUATION, and the push rides terminal closes only; no roll door pushes at all.
-    /// @dev NOT because a push would starve the successor: it pays `owed`, the draw debits `cash`, and the roll has drawn already.
+    /// @notice An EXTENSION does not push; `forceClose` on an expired loan does. The pair is the whole row.
+    /// @dev THE EXTENSION IS NO CLOSE, and the push rides terminal closes only: its fee's tick cut stays pooled.
     /// @dev PAIRED, as above: the exclusion leg is vacuous alone on a tree where nothing pushes, so the settle leg stays in this row.
-    function test_ForceClose_TheRollBranchDoesNotPush_ButTheSettleBranchDoes() public {
-        uint256 rolled = _expiredArmed();
+    function test_Extend_DoesNotPush_ButForceCloseDoes() public {
+        AceFixtures.installYesPolicy(ace, alice);
+        uint256 rolled = _open(TEN30);
+        uint64 x = read.loan(rolled).expiry;
+        vm.warp(uint256(x) - 1); // an extension lands only inside the term
         uint256 n = read.loanCount();
         uint256 before = usdc.balanceOf(alice);
 
-        vm.prank(keeper);
-        ace.forceClose(rolled);
-        assertEq(read.loanCount(), n + 1, "premise: this really took the ROLL branch and minted a successor");
-        assertEq(usdc.balanceOf(alice), before, "EXCLUDED: a roll is a continuation and must move no quote to the lender");
+        vm.startPrank(borrower);
+        usdc.approve(address(ace), type(uint256).max); // the fee, out of the principal the open paid
+        ace.extend(rolled, 0, "");
+        vm.stopPrank();
+        assertTrue(_extended(read, rolled, x), "premise: this really extended the loan");
+        assertEq(read.loanCount(), n, "and minted no successor");
+        assertEq(usdc.balanceOf(alice), before, "EXCLUDED: an extension closes nothing and must move no quote to the lender");
 
-        uint256 settled = _expiredUnarmed();
+        uint256 settled = _expired();
         vm.prank(keeper);
         ace.forceClose(settled);
 
-        assertGt(usdc.balanceOf(alice) - before, 0, "and the SETTLE branch of the same verb does pay the pool out");
+        assertGt(usdc.balanceOf(alice) - before, 0, "and forceClose does pay the pool out");
     }
 
     /* ====================== 3. THE FALLBACK IS BYTE-FOR-BYTE TODAY'S STATE ====================== */
@@ -349,7 +323,7 @@ contract AcePushAtCloseTest is Test {
     /// @dev of what the restore, the event and the epilogue may run on.
     /// @dev The event is what makes this row a test of the budget rather than of an absence: a close with no push completes too.
     function test_Fence_AGasBurningQuoteCannotFailTheHubVerb() public {
-        uint256 loanId = _expiredUnarmed();
+        uint256 loanId = _expired();
         uint256 owedBefore = _owed();
         usdc.setBurnAll(true);
 
@@ -369,7 +343,7 @@ contract AcePushAtCloseTest is Test {
     /// @dev The one-word window still matters: a plain `(bool, bytes memory) = call{gas}` would bill our tail for whatever it got.
     /// @dev So this row is also a test that the implementation used a bounded-window transfer helper.
     function test_Fence_AReturnBombCannotFailTheHubVerb() public {
-        uint256 loanId = _expiredUnarmed();
+        uint256 loanId = _expired();
         uint256 owedBefore = _owed();
         usdc.setBombWords(ONE_MIB_WORDS);
 
@@ -388,28 +362,28 @@ contract AcePushAtCloseTest is Test {
     /// @notice protects and the reason the user could rule the push onto this door at all.
     /// @dev The claim is that the UNITS leg never calls out, so title still moves however the quote behaves.
     /// @dev PROVED PER SHAPE rather than assumed: a reverter, a burner and a bomb, each on a fresh loan.
-    function test_SettleExpired_StillSettlesUnderEveryHostileQuoteShape() public {
+    function test_ForceClose_StillSettlesUnderEveryHostileQuoteShape() public {
         uint256 a = _open(TEN30);
         uint256 b = _open(TEN30);
         uint256 c = _open(TEN30);
-        _warpPastTheRollWindow(c);
+        vm.warp(uint256(read.loan(c).expiry) + 1);
 
         usdc.setReverting(true);
         vm.prank(keeper);
-        ace.settleExpired{gas: 8_000_000}(a);
+        ace.forceClose{gas: 8_000_000}(a);
         assertTrue(read.loan(a).closedAt != 0, "a refusing quote must not block settlement at tenor");
         usdc.setReverting(false);
 
         usdc.setBurnAll(true);
         vm.prank(keeper);
-        ace.settleExpired{gas: 8_000_000}(b);
+        ace.forceClose{gas: 8_000_000}(b);
         assertTrue(read.loan(b).closedAt != 0, "nor may a quote that burns its whole allowance");
         usdc.setBurnAll(false);
 
         usdc.setBombWords(ONE_MIB_WORDS);
         vm.recordLogs();
         vm.prank(keeper);
-        ace.settleExpired{gas: 8_000_000}(c);
+        ace.forceClose{gas: 8_000_000}(c);
         assertTrue(read.loan(c).closedAt != 0, "nor a megabyte of returndata");
 
         (bool saw, uint256 amount) = _sawFromHub(PUSH_FAILED_SIG);
@@ -427,7 +401,7 @@ contract AcePushAtCloseTest is Test {
     /// @dev A caller whose chain is funded against the push's NEED rather than its budget is the residual, and it is recorded.
     /// @dev The quote spins until it is under a 1,000-gas floor, then cannot afford the transfer, so each push fails.
     function test_Exposure_ABurningQuoteCostsEachPushItsBudgetAndTheTailSurvives() public {
-        uint256 loanId = _expiredUnarmed();
+        uint256 loanId = _expired();
         uint256 owedBefore = _owed();
         assertGt(owedBefore, 0, "premise: there was a pool to push, or the burn was never triggered");
         usdc.setBurnToFloor(1_000); // spins through its whole budget and cannot then afford the transfer
@@ -467,27 +441,23 @@ contract AcePushAtCloseTest is Test {
 
     /* ====================== 6. WHAT EACH DOOR DEMANDS UNDER A FULL BURN ====================== */
 
-    /// @notice EACH DOOR DEMANDS ONE LENDER BUDGET, and this row measures the floor under a quote burning every unit.
-    /// @notice `forceClose` sweeps BEST-EFFORT, so its floor is the lender push's alone: the sweep is skipped there, never paid.
+    /// @notice `forceClose` DEMANDS ONE LENDER BUDGET, and this row measures the floor under a quote burning every unit.
+    /// @notice It sweeps BEST-EFFORT, so its floor is the lender push's alone: the sweep is skipped there, never paid.
     /// @dev MEASURED ON THE SHIPPED BUILD too: run it under `FOUNDRY_PROFILE=deploy` via `scripts/test-ir.sh`.
     /// @dev THE METHOD IS A BISECTION FROM OUTSIDE: the least outer budget at which the verb completes while the quote burns its whole budget.
     /// @dev Below it the verb reverts, `PushGasShort` or dry in its own body; at and above it the lender push lands in its fallback.
     /// @dev THE TWO-PUSH PREMISE IS GONE: the sweep runs after the push and its floor is the higher, so it never binds the least budget.
-    function test_Floor_EachDoorDemandsOneLenderBudgetUnderAFullBurn() public {
-        uint256 fc = _floorFor(true);
-        uint256 se = _floorFor(false);
+    function test_Floor_ForceCloseDemandsOneLenderBudgetUnderAFullBurn() public {
+        uint256 fc = _floorFor();
 
-        emit log_named_uint("forceClose    completes a full burn from", fc);
-        emit log_named_uint("settleExpired completes a full burn from", se);
-        emit log_named_uint("  the fixed budget each demands on top of its body", AceFixtures.PUSH_GAS);
+        emit log_named_uint("forceClose completes a full burn from", fc);
+        emit log_named_uint("  the fixed budget it demands on top of its body", AceFixtures.PUSH_GAS);
 
         assertGe(fc, AceFixtures.PUSH_GAS, "forceClose completed under ONE budget: the lender push was not funded");
-        assertGe(se, AceFixtures.PUSH_GAS, "settleExpired completed under ONE budget: the lender push was not funded");
         assertLt(fc, 8_000_000, "the floor is inside an ordinary transaction budget, which is what makes the door usable");
-        /// @dev THE BINDING DEMAND IS THE PUSH'S: just under each floor the door refuses by name, not dry in its own body.
-        /// @dev The two bounds above hold for any door whose body alone costs a budget; this one fails if the push never demanded.
-        assertEq(bytes4(_revertAt(fc - 1_000, true)), PushGasShort.selector, "forceClose's floor is not the lender push's");
-        assertEq(bytes4(_revertAt(se - 1_000, false)), PushGasShort.selector, "settleExpired's floor is not the lender push's");
+        /// @dev THE BINDING DEMAND IS THE PUSH'S: just under the floor the door refuses by name, not dry in its own body.
+        /// @dev The bound above holds for any door whose body alone costs a budget; this one fails if the push never demanded.
+        assertEq(bytes4(_revertAt(fc - 1_000)), PushGasShort.selector, "forceClose's floor is not the lender push's");
 
         uint256 snap = vm.snapshotState();
         uint256 loanId = _open(TEN30);
@@ -503,54 +473,45 @@ contract AcePushAtCloseTest is Test {
         vm.revertToState(snap);
     }
 
-    /// @dev Bisect the least outer budget at which the door completes while the quote burns every unit it is handed.
-    /// @dev `twoPush` picks `forceClose` over `settleExpired`; the interval is a guard, not a tuning knob.
-    function _floorFor(bool twoPush) internal returns (uint256) {
-        uint256 lo = 60_000; // under the cheapest door's own body, so it is below either floor
+    /// @dev Bisect the least outer budget at which `forceClose` completes while the quote burns every unit it is handed.
+    /// @dev The interval is a guard, not a tuning knob.
+    function _floorFor() internal returns (uint256) {
+        uint256 lo = 60_000; // under the door's own body, so it is below the floor
         uint256 hi = 8_000_000;
-        assertTrue(_survivesAt(hi, twoPush), "the verb cannot complete even at 8M: something other than the push budget binds");
-        assertFalse(_survivesAt(lo, twoPush), "premise: the low bound is not below the floor, so there is no interval to search");
+        assertTrue(_survivesAt(hi), "the verb cannot complete even at 8M: something other than the push budget binds");
+        assertFalse(_survivesAt(lo), "premise: the low bound is not below the floor, so there is no interval to search");
         while (hi - lo > 1_000) {
             uint256 probe = (lo + hi) / 2;
-            if (_survivesAt(probe, twoPush)) hi = probe;
+            if (_survivesAt(probe)) hi = probe;
             else lo = probe;
         }
         return hi;
     }
 
-    /// @dev The revert data of one full-burn close at `cap`, on a fresh loan; empty when it completed. Snapshotted.
-    function _revertAt(uint256 cap, bool twoPush) internal returns (bytes memory ret) {
+    /// @dev The revert data of one full-burn `forceClose` at `cap`, on a fresh loan; empty when it completed. Snapshotted.
+    function _revertAt(uint256 cap) internal returns (bytes memory ret) {
         uint256 snap = vm.snapshotState();
         uint256 loanId = _open(TEN30);
-        if (twoPush) vm.warp(uint256(read.loan(loanId).expiry) + 1);
-        else _warpPastTheRollWindow(loanId);
+        vm.warp(uint256(read.loan(loanId).expiry) + 1);
         usdc.setBurnAll(true);
-        bytes memory data = twoPush ? abi.encodeCall(Ace.forceClose, (loanId)) : abi.encodeCall(Ace.settleExpired, (loanId));
         vm.prank(keeper);
         bool ok;
-        (ok, ret) = address(ace).call{gas: cap}(data);
+        (ok, ret) = address(ace).call{gas: cap}(abi.encodeCall(Ace.forceClose, (loanId)));
         if (ok) ret = "";
         usdc.setBurnAll(false);
         vm.revertToState(snap);
     }
 
     /// @dev One bisection probe, on a fresh loan each time. Snapshotted, so a probe leaves the chain as it found it.
-    function _survivesAt(uint256 cap, bool twoPush) internal returns (bool ok) {
+    function _survivesAt(uint256 cap) internal returns (bool ok) {
         uint256 snap = vm.snapshotState();
         uint256 loanId = _open(TEN30);
-        if (twoPush) vm.warp(uint256(read.loan(loanId).expiry) + 1);
-        else _warpPastTheRollWindow(loanId);
+        vm.warp(uint256(read.loan(loanId).expiry) + 1);
         usdc.setBurnAll(true);
         vm.prank(keeper);
-        if (twoPush) {
-            try ace.forceClose{gas: cap}(loanId) {
-                ok = read.loan(loanId).closedAt != 0;
-            } catch {}
-        } else {
-            try ace.settleExpired{gas: cap}(loanId) {
-                ok = read.loan(loanId).closedAt != 0;
-            } catch {}
-        }
+        try ace.forceClose{gas: cap}(loanId) {
+            ok = read.loan(loanId).closedAt != 0;
+        } catch {}
         usdc.setBurnAll(false);
         vm.revertToState(snap);
     }
@@ -580,15 +541,13 @@ contract AcePushAtCloseTest is Test {
 }
 
 /// @title AcePushAtCloseDeleverage
-/// @notice THE DOOR THAT WAS RULED OUT, in its own fixture because it is the only one needing a decline channel.
-/// @notice The plan had a fifth door here: a full melt zeroing the debt, which `_meltAll` then handed to `Settlement.closeClean`.
-/// @notice That hand-off is DELETED: a crank never melts under `minDebt`, so it can never zero a loan at all.
-/// @notice The ruling is FOUR close doors, and `deleverage` pushes nothing.
-/// @notice These rows are what that ruling rests on -- a crank CREDITS the pool, and the next close delivers it.
+/// @notice The RESTORE crank's side of the push, in its own fixture because it is the only one needing a decline channel.
+/// @notice A restore never zeroes a loan by melting: a crank that would leave dust sells the whole debt instead, a separate sale.
+/// @notice That closing crank is the fourth terminal door and pushes; `AceDeleverageClosesDust` pins its push.
+/// @notice These rows pin the other half: a restore crank pushes nothing, it CREDITS the pool, and the next close delivers it.
 /// @dev SEPARATE CONTRACT rather than a branch of the suite above: a market with a band, a target and a stop is a
-/// @dev different market, and reconfiguring the shared one would change what the other twelve rows are asking.
-/// @dev `closedAt` DETECTION IS THE REPAY DOOR'S ALONE now: `finalize` and `settleExpired` always settle, and
-/// @dev `forceClose` cannot re-read it at all, because its ROLL branch sets `closedAt` on the old loan too.
+/// @dev different market, and reconfiguring the shared one would change what the other rows are asking.
+/// @dev `closedAt` DETECTION belongs to the repay and deleverage doors: `finalize` and `forceClose` always settle, so neither has a close to detect.
 contract AcePushAtCloseDeleverageTest is Test, DeleverageCrank {
     Ace internal ace;
     AceReader internal read;
@@ -669,17 +628,14 @@ contract AcePushAtCloseDeleverageTest is Test, DeleverageCrank {
         ace.deleverage(loanId, 0, "");
     }
 
-    /// @notice DELEVERAGE NEEDS NO DOOR OF ITS OWN: a crank credits the pool, and the next TERMINAL CLOSE
-    /// @notice delivers that credit -- including a close on a DIFFERENT LOAN. Queued, never stranded.
-    /// @dev THIS IS THE CLAIM THE FOUR-DOOR RULING RESTS ON, and it is why `deleverage` is not the fifth.
-    /// @dev `Deleverage.sol` calls `meltLoan` UNCONDITIONALLY -- it has no `L.debt == 0` branch left -- and
-    /// @dev `LoanAccounting.meltLoan` does `pool.owed += amount`. So a crank credits exactly as a partial
-    /// @dev repay does, and the pool is keyed `(lender, quote)` rather than per loan.
-    /// @dev THE CROSS-LOAN LEG IS THE POINT. A same-loan test would only show that a loan eventually closes;
-    /// @dev what has to hold is that the pool SPANS loans, so any terminal close carries every crank's credit.
-    /// @dev THE COUPLING, same class of trap as the sweep row's gas assertion: this holds ONLY because the push
-    /// @dev takes the WHOLE POOL. Narrow it to the close's DELTA and loan A's melt strands for good -- there is
-    /// @dev no deleverage door to catch it -- and without the cross-loan leg nothing would go red to say so.
+    /// @notice A RESTORE CRANK DOES NOT PUSH: it credits the pool, and the next TERMINAL CLOSE delivers that credit, on any loan.
+    /// @notice Queued, never stranded: a close on a DIFFERENT LOAN carries it out.
+    /// @dev A CLOSING crank is the fourth terminal door and pushes; a restore crank runs many times per loan, so it only credits.
+    /// @dev A restore's melt goes through `LoanAccounting.meltLoan`, which does `pool.owed += amount`, exactly as a partial repay credits.
+    /// @dev The pool is keyed `(lender, quote)` rather than per loan, so any terminal close carries every restore crank's credit.
+    /// @dev THE CROSS-LOAN LEG IS THE POINT: a same-loan test would only show that a loan eventually closes.
+    /// @dev THE COUPLING: this holds ONLY because the push takes the WHOLE POOL, never the close's delta.
+    /// @dev Narrow it to the delta and loan A's melt strands, and without the cross-loan leg nothing would go red to say so.
     function test_Deleverage_CreditsThePoolAndAnotherLoansCloseDeliversIt() public {
         uint256 melted = _open();
         uint256 closing = _open(); // a SECOND loan, same lender and same quote, so one pool holds both
@@ -702,15 +658,15 @@ contract AcePushAtCloseDeleverageTest is Test, DeleverageCrank {
         assertEq(read.loan(melted).closedAt, 0, "and the melted loan is still live: its credit left without it");
     }
 
-    /// @notice FINDING: THE FULL MELT IS UNREACHABLE, so the plan's fifth terminal door cannot be driven at all.
+    /// @notice FINDING: A RESTORE NEVER MELTS A LOAN TO ZERO, so a close by melt cannot be driven at all.
     /// @notice Forty cranks take the debt from 1.39e10 to 2.78e7 and it never reaches zero -- it asymptotes.
-    /// @dev It is now unreachable TWICE: no crank melts under `minDebt`, so `_meltAll`'s full-repayment legs were deleted with the cap.
-    /// @dev The fixture's 10e6 `minDebt` sits under where this row's debt converges, so the cap never binds here and the row is the sizing's.
+    /// @dev A loan closes by deleverage only through the closing sale, which sells the whole debt when a restore would leave dust.
+    /// @dev The fixture's 5e6 debt floor sits under where this row's debt converges, so that sale never fires here and the row is the sizing's.
     /// @dev WHY IT IS STRUCTURAL rather than a fixture artefact: each crank restores margin to TARGET, and the
     /// @dev genesis relation `MIN_COVERAGE_WAD * (10000 - MAX_DELEVERAGE_FLOOR_EPS_BPS) > 1e22` is exactly what
     /// @dev makes the melt per unit smaller than that unit's contribution to the trigger. So the sequence is
     /// @dev geometric with a ratio under one, at EVERY point in the admitted parameter range, not just this one.
-    /// @dev CONSEQUENCE FOR THE PLAN: a push placed on this door is unreachable code until a rail changes.
+    /// @dev CONSEQUENCE: the closing crank's push rides the closing sale; no melt ever reaches `Settlement.closeClean`.
     /// @dev GREEN BY DESIGN. It pins the reachability fact, so an implementer who believes they have driven a
     /// @dev full melt has to come here and delete a measurement first.
     function test_Finding_TheFullMeltIsUnreachableUnderTheSizingRails() public {

@@ -4,6 +4,7 @@ pragma solidity 0.8.36;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
+import {CloseUnfilled} from "../../src/ace/hub/Deleverage.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {ProtocolPolicy} from "../../src/config/Defaults.sol";
 import {IAceDeleverageCallback} from "../../src/interfaces/IAceDeleverageCallback.sol";
@@ -52,12 +53,12 @@ contract DriftKeeper is IAceDeleverageCallback {
 }
 
 /// @title AceDeleverageFragmentDrift
-/// @notice Bunni-class confirmation: a ceil that is safe per crank must stay safe across MANY tiny cranks on one armed loan.
+/// @notice Bunni-class confirmation: a ceil that is safe per crank must stay safe across MANY tiny cranks on one live loan.
 /// @notice Each crank's `_owed` ceils against the keeper, so the keeper's aggregate overpay sits in `[0, cranks)` atoms, never below zero.
-/// @notice Along the whole sequence the trigger never rises, every net equals the debt it melted, and the armed reservation stays in lockstep.
-/// @notice A second regime drives the loan to its `minDebt` head first, then cranks into it: no third party ever takes it under the floor.
+/// @notice Along the whole sequence the trigger never rises and every net equals the debt it melted.
+/// @notice A second regime sets the debt floor a head under the debt, so the restore would leave dust: every short fill reverts, and a whole fill closes.
 /// @dev MUTANT: `Deleverage._owed` `mulDivRoundingUp` -> `mulDiv`; the per-crank floor bound and the aggregate bound both kill it.
-/// @dev Every row asserts its own premise: the loan is armed, the cranks sold, a crank was inexact, the cap bound.
+/// @dev Every row asserts its own premise: the loan is live, the cranks sold, a crank was inexact, the close fired.
 abstract contract AceDeleverageFragmentDriftBase is WarpClock {
     Ace internal ace;
     AceReader internal read;
@@ -68,7 +69,7 @@ abstract contract AceDeleverageFragmentDriftBase is WarpClock {
     DriftKeeper internal keeper;
     uint256 internal loanId;
     uint256 internal ps; // the market's price and the record's windowed minimum: one whole quote per whole collateral
-    uint256 internal minDebt;
+    uint256 internal floor; // the debt floor; the market stores twice it as `minPrincipal`
 
     address internal borrower = address(0xB0B);
 
@@ -88,7 +89,6 @@ abstract contract AceDeleverageFragmentDriftBase is WarpClock {
         uint256 net;
         uint256 cranks; // cranks that sold at least one unit
         uint256 inexact; // cranks whose floor division left a remainder
-        uint256 shrinks; // cranks that shrank the armed reservation
     }
 
     function _qd() internal pure virtual returns (uint8);
@@ -97,10 +97,11 @@ abstract contract AceDeleverageFragmentDriftBase is WarpClock {
         return 10_000 * 10 ** _qd();
     }
 
-    /// @dev Builds the market and one ARMED loan at THETA, in band and out of distress, with the keeper standing by.
-    function _build(uint256 minDebt_) internal {
+    /// @dev Builds the market at debt floor `floor_` and one live loan at THETA, in band and out of distress, with the keeper standing by.
+    /// @dev A debt under `minPrincipal` is born there on twice the lot, repaid to `_debt()`, then withdrawn back to its lot.
+    function _build(uint256 floor_) internal {
         _warpTo(1_000_000);
-        minDebt = minDebt_;
+        floor = floor_;
         q = new MockERC20("Q", "Q", _qd());
         c = new MockERC20("C18", "C18", 18);
         ps = AceFixtures.px(1e18, address(q), address(c));
@@ -110,7 +111,7 @@ abstract contract AceDeleverageFragmentDriftBase is WarpClock {
         MarketParams memory p = AceFixtures.marketParams(address(q), address(c));
         p.price = ps;
         p.record = address(record);
-        p.minDebt = minDebt_;
+        p.minPrincipal = 2 * floor_;
         p.deleverageFloorEpsBps = ProtocolPolicy.DELEVERAGE_FLOOR_EPS_BPS;
         p.deleverageBandBps = BAND;
         p.deleverageTargetBps = TARGET;
@@ -127,18 +128,24 @@ abstract contract AceDeleverageFragmentDriftBase is WarpClock {
         vm.stopPrank();
 
         uint256 units = FullMath.mulDiv(K * _debt(), S * 10000, THETA * ps * 1e18);
-        c.mint(borrower, units);
+        uint256 born = _debt() < p.minPrincipal ? p.minPrincipal : _debt();
+        uint256 lot = born > _debt() ? 2 * units : units; // `_debt() >= floor_`, so twice the lot covers `minPrincipal`
+        c.mint(borrower, lot);
         vm.startPrank(borrower);
-        c.approve(address(d.positionManager), units);
-        loanId = ace.open(id, units, _debt(), ProtocolPolicy.MIN_TENOR, borrower, OpenBounds(0, 0, 0));
-        ace.setAutoRefinance(loanId, ProtocolPolicy.MIN_TENOR, 0, 0);
+        c.approve(address(d.positionManager), lot);
+        loanId = ace.open(id, lot, born, ProtocolPolicy.MIN_TENOR, borrower, OpenBounds(0, 0, 0));
+        if (born > _debt()) {
+            q.approve(address(ace), born - _debt());
+            ace.repay(loanId, born - _debt());
+            ace.withdrawCollateral(loanId, lot - units, borrower);
+        }
         vm.stopPrank();
+        assertEq(read.debtOf(loanId), _debt(), "PREMISE: the loan carries the row's debt");
 
         _warpBy(1 days);
         record.setBandPrice(read.triggerPrice(loanId)); // persisted below the band level and not below the trigger
         keeper = new DriftKeeper(ace, q, IERC20(address(c)));
-        assertGt(read.reservedOf(loanId), 0, "PREMISE: the loan is armed, so it holds a roll reservation");
-        assertEq(read.rollReserve(id), read.reservedOf(loanId), "PREMISE: it is the market's only armed loan");
+        assertEq(read.loan(loanId).closedAt, 0, "PREMISE: the loan is live");
     }
 
     /// @dev The most units whose owed floor is `proceeds` quote atoms.
@@ -159,7 +166,6 @@ abstract contract AceDeleverageFragmentDriftBase is WarpClock {
         uint256 owed;
         uint256 units;
         uint256 trig;
-        uint256 res;
         uint256 hub;
         uint256 keeperUnits;
     }
@@ -171,7 +177,6 @@ abstract contract AceDeleverageFragmentDriftBase is WarpClock {
         s.owed = read.poolOwed(id);
         s.units = read.loan(loanId).collateralUnits;
         s.trig = read.triggerPrice(loanId);
-        s.res = read.reservedOf(loanId);
         s.hub = q.balanceOf(address(ace));
         s.keeperUnits = c.balanceOf(address(keeper));
     }
@@ -211,14 +216,11 @@ abstract contract AceDeleverageFragmentDriftBase is WarpClock {
         if (sold != 0 && num % den != 0) t.inexact++;
     }
 
-    /// @dev The loan after the crank: trigger, reservation lockstep, and the minDebt floor.
-    function _checkLoan(Tally memory t, Snap memory b) internal view {
+    /// @dev The loan after the crank: trigger and the debt floor, which a crank either respects or closes the loan under.
+    function _checkLoan(Tally memory, Snap memory b) internal view {
         assertLe(read.triggerPrice(loanId), b.trig, "a crank never raises the trigger");
-        uint256 res = read.reservedOf(loanId);
-        assertEq(read.rollReserve(id), res, "the market's roll reserve is this loan's share, after every crank");
-        assertLe(res, b.res, "a crank only ever shrinks the reservation");
-        if (res < b.res) t.shrinks++;
-        assertGe(read.debtOf(loanId), minDebt, "a third party's crank never takes the debt under minDebt");
+        bool closedOrOver = read.loan(loanId).closedAt != 0 || read.debtOf(loanId) >= floor;
+        assertTrue(closedOrOver, "a third party's crank closes the loan or leaves the debt at or over the floor");
     }
 
     /// @dev Runs `n` cranks and checks the sequence-level laws.
@@ -240,10 +242,9 @@ abstract contract AceDeleverageFragmentDriftBase is WarpClock {
         emit log_named_uint("cranks that sold", t.cranks);
         emit log_named_uint("keeper overpay vs one shot, atoms", t.out - oneShot);
         emit log_named_uint("inexact cranks", t.inexact);
-        emit log_named_uint("reservation shrinks", t.shrinks);
     }
 
-    /// @notice N tiny cranks on one armed loan far above minDebt: every crank sells, and the drift stays in the band the ceil allows.
+    /// @notice N tiny cranks on one live loan far above its debt floor: every crank sells, and the drift stays in the band the ceil allows.
     function testFuzz_ManyTinyCranks_NoDrift(uint256 nSeed, uint256 keepSeed) public {
         _build(10 ** _qd() * 10);
         uint256 n = bound(nSeed, 2, 50);
@@ -253,18 +254,18 @@ abstract contract AceDeleverageFragmentDriftBase is WarpClock {
         assertGt(t.inexact, 0, "PREMISE: a crank left a remainder, so a floor would have under-charged it");
     }
 
-    /// @notice Fifty fixed cranks of an odd lot: the reservation demonstrably shrinks, and stays the market's whole reserve throughout.
+    /// @notice Fifty fixed cranks of an odd lot on a live loan: every per-crank and aggregate law holds throughout.
     function test_FiftyOddLots_ReservationShrinksInLockstep() public {
         _build(10 ** _qd() * 10);
         Tally memory t = _run(50, _unitsFor(37) + 12_345);
         assertEq(t.cranks, 50, "PREMISE: all fifty cranks sold");
         assertGt(t.inexact, 0, "PREMISE: a crank left a remainder");
-        assertGt(t.shrinks, 0, "PREMISE: the melt shrank the reservation, so the lockstep row is not a pair of zeros");
     }
 
-    /// @notice The dust-first regime: minDebt sits a fuzzed head under the debt, and N tiny cranks drive into it.
-    /// @dev The head is at most half what the cranks could realize, so the `room` cap MUST bind before the run ends.
-    function testFuzz_CranksIntoTheMinDebtHead_NeverCrossIt(uint256 nSeed, uint256 keepSeed, uint256 headSeed) public {
+    /// @notice The dust-bound regime: the debt floor sits a fuzzed head under the debt, so the restore would leave dust and the crank closes instead.
+    /// @notice N short fills each revert `CloseUnfilled` and leave the loan as it was; one whole fill then closes it.
+    /// @dev The head is at most half what the short fills could realize, far under the restore's melt, so every crank is a close.
+    function testFuzz_CranksIntoTheFloorHead_EachShortFillRevertsAndAWholeFillCloses(uint256 nSeed, uint256 keepSeed, uint256 headSeed) public {
         uint256 n = bound(nSeed, 2, 50);
         ps = FullMath.mulDiv(1e18, S, 1e18 * 10 ** (18 - _qd())); // the frame's par, so the sizing is known before the build
         uint256 keep = bound(keepSeed, 1, _unitsFor(20));
@@ -273,9 +274,20 @@ abstract contract AceDeleverageFragmentDriftBase is WarpClock {
         uint256 psFrame = ps;
         _build(_debt() - head);
         assertEq(ps, psFrame, "PREMISE: the build priced the market at the frame's par the sizing assumed");
-        Tally memory t = _run(n, keep);
-        assertGt(t.cranks, 0, "PREMISE: at least one crank sold");
-        assertLt(read.debtOf(loanId) - minDebt, perCrank, "PREMISE: the head ran out, so the minDebt cap bound");
+        keeper.setKeep(keep);
+        uint256 debt0 = read.debtOf(loanId);
+        uint256 units0 = read.loan(loanId).collateralUnits;
+        for (uint256 i; i < n; ++i) {
+            vm.expectRevert(CloseUnfilled.selector);
+            keeper.crank(loanId);
+        }
+        assertEq(read.debtOf(loanId), debt0, "every short fill left the debt as it was");
+        assertEq(read.loan(loanId).collateralUnits, units0, "and the position");
+        keeper.setKeep(type(uint256).max);
+        (uint256 sold,) = keeper.crank(loanId);
+        assertGt(sold, keep, "PREMISE: the close sold more than a short fill kept");
+        assertGt(read.loan(loanId).closedAt, 0, "a whole fill closes the dust-bound loan");
+        assertEq(read.debtOf(loanId), 0, "retiring its whole debt");
     }
 }
 

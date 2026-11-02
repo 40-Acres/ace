@@ -3,7 +3,6 @@ pragma solidity 0.8.36;
 
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Ace, BelowCallerFloor, LoanMatured as WithdrawMatured} from "../../src/ace/hub/Ace.sol";
-import {IPersistenceRecord} from "../../src/interfaces/IPersistenceRecord.sol";
 import {DeleverageDisabled, Distressed, LoanClosed, LoanMatured, NotInBand} from "../../src/ace/hub/Deleverage.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
@@ -19,11 +18,10 @@ import {WarpClock} from "../utils/WarpClock.sol";
 
 /// @title AceDeleverageExpiryGateTest
 /// @notice The deleverage expiry gate at its exact second, on both surfaces: the crank and `AceLens.deleverageEligible`.
-/// @notice And its place in the crank's refusal order: disabled, closed, matured, the `minDebt` return, distressed, then the band read.
+/// @notice And its place in the crank's refusal order: disabled, closed, matured, distressed, then the band read.
 /// @dev Every boundary row reads `expiry` off the loan and moves the clock to it; nothing restates the tenor.
 /// @dev The distress and band rows first show the outranked refusal firing alone one second earlier, so each pair has two live sides.
-/// @dev The `minDebt` return is `(0, 0)`, not a revert: a loan at or under `minDebt` leaves before the distress and band reads.
-/// @dev `test_Order_ClosedOutranksMatured` also pins closed over that return: a repaid loan's zero debt would otherwise return `(0, 0)`.
+/// @dev A loan at `minPrincipal` meets the same order: no return precedes the distress and band reads, so it refuses as any other loan does.
 contract AceDeleverageExpiryGateTest is WarpClock {
     Ace internal ace;
     AceLens internal lens;
@@ -234,19 +232,19 @@ contract AceDeleverageExpiryGateTest is WarpClock {
         keeper.crankDeleverage(loanId);
     }
 
-    /* ============================== the minDebt return in the order ============================== */
+    /* ============================== a loan at minPrincipal meets the same order ============================== */
 
-    /// @dev A loan drawn at exactly the market's `minDebt`: no head over the floor, so the crank may melt nothing.
+    /// @dev A loan drawn at exactly the market's `minPrincipal`: a restore would leave dust, so an admitted crank closes it.
     function _openAtMinDebt(Ace hub, PositionManager pm, bytes32 mid) internal returns (uint256 loanId) {
         vault.mint(borrower, COLL);
         vm.startPrank(borrower);
         vault.approve(address(pm), COLL);
-        loanId = hub.open(mid, COLL, hub.idToMarketParams(mid).minDebt, 0, borrower, OpenBounds(0, 0, 0));
+        loanId = hub.open(mid, COLL, hub.idToMarketParams(mid).minPrincipal, 0, borrower, OpenBounds(0, 0, 0));
         vm.stopPrank();
     }
 
-    /// @notice A market with the channel off refuses `DeleverageDisabled` on a loan at `minDebt`: the band dial outranks the return.
-    function test_Order_DisabledOutranksTheMinDebtReturn() public {
+    /// @notice A market with the channel off refuses `DeleverageDisabled` on a loan at `minPrincipal`: the band dial outranks every gate.
+    function test_Order_DisabledOutranksEveryGateAtMinDebt() public {
         AceFixtures.Deployment memory d = AceFixtures.deploy(_params(0));
         MockDeleverageKeeper k = new MockDeleverageKeeper(d.ace, address(usdc), address(vault), UNIT_SCALE);
         _fund(d.ace, d.id);
@@ -255,23 +253,22 @@ contract AceDeleverageExpiryGateTest is WarpClock {
         k.crankDeleverage(loanId);
     }
 
-    /// @notice A matured loan at `minDebt` refuses `LoanMatured`: the clock outranks the return, and one second earlier the return fires alone.
-    function test_Order_MaturedOutranksTheMinDebtReturn() public {
-        uint256 loanId = _openAtMinDebt(ace, positionManager, id);
+    /// @notice A matured loan at `minPrincipal` refuses `LoanMatured`; one second earlier the same healthy loan reaches the band read.
+    function test_Order_MaturedOutranksTheBandReadAtMinDebt() public {
+        uint256 loanId = _openAtMinDebt(ace, positionManager, id); // the record sits at P: healthy, out of the band
         uint256 expiry = _expiryOf(loanId);
 
         _warpTo(expiry - 1);
-        (uint256 sold, uint256 stableOut) = keeper.crankDeleverage(loanId);
-        assertEq(sold + stableOut, 0, "expiry - 1: at minDebt the crank returns (0, 0) rather than reverting");
+        vm.expectRevert(NotInBand.selector);
+        keeper.crankDeleverage(loanId);
 
         _warpTo(expiry);
         vm.expectRevert(LoanMatured.selector);
         keeper.crankDeleverage(loanId);
     }
 
-    /// @notice A DISTRESSED loan at `minDebt` returns `(0, 0)`, not `Distressed`: the return precedes the distress read.
-    /// @dev The premise leg is a loan over `minDebt` in the same record state, which does refuse `Distressed`.
-    function test_Order_TheMinDebtReturnOutranksDistress() public {
+    /// @notice A DISTRESSED loan at `minPrincipal` refuses `Distressed`, exactly as a loan over it does: no return precedes the distress read.
+    function test_Order_AtMinDebtADistressedLoanRefusesDistressed() public {
         uint256 over = _open();
         uint256 atFloor = _openAtMinDebt(ace, positionManager, id);
         record.setBelow(true); // flag mode: persisted below every level, the trigger included
@@ -279,33 +276,64 @@ contract AceDeleverageExpiryGateTest is WarpClock {
 
         vm.expectRevert(Distressed.selector);
         keeper.crankDeleverage(over);
-
-        vm.expectCall(address(record), abi.encodeWithSelector(IPersistenceRecord.persistedBelowDistress.selector), 0);
-        (uint256 sold, uint256 stableOut) = keeper.crankDeleverage(atFloor);
-        assertEq(sold + stableOut, 0, "at minDebt the crank returns (0, 0) before it asks the record about distress");
+        vm.expectRevert(Distressed.selector);
+        keeper.crankDeleverage(atFloor);
     }
 
-    /// @notice A HEALTHY loan at `minDebt` returns `(0, 0)`, not `NotInBand`: the return precedes the band read and the price read.
-    /// @dev The premise leg is a loan over `minDebt` in the same record state, which does refuse `NotInBand`.
-    function test_Order_TheMinDebtReturnOutranksTheBandRead() public {
+    /// @notice A HEALTHY loan at `minPrincipal` refuses `NotInBand`, exactly as a loan over it does: no return precedes the band read.
+    function test_Order_AtMinDebtAHealthyLoanRefusesNotInBand() public {
         uint256 over = _open(); // the record sits at P: healthy, out of the band
         uint256 atFloor = _openAtMinDebt(ace, positionManager, id);
         _warpTo(_expiryOf(atFloor) - 1);
 
         vm.expectRevert(NotInBand.selector);
         keeper.crankDeleverage(over);
-
-        vm.expectCall(address(record), abi.encodeWithSelector(IPersistenceRecord.persistedBelowDistress.selector), 0);
-        vm.expectCall(address(record), abi.encodeWithSelector(IPersistenceRecord.minPrice.selector), 0);
-        (uint256 sold, uint256 stableOut) = keeper.crankDeleverage(atFloor);
-        assertEq(sold + stableOut, 0, "at minDebt the crank returns (0, 0) before it reads the band or the price");
+        vm.expectRevert(NotInBand.selector);
+        keeper.crankDeleverage(atFloor);
     }
 
-    /// @notice A caller floor above zero turns the `minDebt` return into `BelowCallerFloor`: `Ace` checks `minStableOut` on every return.
-    function test_Order_ACallerFloorTurnsTheMinDebtReturnIntoBelowCallerFloor() public {
-        uint256 atFloor = _openAtMinDebt(ace, positionManager, id);
-        _warpTo(_expiryOf(atFloor) - 1);
+    /// @notice A caller floor above zero turns the reserve-held `(0, 0)` into `BelowCallerFloor`: `Ace` checks `minStableOut` on every return.
+    /// @dev The settlement reserve holds the whole restore of a loan over `minPrincipal`, so the crank returns `(0, 0)` with no floor.
+    function test_Order_ACallerFloorTurnsTheReserveHeldReturnIntoBelowCallerFloor() public {
+        (MockDeleverageKeeper k, uint256 loanId) = _reserveHeld();
         vm.expectRevert(BelowCallerFloor.selector);
-        keeper.crankWithFloor(atFloor, 1);
+        k.crankWithFloor(loanId, 1);
+        (uint256 sold, uint256 out) = k.crankWithFloor(loanId, 0);
+        assertEq(sold + out, 0, "control: with no floor the same crank returns (0, 0)");
+    }
+
+    /// @dev A 0-decimal collateral at k 1.05, eps 1, target 9999, stop 1: three units, so one unit of rounding is visible in the reserve.
+    /// @dev Crank 1 sells the one unit the reserve allows and leaves its need unmoved, the debt still over `minPrincipal`; the record then re-arms.
+    function _reserveHeld() internal returns (MockDeleverageKeeper k, uint256 loanId) {
+        MockERC20 q = new MockERC20("Q6", "Q6", 6);
+        MockERC20 c0 = new MockERC20("C0", "C0", 0);
+        MockPersistenceRecord rec = new MockPersistenceRecord(address(q), address(c0));
+        uint256 par = AceFixtures.priceAt(address(q), address(c0), 0);
+        rec.setMinPrice(par);
+        MarketParams memory p = AceFixtures.marketParams(address(q), address(c0));
+        (p.record, p.minCoverageWad, p.minPrincipal) = (address(rec), 1.05e18, 1.15e6);
+        (p.deleverageFloorEpsBps, p.deleverageBandBps, p.deleverageTargetBps, p.deleverageStopBps) = (1, BAND_BPS, 9999, 1);
+        AceFixtures.Deployment memory d = AceFixtures.deploy(p);
+        k = new MockDeleverageKeeper(d.ace, address(q), address(c0), UNIT_SCALE);
+        q.mint(alice, 100_000e6);
+        vm.startPrank(alice);
+        q.approve(address(d.ace), 100_000e6);
+        d.ace.deposit(d.id, 100_000e6);
+        vm.stopPrank();
+        c0.mint(borrower, 3);
+        vm.startPrank(borrower);
+        c0.approve(address(d.positionManager), 3);
+        loanId = d.ace.open(d.id, 3, 1.8e6, 0, borrower, OpenBounds(0, 0, 0));
+        vm.stopPrank();
+        uint256 ps = FullMath.mulDivRoundingUp(d.read.triggerPrice(loanId), 1e18, 1e18 - 1e14) + 1; // one wei over the stop
+        rec.setBandPrice(ps);
+        rec.setMinPrice(ps);
+        (uint256 sold,) = k.crankDeleverage(loanId);
+        assertEq(sold, 1, "fixture: crank 1 sold the one unit the reserve allowed");
+        assertGe(d.read.debtOf(loanId), p.minPrincipal, "fixture: and left the debt over minPrincipal");
+        uint256 need = new AceLens(address(d.ace)).collateralNeeded(d.id, loanId);
+        assertEq(d.read.loan(loanId).collateralUnits, need, "fixture: and the reserve now holds the whole position");
+        rec.setBandPrice(par * 7 / 10);
+        rec.setMinPrice(par * 7 / 10);
     }
 }

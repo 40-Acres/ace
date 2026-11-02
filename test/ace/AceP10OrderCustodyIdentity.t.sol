@@ -3,17 +3,17 @@ pragma solidity 0.8.36;
 
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
 import {Loan, MarketParams, MarketState, MigrateArgs, OpenBounds, Order} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
+import {_extended} from "../utils/Extended.sol";
 
 /// @title AceP10OrderCustodyIdentity
 /// @notice The three custody EQUALITIES (see `AceP10CustodyIdentity`) on the paths the invariant handler never drives:
-/// @notice the credit-order escrow and its carry, the unpaid backstop, the held ask, in-kind redemption, and `claimOwed` by legs.
+/// @notice the credit-order escrow and its carry, a settlement at tenor, the held ask, in-kind redemption, and `claimOwed` by legs.
 /// @dev Phase 7's identity test on these verbs checks the quote side and one custody INEQUALITY; this is the equality.
 contract AceP10OrderCustodyIdentityTest is WarpClock {
     Ace internal ace;
@@ -104,8 +104,8 @@ contract AceP10OrderCustodyIdentityTest is WarpClock {
         assertGe(coll.balanceOf(address(pm)), pm.custodiedOf(address(coll)), string.concat(at, ": C: pot under ledger"));
     }
 
-    /// @notice Post, two fills, close; repay one; settle the other unpaid; buy the held pot; redeem in kind; claim by legs.
-    function test_CustodyEqualities_HoldOnTheOrderAndBackstopPaths() public {
+    /// @notice Post, two fills, close; repay one; settle the other at tenor; buy the held pot; redeem in kind; claim by legs.
+    function test_CustodyEqualities_HoldOnTheOrderAndSettlementPaths() public {
         _custody("genesis");
         uint256 liqLow = AceFixtures.px(1.4e18, address(usdc), address(coll));
         uint256 liqHigh = AceFixtures.px(1.5e18, address(usdc), address(coll));
@@ -127,10 +127,10 @@ contract AceP10OrderCustodyIdentityTest is WarpClock {
         vm.prank(maker);
         ace.repay(l1, type(uint256).max);
         _custody("repay l1");
-        _warpTo(read.loan(l2).expiry + MarketInit.autoRefinanceWindow(TEN));
+        _warpTo(read.loan(l2).expiry);
         vm.prank(keeper);
-        ace.settleExpired(l2);
-        _custody("settleExpired l2");
+        ace.forceClose(l2); // the keeper's sliver is one of the credits the B equality counts
+        _custody("forceClose l2");
 
         _warpTo(read.inventoryAskOpensAt(l2));
         vm.prank(buyer);
@@ -193,9 +193,9 @@ contract AceP10OrderCustodyIdentityTest is WarpClock {
         assertEq(usdc.balanceOf(address(ace)), pots, string.concat(at, ": QUOTE IDENTITY broken"));
     }
 
-    /// @notice A migration that sheds collateral, then an ARMED expiry roll: the two paths the fuzz handler never drives.
-    /// @dev The roll retires a sliver to the keeper and carries the rest into the successor; both identities hold throughout.
-    function test_CustodyEqualities_HoldOnTheWithdrawLegAndTheArmedRoll() public {
+    /// @notice A migration that sheds collateral, then a cash extension a second before expiry: the two paths the fuzz handler never drives.
+    /// @dev The extension retires nothing and keeps the whole lot on the same loan; both identities hold throughout.
+    function test_CustodyEqualities_HoldOnTheWithdrawLegAndTheExtension() public {
         MarketParams memory p2 = AceFixtures.marketParams(address(usdc), address(coll));
         p2.record = address(rec);
         p2.price = price; // the sibling bids where the rig does, or the migration lands under its own floor
@@ -221,27 +221,24 @@ contract AceP10OrderCustodyIdentityTest is WarpClock {
         assertEq(read.loan(l2).collateralUnits, units - units / 4, "the successor shed a quarter");
         assertEq(coll.balanceOf(maker), 1e30 - units + units / 4, "and the maker holds it");
 
-        // arm the successor, let it expire, and let a keeper roll it: sliver to the keeper, the rest carried into l3
-        vm.prank(maker);
-        ace.setAutoRefinance(l2, TEN, 0, 0);
-        _warpTo(read.loan(l2).expiry);
+        // run the successor to its last second, and let the maker extend it in cash on the lender's yes: the whole lot stays on l2
+        AceFixtures.installYesPolicy(ace, lender);
+        uint64 x = read.loan(l2).expiry;
+        _warpTo(uint256(x) - 1);
         uint256 before = read.loanCount();
-        vm.prank(keeper);
-        ace.forceClose(l2);
-        assertEq(read.loanCount(), before + 1, "the armed loan ROLLED rather than settled");
-        uint256 l3 = before + 1;
-        assertGt(read.unitsOwedOf(l2, keeper), 0, "the roll credited the keeper a sliver off the retiring loan");
-        assertEq(read.loan(l3).collateralUnits + read.unitsOwedOf(l2, keeper), units - units / 4, "sliver plus carry is the whole lot");
-        _custody("armed roll");
+        vm.prank(maker);
+        ace.extend(l2, 0, "");
+        assertTrue(_extended(read, l2, x), "the loan EXTENDED in place rather than settled");
+        assertEq(read.loanCount(), before, "minting no successor");
+        assertEq(read.loan(l2).collateralUnits, units - units / 4, "and it keeps the whole lot: an extension pays no sliver");
+        _custody("extension");
+        _quote("extension");
 
-        vm.prank(keeper);
-        ace.claimOwed(l2, keeper);
-        _custody("keeper claims the sliver");
         vm.prank(maker);
         ace.claimOwed(l1, maker); // pays zero quote now: the maker's own refinance paid its net out in the call
         vm.prank(maker);
         ace.claimOwed(l2, maker);
-        _custody("maker claims the roll's net");
+        _custody("maker claims what l2 credited it");
         _quote("end");
     }
 }

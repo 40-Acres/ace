@@ -150,7 +150,7 @@ contract AceGenesisDriveTest is StdInvariant, Test {
         }
     }
 
-    /// @notice An open loan's claim IS its debt exactly; a closed loan carries none.
+    /// @notice O10: an open loan's claim IS its debt exactly; a closed loan carries none.
     /// @dev Claims are keyed (market, loan), so each loan is asked of its own market and never of the first.
     /// @dev NO SUM: a loan holds ONE claim word, so "sums to" became "equals" and the walk went with it.
     function _invariant_loanClaimsEqualDebt() internal view {
@@ -159,7 +159,7 @@ contract AceGenesisDriveTest is StdInvariant, Test {
             Loan memory l = read.loan(ids[i]);
             uint256 claim = read.claimOf(ace.loanMarket(ids[i]), ids[i]);
             if (l.closedAt != 0) assertEq(claim, 0, "a closed loan still carries a live claim");
-            else assertEq(claim, l.debt, "an open loan's claim is not its debt");
+            else assertEq(claim, l.debt, "O10: an open loan's claim is not its debt");
         }
     }
 
@@ -275,7 +275,7 @@ contract AceGenesisDriveTest is StdInvariant, Test {
     /// @dev It does NOT prove the sweep straddles the genesis rails: on the pinned dials every seed it tries is admitted.
     /// @dev Its refusals are all at the DRAW, on the trigger-vs-floor gate; genesis refusals are the campaign's to find.
     /// @dev HASHED, not the counter: the handler reads its dials off high bit-shifts of the seed, and a
-    /// @dev small counter leaves every one of them zero -- which pins `minDebt` to one atom and refuses
+    /// @dev small counter leaves every one of them zero -- which pins `minPrincipal` to one atom and refuses
     /// @dev every market on the fee-ceiling rail. A counter here tests one corner and calls it the space.
     /// @dev ONE HANDLER PER SEED, and that is the whole fix: the registry caps at `maxMarkets()`, so a shared
     /// @dev handler turned every iteration past the cap into draw-seed variation over the SAME six configs.

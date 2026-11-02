@@ -4,17 +4,18 @@ pragma solidity 0.8.36;
 import {Vm} from "forge-std/Test.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
-import {MarketParams, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol";
+import {Loan, MarketParams, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {MockStakeVault} from "../mocks/MockStakeVault.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
+import {_extended} from "../utils/Extended.sol";
 
 /// @title AceRefinanceNetOut
-/// @notice `Refinanced.netOut` is the migration's net out on EVERY door, and it names what really moved.
-/// @notice On the borrower's own doors it is the cash the borrower received; on a policy door or the fold it is the credit booked.
+/// @notice `Refinanced.netOut` is the migration's net out on every `refinanceTo`, and it names what really moved: the cash the borrower received.
+/// @notice A cash `extend` logs no `Refinanced`: it lengthens in place and books no net out.
 /// @dev Each row reads the log and a ledger independently, so a log reporting zero, or the gross draw, fails here.
 /// @dev Every prank is taken AFTER its call's arguments are built: a view call in an argument list would spend it.
 contract AceRefinanceNetOutTest is WarpClock {
@@ -27,15 +28,15 @@ contract AceRefinanceNetOutTest is WarpClock {
 
     address internal alice = address(0xA11CE);
     address internal borrower = address(0xB0B);
-    address internal keeper = address(0x4EE9E4);
 
     uint256 internal constant COLL = 10_000e18;
     uint256 internal constant PRINCIPAL = 4_500e6;
     uint256 internal constant FRESH = 6_000e6; // a successor over the debt, so a strict door has cash to pay
-    uint256 internal constant FLOOR = 4_000e6; // under the loan, so a partial repay can leave the debt below it
+    uint256 internal constant FLOOR = 4_000e6; // under the loan, so a partial repay can bring the debt down onto it
     uint256 internal constant HOLD = 3.5 days;
 
     bytes32 internal constant REFINANCED = keccak256("Refinanced(uint256,uint256,uint256,uint64,uint256,address)");
+    bytes32 internal constant EXTENDED = keccak256("Extended(uint256,uint64,uint64,uint256,address)");
 
     uint256 internal t0;
 
@@ -58,10 +59,10 @@ contract AceRefinanceNetOutTest is WarpClock {
         r.setMinPrice(AceFixtures.priceAt(address(usdc), address(vault), 0));
     }
 
-    function _params(address rec, uint256 minDebt) internal view returns (MarketParams memory p) {
+    function _params(address rec, uint256 minPrincipal) internal view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = rec;
-        p.minDebt = minDebt;
+        p.minPrincipal = minPrincipal;
     }
 
     function _deposit(bytes32 m, uint256 amt) internal {
@@ -80,21 +81,19 @@ contract AceRefinanceNetOutTest is WarpClock {
         vm.stopPrank();
     }
 
-    /// @dev A loan in a market floored at FLOOR, repaid under it by its borrower and armed: its roll draws AT the floor.
-    /// @dev That floor is what makes a policy door's net out real rather than dust.
-    function _flooredArmedLoan() internal returns (uint256 loanId) {
+    /// @dev A loan in a market floored at FLOOR, repaid by its borrower to exactly it: the lowest debt a live loan carries.
+    function _flooredLoan() internal returns (uint256 loanId) {
         bytes32 m = ace.createMarket(_params(address(_record()), FLOOR));
         _deposit(m, 30_000e6);
         loanId = _open(m);
         _warpTo(uint256(read.loan(loanId).expiry) - 1);
-        uint64 tenor = ace.idToMarketParams(m).minTenor;
-        usdc.mint(borrower, 1_000e6);
+        uint256 pay = read.debtOf(loanId) - FLOOR;
+        usdc.mint(borrower, pay);
         vm.startPrank(borrower);
-        usdc.approve(address(ace), 1_000e6);
-        ace.repay(loanId, 1_000e6);
-        ace.setAutoRefinance(loanId, tenor, 0, 0);
+        usdc.approve(address(ace), pay);
+        ace.repay(loanId, pay);
         vm.stopPrank();
-        assertLt(read.debtOf(loanId), FLOOR, "fixture: the debt sits under the floor, so the roll draws at it");
+        assertEq(read.debtOf(loanId), FLOOR, "fixture: the debt sits on the floor");
     }
 
     /// @dev The one `Refinanced` the hub logged for `oldId`: its successor and its `netOut`.
@@ -119,7 +118,7 @@ contract AceRefinanceNetOutTest is WarpClock {
 
     // ============ the borrower's own doors: netOut is the cash paid ============
 
-    /// @notice `refinance` logs as `netOut` exactly the cash the borrower received, which is the net out its terms give.
+    /// @notice A home `refinanceTo` logs as `netOut` exactly the cash the borrower received, which is the net out its terms give.
     function test_Refinance_LogsAsNetOutTheCashItPaidTheBorrower() public {
         uint256 loanId = _open(mid);
         _warpTo(t0 + HOLD);
@@ -130,7 +129,7 @@ contract AceRefinanceNetOutTest is WarpClock {
 
         vm.recordLogs();
         vm.prank(borrower);
-        uint256 newId = ace.refinance(loanId, FRESH, tenor, OpenBounds(0, 0, 0));
+        uint256 newId = ace.refinanceTo(MigrateArgs(loanId, mid, FRESH, tenor, OpenBounds(0, 0, 0), 0, address(0)));
         (uint256 loggedId, uint256 netOut) = _logged(vm.getRecordedLogs(), loanId);
 
         assertEq(loggedId, newId, "the log names the successor the call returned");
@@ -169,46 +168,42 @@ contract AceRefinanceNetOutTest is WarpClock {
         assertEq(owed, 0, "with nothing booked behind it");
     }
 
-    // ============ the policy doors and the fold, whoever calls them: netOut is the credit booked ============
+    // ============ the extension in place ============
 
-    /// @notice `refinanceByPolicy` logs as `netOut` exactly the credit it booked for the borrower, and pays no cash.
-    function test_PolicyRoll_LogsAsNetOutTheCreditItBooked() public {
-        uint256 loanId = _flooredArmedLoan();
+    /// @notice A cash extension logs no `Refinanced` at all: it extends in place, logs `Extended`, and books no net out, credited or paid.
+    /// @dev The loan sits on its market's floor, and an extension draws nothing, so the debt holds there.
+    function test_Extend_LogsExtendedAndBooksNoNetOut() public {
+        uint256 loanId = _flooredLoan();
+        AceFixtures.installYesPolicy(ace, alice);
+        Loan memory l = read.loan(loanId);
+        _warpTo(uint256(l.expiry) - 1);
+        MarketParams memory p = ace.idToMarketParams(l.market);
+        uint256 fee = LoanMath.originationFee(l.debt, l.tenor - 1, p.baseBps, p.minTenor); // the term's last second buys tenor - 1
+        usdc.mint(borrower, fee);
+        vm.prank(borrower);
+        usdc.approve(address(ace), fee);
         (, uint256 owedBefore) = ace.owedOf(loanId, borrower);
         uint256 wallet = usdc.balanceOf(borrower);
 
         vm.recordLogs();
-        vm.prank(keeper);
-        uint256 newId = ace.refinanceByPolicy(loanId);
-        (uint256 loggedId, uint256 netOut) = _logged(vm.getRecordedLogs(), loanId);
+        vm.prank(borrower);
+        ace.extend(loanId, 0, "");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
 
-        assertEq(loggedId, newId, "the log names the successor the call returned");
-        assertEq(read.debtOf(newId), FLOOR, "fixture: the roll drew at the floor");
-        assertGt(netOut, 0, "fixture: the floored roll has a real net out");
+        assertEq(_count(logs, REFINANCED), 0, "the extension logs no Refinanced: there is no successor to net into");
+        assertEq(_count(logs, EXTENDED), 1, "it logs one Extended");
+        assertTrue(_extended(read, loanId, l.expiry), "for the same loan, extended in place");
+        assertEq(read.debtOf(loanId), l.debt, "its debt unchanged: the fee is paid in cash, never drawn");
+        assertEq(read.debtOf(loanId), FLOOR, "so it stays on the floor");
         (, uint256 owedAfter) = ace.owedOf(loanId, borrower);
-        assertEq(owedAfter - owedBefore, netOut, "netOut is exactly the credit booked for the borrower");
-        assertEq(usdc.balanceOf(borrower), wallet, "and no cash moved: a policy door credits");
-        (, uint256 owedKeeper) = ace.owedOf(loanId, keeper);
-        assertEq(owedKeeper, 0, "nor is any of it the executor's");
+        assertEq(owedAfter, owedBefore, "and nothing is credited to the borrower");
+        assertEq(wallet - usdc.balanceOf(borrower), fee, "nor paid: the wallet falls by exactly the fee");
     }
 
-    /// @notice The expiry fold in `forceClose` logs the same: `netOut` is the credit booked, and no cash moves to the borrower.
-    function test_ExpiryFold_LogsAsNetOutTheCreditItBooked() public {
-        uint256 loanId = _flooredArmedLoan();
-        _warpTo(uint256(read.loan(loanId).expiry));
-        (, uint256 owedBefore) = ace.owedOf(loanId, borrower);
-        uint256 wallet = usdc.balanceOf(borrower);
-
-        vm.recordLogs();
-        vm.prank(keeper);
-        ace.forceClose(loanId);
-        (uint256 newId, uint256 netOut) = _logged(vm.getRecordedLogs(), loanId);
-
-        assertEq(read.loan(newId).borrower, borrower, "fixture: the fold rolled rather than settled");
-        assertEq(read.debtOf(newId), FLOOR, "fixture: the roll drew at the floor");
-        assertGt(netOut, 0, "fixture: the floored roll has a real net out");
-        (, uint256 owedAfter) = ace.owedOf(loanId, borrower);
-        assertEq(owedAfter - owedBefore, netOut, "netOut is exactly the credit booked for the borrower");
-        assertEq(usdc.balanceOf(borrower), wallet, "and no cash moved to the borrower: the fold credits");
+    /// @dev How many logs the hub emitted under `sig`.
+    function _count(Vm.Log[] memory logs, bytes32 sig) internal view returns (uint256 n) {
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].emitter == address(ace) && logs[i].topics[0] == sig) n++;
+        }
     }
 }

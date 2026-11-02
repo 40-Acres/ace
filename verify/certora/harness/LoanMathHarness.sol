@@ -31,10 +31,6 @@ contract LoanMathHarness {
         return LoanMath.tickCut(fee);
     }
 
-    function principalForOwed(uint256 owed, uint64 tenor, uint256 baseBps, uint64 minTenor) external pure returns (uint256) {
-        return LoanMath.principalForOwed(owed, tenor, baseBps, minTenor);
-    }
-
     function feeFundable(uint256 baseBps, uint64 tenor, uint64 minTenor) external pure returns (bool) {
         return LoanMath.feeFundable(baseBps, tenor, minTenor);
     }

@@ -8,7 +8,7 @@ import {TickBitmap} from "@uniswap/v4-core/src/libraries/TickBitmap.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
+import {MarketParams, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {Permits} from "../../src/ace/hub/libraries/Permits.sol";
 import {GateRefused, InsufficientCash, NotBorrower} from "../../src/ace/hub/Borrower.sol";
 import {Bid} from "../../src/interfaces/ILaunchAuction.sol";
@@ -66,7 +66,7 @@ abstract contract LaunchVaultBase is LaunchVaultFixture {
     /// @dev The params the vault builds for `acct` at `price`, by name, as a stranger would to front-run its market.
     function _paramsFor(address acct, uint256 price) internal view returns (MarketParams memory p) {
         (p.quote, p.collateral, p.borrower, p.price, p.lender) = (address(usdc), m.token, acct, price, address(vault));
-        (p.minCoverageWad, p.baseBps, p.minTenor, p.maxTenor, p.minDebt) = (1.25e18, BASE, 7 days, 30 days, 10e6);
+        (p.minCoverageWad, p.baseBps, p.minTenor, p.maxTenor, p.minPrincipal) = (1.25e18, BASE, 7 days, 30 days, 10e6);
     }
 
     /// @dev The vault's current terms, field by field, for an equality against what it was created with.
@@ -126,7 +126,7 @@ contract LaunchVaultCreationTest is LaunchVaultBase {
         (bytes32 id, uint256 got) = _reserve(v, alice, type(uint256).max);
         assertEq(ace.idToMarketParams(id).baseBps, 530, "the market's rate");
         assertEq(ace.restingOf(id), got, "nothing rested");
-        assertGt(got, v.MIN_DEBT(), "fixture: a real reservation");
+        assertGt(got, v.MIN_PRINCIPAL(), "fixture: a real reservation");
     }
 
     /// @notice A zero curator and a token the factory never launched are refused by name, on both the create and the predict.
@@ -207,7 +207,7 @@ contract LaunchVaultCreationTest is LaunchVaultBase {
             "MIN_TENOR()",
             "MAX_TENOR()",
             "COVERAGE_WAD()",
-            "MIN_DEBT()",
+            "MIN_PRINCIPAL()",
             "FEE_BPS()",
             "MIN_D_TICKS()",
             "MAX_D_TICKS()",
@@ -615,7 +615,7 @@ contract LaunchVaultCreditTest is LaunchVaultBase {
         _goLive(m);
         _warpTo(_openAt(m));
         vm.prank(alice);
-        vm.expectRevert(LaunchVault.BelowMinDebt.selector);
+        vm.expectRevert(LaunchVault.BelowMinPrincipal.selector);
         vault.reserve(type(uint256).max);
         uint256 id = _bid(m, alice, 20e6);
         strat.send(m.token, address(acct), _filled(20e6));
@@ -862,11 +862,11 @@ contract LaunchVaultReserveTest is LaunchVaultBase {
         vault.reserve(1e6);
         m.lock.account(bob, 0);
         vm.prank(bob);
-        vm.expectRevert(LaunchVault.BelowMinDebt.selector);
+        vm.expectRevert(LaunchVault.BelowMinPrincipal.selector);
         vault.reserve(type(uint256).max); // an account, but no credit
     }
 
-    /// @notice One unit held at a launch-scale price rests nothing: its worth sits far under the minimum debt.
+    /// @notice One unit held at a launch-scale price rests nothing: its worth sits far under the minimum principal.
     function test_RoomOfOneUnitRestsNothing() public {
         uint256 id = _bid(m, alice, SPEND);
         strat.send(m.token, m.lock.predict(alice, 0), 1);
@@ -875,11 +875,11 @@ contract LaunchVaultReserveTest is LaunchVaultBase {
         _goLive(m);
         _warpTo(_openAt(m));
         vm.prank(alice);
-        vm.expectRevert(LaunchVault.BelowMinDebt.selector);
+        vm.expectRevert(LaunchVault.BelowMinPrincipal.selector);
         vault.reserve(type(uint256).max);
     }
 
-    /// @notice Room that shrinks under what already rests saturates to zero: the top-up is BelowMinDebt, never an underflow.
+    /// @notice Room that shrinks under what already rests saturates to zero: the top-up is BelowMinPrincipal, never an underflow.
     function test_RoomUnderRestingSaturates() public {
         LockAccount acct = _ready();
         _reserve(vault, alice, type(uint256).max);
@@ -887,7 +887,7 @@ contract LaunchVaultReserveTest is LaunchVaultBase {
         vm.prank(alice);
         acct.release(_filled(SPEND) / 2);
         vm.prank(alice);
-        vm.expectRevert(LaunchVault.BelowMinDebt.selector);
+        vm.expectRevert(LaunchVault.BelowMinPrincipal.selector);
         vault.reserve(type(uint256).max);
     }
 
@@ -895,7 +895,7 @@ contract LaunchVaultReserveTest is LaunchVaultBase {
     function test_AnAskUnderOneTicketIsRefused() public {
         _ready();
         vm.prank(alice);
-        vm.expectRevert(LaunchVault.BelowMinDebt.selector);
+        vm.expectRevert(LaunchVault.BelowMinPrincipal.selector);
         vault.reserve(10e6 - 1);
         (, uint256 got) = _reserve(vault, alice, 10e6);
         assertEq(got, 10e6, "one ticket did not rest");
@@ -1192,7 +1192,7 @@ contract LaunchVaultReserveTest is LaunchVaultBase {
         assertLe(read.loan(loanId).expiry, _lendEnd(m) + 30 days, "a loan outlived the term");
         vm.prank(alice);
         vm.expectRevert(NotBorrower.selector);
-        ace.refinance(loanId, got / 2, 30 days, OpenBounds(0, 0, 0));
+        ace.refinanceTo(MigrateArgs(loanId, id, got / 2, 30 days, OpenBounds(0, 0, 0), 0, address(0)));
         _warpTo(_lendEnd(m));
         vm.prank(keeper);
         vault.recall(address(acct));
@@ -1393,8 +1393,8 @@ contract LaunchVaultExitTest is LaunchVaultBase {
 
     // ---- forfeits ----
 
-    /// @notice Two defaults in two accounts' markets, ended by forceClose and settleExpired, redeemed by anyone: then home,
-    /// @notice and the holders take every forfeited token pro rata, with no fee on the loss.
+    /// @notice Two defaults in two accounts' markets, each force-closed at its expiry and redeemed by anyone, bring both pots home.
+    /// @notice The holders then take every forfeited token pro rata, with no fee on the loss.
     function test_TwoForfeitsRoundTripToExits() public {
         _buy(alice, SPEND);
         _buy(bob, SPEND);
@@ -1410,9 +1410,9 @@ contract LaunchVaultExitTest is LaunchVaultBase {
         _warpTo(read.loan(la).expiry);
         vm.prank(stranger);
         ace.forceClose(la);
-        _warpTo(read.loan(lb).expiry + 2 days);
+        _warpTo(read.loan(lb).expiry);
         vm.prank(stranger);
-        ace.settleExpired(lb);
+        ace.forceClose(lb);
         assertFalse(vault.isHome(), "unredeemed pots read home");
         vm.prank(carol);
         vm.expectRevert(LaunchVault.NotHome.selector);

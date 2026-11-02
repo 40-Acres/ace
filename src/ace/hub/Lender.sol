@@ -12,13 +12,13 @@ import {Cfg, LenderCollateral, LenderPools, LenderUnresolved, Market, MarketPara
 import {IPositionManager} from "../../interfaces/IPositionManager.sol";
 
 error NothingResting(); // no cash rests in this market, so there is nothing to withdraw
-error WouldLeaveDust(); // a partial withdraw left unreserved cash in `(0, minDebt)`: depth no fresh draw can consume
+error WouldLeaveDust(); // a partial withdraw left resting cash in `(0, minPrincipal)`: depth no fresh draw can consume
 error EmptyPot(); // no collateral rests against this loan
 error SyntheticCapExceeded(); // units left custody beyond what backed burns have credited
 error NotTheLender(); // cash or credit booked for anyone but the market's one named lender: the tenancy invariant
 error LendingAbovePrice(); // resting cash the market will not lend from is not lending, it is a stale bid
 error GateRefused(); // the depositor is not the market's one named lender: sole tenancy refuses the deposit
-error BelowMinLot(); // a zero deposit, one under `minDebt` that does more than refill the reserve, or one resting unreserved dust
+error BelowMinLot(); // a zero deposit, or one under `minPrincipal`
 error CashCapped(); // this deposit would take the market's resting cash past uint128
 error UnitsBelowCallerFloor(); // the ask filled fewer units than the buyer's own bound: their number, not the market's
 error BelowCallerFloor(); // the caller's own floor refused the fill: a deleverage realized under `minStableOut`, or a withdraw paid under `minPaid`
@@ -82,13 +82,10 @@ library Lender {
         (bool got, RecordState state, uint256 cap) = Borrower.tryRecordState(c);
         if (!got) return Refusal.Record;
         /// @dev Live ONLY: None admits by ruling, and NoPrice is this door's fail-open case.
-        /// @dev A refill only a home roll can draw is exempt: that roll is judged at `min(price, record)`, never capped.
-        if (state == RecordState.Live && c.p.price > cap && !_refillsReserve(M, assets)) return Refusal.Price;
-        // THE floor is on what ARRIVES; the balance it joins matters only in a roll-reserve deficit, to the dust test below
-        if (assets == 0 || (assets < c.p.minDebt && !_refillsReserve(M, assets))) return Refusal.MinLot; // a reserve refill rests no dust
+        if (state == RecordState.Live && c.p.price > cap) return Refusal.Price;
+        /// @dev THE floor is on what ARRIVES, so the balance it joins is at least one floor and rests no dust.
+        if (assets == 0 || assets < c.p.minPrincipal) return Refusal.MinLot;
         if (assets > type(uint128).max - M.s.cash) return Refusal.CashCap; // subtracted, so an absurd lot refuses by name, never panics
-        // into a deficit, a lot stays within it or clears a whole floor past it; after the cap, so the sum is known to fit
-        if (_unreservedDust(M.s.cash + assets, M.s.rollReserve, c.p.minDebt)) return Refusal.MinLot;
         return Refusal.None;
     }
 
@@ -140,20 +137,6 @@ library Lender {
     event LenderPushFailed(address indexed lender, address indexed quote, uint256 amount);
     event RedeemedInKind(uint256 indexed loanId, address indexed lender, address to, uint256 units);
 
-    /// @dev Whether `left` rests unreserved cash in `(0, minDebt)`. SATURATING: `left` may sit under the reserve by the lender's consent.
-    function _unreservedDust(uint256 left, uint256 reserved, uint256 minDebt) private pure returns (bool) {
-        uint256 free = Math.saturatingSub(left, reserved);
-        return free != 0 && free < minDebt;
-    }
-
-    /// @dev A deposit that only refills a reserve deficit rests no unreserved cash, so the floor has nothing to guard.
-    function _refillsReserve(Market storage M, uint256 assets) private view returns (bool) {
-        uint256 cash = M.s.cash;
-        uint256 reserved = M.s.rollReserve;
-        uint256 deficit = Math.saturatingSub(reserved, cash);
-        return deficit != 0 && assets <= deficit;
-    }
-
     /// @dev The authority check the market-keyed exits run; the market names its lender in its own id preimage.
     function _onlyLender(Cfg memory c) private view {
         if (msg.sender != c.p.lender) revert NotTheLender();
@@ -174,8 +157,7 @@ library Lender {
     /// @notice `to` is the lender's choice of wallet, never zero, the hub or the positionManager; it also routes around a quote's freeze of the lender.
     /// @notice `minPaid` is the lender's floor on the fill: a draw landing first shrinks `paid`, and this refuses that.
     /// @notice A ZERO PAYOUT past every refusal (`NothingResting`, `WouldLeaveDust`) returns 0 silently: no `to` collects zero-value logs.
-    /// @dev FLOOR-OR-ZERO ON UNRESERVED CASH: a remainder whose part past the roll reserve lies in `(0, minDebt)` reverts `WouldLeaveDust`.
-    /// @dev That part is depth no fresh draw can consume; reserved cash is a roll's to draw, so leaving only it is never dust.
+    /// @dev FLOOR-OR-ZERO: a remainder in `(0, minPrincipal)` reverts `WouldLeaveDust`, being depth no fresh draw can consume.
     /// @dev `paid < resting` is the conjunct that keeps emptying always allowed, so a lender's own money stays reachable.
     function withdraw(Market storage M, Cfg memory c, bytes32 id, uint256 assets, address to, uint256 minPaid) public returns (uint256 paid) {
         _onlyLender(c);
@@ -184,7 +166,7 @@ library Lender {
         if (resting == 0) revert NothingResting();
         paid = Math.min(assets, resting);
         if (paid < minPaid) revert BelowCallerFloor();
-        if (paid < resting && _unreservedDust(resting - paid, M.s.rollReserve, c.p.minDebt)) revert WouldLeaveDust();
+        if (paid < resting && resting - paid < c.p.minPrincipal) revert WouldLeaveDust();
         if (paid == 0) return 0; // after every refusal, so only the log and the zero transfer are dropped
         debitCash(M, paid);
         IERC20(c.p.quote).safeTransfer(to, paid);

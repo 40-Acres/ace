@@ -10,6 +10,7 @@ import {PocDeployConfig, ProtocolPolicy} from "../../src/config/Defaults.sol";
 import {PersistenceRecord} from "./PersistenceRecord.sol";
 import {AceReader} from "./AceReader.sol";
 import {PriceFrame} from "./PriceFrame.sol";
+import {YesPolicy} from "./RollPolicyMocks.sol";
 
 /// @notice The shared deploy fixture: the ONLY place a test spells out the ~44-field `MarketParams`.
 /// @notice A new field gets its default here once; tests override only what they exercise.
@@ -23,6 +24,7 @@ library AceFixtures {
     /// @dev THE MAINNET VALUE, read from the one config constant, so every suite measures the budget Ethereum ships.
     /// @dev `deploy/chains/mainnet.json` `pushGas` is a second copy that no suite reads: keep the two equal by hand.
     uint256 internal constant PUSH_GAS = PocDeployConfig.PUSH_GAS;
+    uint256 internal constant POLICY_GAS = 200_000; // the roll-policy budget every fixture hub carries: the deploy scripts' value
 
     /// @dev The venue record's fixture shape. The ring is sized to REACH the settle window, which the
     /// @dev record's own constructor now requires: `(REC_OBS_CAP - 1) * REC_OBS_INTERVAL >= P + pending`.
@@ -127,7 +129,7 @@ library AceFixtures {
         p.baseBps = PocDeployConfig.BASE_BPS;
         p.minTenor = ProtocolPolicy.MIN_TENOR; // one 7-day term, not the shipped 7-30 day launch range
         p.maxTenor = ProtocolPolicy.MAX_TENOR;
-        p.minDebt = 10e6; // KEEP-DIVERGENT: test baseline dust floor (shipped MIN_DEBT is 5000e6)
+        p.minPrincipal = 10e6; // KEEP-DIVERGENT: test baseline smallest loan, debt floor 5e6 (shipped MIN_PRINCIPAL is 10000e6)
         /// @dev no eps: the band ships off; a suite arming the band sets eps with it
         p.settleBountyBps = PocDeployConfig.SETTLE_BOUNTY_BPS;
         /// @dev A DEFAULT so the ~200 suites that never think about tenancy keep working; genesis refuses a zero.
@@ -150,9 +152,23 @@ library AceFixtures {
 
     /// @notice The same pair with the push budget named, for a suite whose subject IS the budget.
     function newAceWithEscrow(address treasury, uint256 pushGas) internal returns (Ace ace, PositionManager positionManager) {
+        return newAceWithBudgets(treasury, pushGas, POLICY_GAS);
+    }
+
+    /// @notice The same pair with both gas budgets named, for a suite whose subject IS the roll-policy budget.
+    function newAceWithBudgets(address treasury, uint256 pushGas, uint256 policyGas) internal returns (Ace ace, PositionManager positionManager) {
         address predictedHub = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
         positionManager = new PositionManager(predictedHub);
-        ace = new Ace(treasury, address(positionManager), pushGas);
+        ace = new Ace(treasury, address(positionManager), pushGas, policyGas);
+    }
+
+    /// @notice Name an always-yes roll policy for `lender`: its loans extend, and their re-terms in their own market reuse the claim.
+    /// @notice NEVER INSTALLED BY DEFAULT: a suite that relies on it calls it, and its rows gain a no-policy twin.
+    /// @return policy The policy now named for `lender`.
+    function installYesPolicy(Ace ace, address lender) internal returns (address policy) {
+        policy = address(new YesPolicy());
+        vm.prank(lender);
+        ace.setRollPolicy(policy);
     }
 
     /// @notice A hub with its own positionManager: the one-liner every hand-rolled site needs.

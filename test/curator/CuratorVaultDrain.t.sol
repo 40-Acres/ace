@@ -62,7 +62,7 @@ contract CuratorVaultDrainTest is CuratorVaultExitsRig {
         _drain(v, curator, true);
         uint256 exitable = _exitable(v);
         assertGt(exitable, 0, "PREMISE: the vault holds exitable cash");
-        assertEq(exitable, v.idle() - v.rollHoldNow(), "PREMISE: exitable is idle past the roll hold");
+        assertEq(exitable, v.idle(), "PREMISE: exitable is all of idle");
         assertEq(v.lendable(), 0, "the drain left cash lendable");
         assertEq(_heldReq(v), 0, "the drain held cash for requests");
         assertEq(v.maxWithdraw(alice), exitable, "an instant exit under the drain does not read all of exitable");

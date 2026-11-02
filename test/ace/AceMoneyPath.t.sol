@@ -7,7 +7,7 @@ import {Ace} from "../../src/ace/hub/Ace.sol";
 import {Loan, MarketParams, MarketState, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {BelowMinLot} from "../../src/ace/hub/Lender.sol";
 import {NothingResting, WouldLeaveDust} from "../../src/ace/hub/Lender.sol";
-import {BelowCoverageLine, BelowMinDebt, TriggerAboveFloor} from "../../src/ace/hub/Borrower.sol";
+import {BelowCoverageLine, BelowDebtFloor, BelowMinPrincipal, TriggerAboveFloor} from "../../src/ace/hub/Borrower.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {Constants} from "../../src/ace/hub/Constants.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
@@ -64,11 +64,11 @@ contract AceMoneyPathTest is Test {
         return 0;
     }
 
-    /// @dev This market's deposit floor, which IS `minDebt`: one price, so no claim cap to divide by.
+    /// @dev This market's deposit floor, which IS `minPrincipal`: one price, so no claim cap to divide by.
     /// @dev Read back off the hub rather than written as a literal, so it tracks the fixture's params.
     function _minLot() internal view returns (uint256) {
         MarketParams memory p = ace.idToMarketParams(id);
-        return p.minDebt;
+        return p.minPrincipal;
     }
 
     /// @dev 15,000 resting, which is what the three-rung ladder this replaced held in total.
@@ -257,20 +257,20 @@ contract AceMoneyPathTest is Test {
         assertEq(ace.restingOf(id), 1_000_000e6, "and the rest of the balance is untouched by it");
     }
 
-    // ============ the lender floor is DERIVED: `ceil(minDebt / maxClaimTicks)`, a fraction of minDebt ============
+    // ============ the lender floor is DERIVED: `ceil(minPrincipal / maxClaimTicks)`, a fraction of minPrincipal ============
 
-    /// @notice THE LENDER FLOOR IS A SMALL FRACTION OF `minDebt` HERE, which is what this section rests on.
-    /// @notice It is `ceil(minDebt / maxClaimTicks)`, so at the fixture's 10e6 over 32 it is 312,500 wei.
+    /// @notice THE LENDER FLOOR IS A SMALL FRACTION OF `minPrincipal` HERE, which is what this section rests on.
+    /// @notice It is `ceil(minPrincipal / maxClaimTicks)`, so at the fixture's 10e6 over 32 it is 312,500 wei.
     /// @notice Where the floor bites at a real size, `AceN4Floors.t.sol` pins what it does.
-    /// @notice `minDebt` gates the BORROWER directly, and reaches the lender only through that division.
+    /// @notice `minPrincipal` gates the BORROWER directly, and reaches the lender only through that division.
     /// @notice A deposit AT the floor is admitted and books exactly; a second one joins it.
-    /// @dev THE FLOOR IS `minDebt` ITSELF NOW. It was `ceil(minDebt / maxClaimTicks)`, a small fraction of it,
+    /// @dev THE FLOOR IS `minPrincipal` ITSELF NOW. It was `ceil(minPrincipal / maxClaimTicks)`, a small fraction of it,
     /// @dev sized so a maximally FRAGMENTED ladder could still fund one minimum loan. With one price there is
     /// @dev nothing to fragment, so the fraction has no job and the floor is the admission quantum directly.
     /// @dev What survives is why a floor exists at all: cash under it is depth no draw can consume.
     function test_Deposit_ADepositAtTheFloorIsAdmittedAndBooksExactly() public {
         uint256 ticket = _minLot();
-        assertEq(ticket, 10e6, "PREMISE: the floor IS the fixture's minDebt, with no cap left to divide by");
+        assertEq(ticket, 10e6, "PREMISE: the floor IS the fixture's minPrincipal, with no cap left to divide by");
         _deposit(alice, ticket);
         assertEq(ace.restingOf(id), ticket, "a deposit AT the floor books, and books exactly");
 
@@ -290,13 +290,13 @@ contract AceMoneyPathTest is Test {
     }
 
     /// @notice THE SEPARATION, pinned here because this market is the extreme case of it.
-    /// @notice The lender floor is zero and the BORROWER floor is still `minDebt`, in the same market.
+    /// @notice The lender floor is zero and the BORROWER floor is still `minPrincipal`, in the same market.
     function testRevert_Open_TheBorrowerQuantumIsStillMinDebt() public {
         _fundLadder();
         vault.mint(borrower, COLL);
         vm.startPrank(borrower);
         vault.approve(address(positionManager), COLL);
-        vm.expectRevert(BelowMinDebt.selector);
+        vm.expectRevert(BelowMinPrincipal.selector);
         ace.open(id, COLL, 10e6 - 1, 0, borrower, OpenBounds(0, 0, 0)); // sub-quantum LOAN: dust the book refuses
         vm.stopPrank();
     }
@@ -305,7 +305,7 @@ contract AceMoneyPathTest is Test {
     /// @notice Floor-or-zero still governs wherever the derived floor is nonzero; it is vacuous at zero.
     /// @dev The remainder is the TICK's now, not a fresh lot: one lender, so there is nothing to distinguish.
     /// @dev WAS "with the floor OFF a partial may leave a dust remainder". There is no floor-off market: the
-    /// @dev lender floor WAS `ceil(minDebt / maxClaimTicks)` and derived to a fraction here, while `minDebt`
+    /// @dev lender floor WAS `ceil(minPrincipal / maxClaimTicks)` and derived to a fraction here, while `minPrincipal`
     /// @dev floors both doors directly now and genesis refuses a zero. So a sub-floor REMAINDER is refused,
     /// @dev and what survives is the other half this row carried: emptying is never gated.
     function test_Withdraw_ASubFloorRemainderIsRefusedAndEmptyingNeverIs() public {
@@ -504,18 +504,26 @@ contract AceMoneyPathTest is Test {
         assertEq(ace.collect(address(usdc), alice), 0, "and the recovery door has nothing left to bring home");
     }
 
-    /// @notice A paydown may land under `minDebt`: the floor gates what a market ISSUES, not what a loan carries.
-    /// @dev The melt still tracks it -- claims retire by exactly the debt decrement, so the lender is paid either way.
-    function test_Repay_LeavingDust_Stands() public {
+    /// @notice A paydown may NOT land under the debt floor, half `minPrincipal`: the borrower's own repay included.
+    /// @dev A refused repay moves nothing: the debt, the lender's credit and the borrower's balance all stand.
+    function test_Repay_LeavingDust_Reverts() public {
         _fundLadder();
         uint256 loanId = _open(COLL, 4_500e6);
         uint256 owedBefore = read.poolOwed(id);
+        uint256 pay = 4_495e6 + 1; // would leave 5 USDC less one atom, under the 5 USDC floor of a 10 USDC minPrincipal
+        usdc.mint(borrower, pay);
+        uint256 bal = usdc.balanceOf(borrower);
 
-        _repay(loanId, 4_495e6); // leaves 5 USDC, under the 10 USDC floor
+        vm.startPrank(borrower);
+        usdc.approve(address(ace), pay);
+        vm.expectRevert(BelowDebtFloor.selector);
+        ace.repay(loanId, pay);
+        vm.stopPrank();
 
-        assertEq(read.loan(loanId).debt, 5e6, "the loan carries the dust");
-        assertFalse(read.loan(loanId).closedAt != 0, "and stays open on it");
-        assertEq(read.poolOwed(id) - owedBefore, 4_495e6, "and the lender is owed every wei of it already");
+        assertEq(read.loan(loanId).debt, 4_500e6, "the debt stands");
+        assertFalse(read.loan(loanId).closedAt != 0, "the loan stays open");
+        assertEq(read.poolOwed(id), owedBefore, "the lender is owed nothing new");
+        assertEq(usdc.balanceOf(borrower), bal, "and no quote left the borrower");
     }
 
     function test_Repay_Overpay_ClampsToDebt() public {

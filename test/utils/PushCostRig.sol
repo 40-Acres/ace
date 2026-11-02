@@ -174,8 +174,8 @@ abstract contract PushCostRig is Test {
         _row(name, "ZERO   ", "warm (closing repay)", cs[1]);
         _row(name, "nonzero", "words cold, account warm (vm.cool only)", coolFunded);
         _row(name, "ZERO   ", "words cold, account warm (vm.cool only)", coolEmpty);
-        _row(name, "nonzero", "ALL COLD (finalize, settleExpired)", cs[2]);
-        _row(name, "ZERO   ", "ALL COLD (finalize, settleExpired)", cs[3]);
+        _row(name, "nonzero", "ALL COLD (finalize, forceClose)", cs[2]);
+        _row(name, "ZERO   ", "ALL COLD (finalize, forceClose)", cs[3]);
         emit log_named_uint(string.concat("PUSH-COST | ", name, " | all cold minus warm, used, nonzero lender"), cs[2].used - cs[0].used);
         assertEq(cs[1].used - cs[0].used, ZERO_TO_NONZERO_EXTRA, "RIG: warm, a zero lender costs exactly one SSTORE_SET over RESET");
         assertEq(cs[3].used - cs[2].used, ZERO_TO_NONZERO_EXTRA, "RIG: cold, a zero lender costs exactly one SSTORE_SET over RESET");

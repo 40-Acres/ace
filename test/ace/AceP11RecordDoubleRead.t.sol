@@ -11,24 +11,16 @@ import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {IPersistenceRecord} from "../../src/interfaces/IPersistenceRecord.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
-
-/// @notice The continuation predicate, declared test-side exactly as AceP7Adversarial declares it.
-interface IAceTryContinueV {
-    function tryContinue(uint256 id) external view returns (bool ok, bytes4 reason, uint256 principal);
-}
-
-interface IAceAutoV {
-    function setAutoRefinance(uint256 id, uint64 tenor, uint16 minBufferBps, uint16 maxFeeBps) external;
-}
+import {_extended} from "../utils/Extended.sol";
 
 interface IAceClosedV {
     function isClosed(uint256 id) external view returns (bool);
 }
 
 /// @notice Answers a healthy windowed minimum while its target loan is live and zero once it closes.
-/// @dev The record twin of AceFoldSingleRead's SelfClosingGate, aimed at the OTHER creator-chosen dependency.
+/// @dev The record twin of a self-closing gate, aimed at the OTHER creator-chosen dependency.
 /// @dev A record read is a view call, so a record cannot COUNT its own reads; this one reads the hub's `closedAt` instead.
-/// @dev `_closeForRefinance` writes that flag mid-roll, so any record read taken after it gets the flipped answer.
+/// @dev Any record read taken after a write of that flag in the same call would get the flipped answer.
 contract SelfBlindingRecord is IPersistenceRecord {
     IAceClosedV public immutable ACE;
     address public immutable QUOTE;
@@ -68,7 +60,7 @@ contract SelfBlindingRecord is IPersistenceRecord {
         return CAP;
     }
 
-    /// @dev THE FLIP: a real windowed minimum before the roll closes the loan, zero after it.
+    /// @dev THE FLIP: a real windowed minimum while the loan is live, zero once it closes.
     function minPrice(address, address) external view returns (uint256) {
         return target == 0 || !ACE.isClosed(target) ? CAP : 0;
     }
@@ -79,8 +71,8 @@ contract SelfBlindingRecord is IPersistenceRecord {
 }
 
 /// @title AceP11RecordDoubleRead
-/// @notice The armed expiry roll consults the price RECORD once, and funds the successor at that one answer.
-/// @notice A record that answers differently mid-roll therefore cannot put the loan beyond every settlement verb.
+/// @notice A cash extension consults the price RECORD before any write and closes nothing; `forceClose` asks the record nothing.
+/// @notice A record that answers differently mid-call therefore cannot put the loan beyond every verb.
 /// @notice The sibling of the same property through the GATE; a guarantee scoped to one dependency covers neither.
 /// @dev Findings: docs/ai/audit/runs/2026-08-31-fab1e1/phase11-variants.md
 contract AceP11RecordDoubleReadTest is WarpClock {
@@ -134,56 +126,49 @@ contract AceP11RecordDoubleReadTest is WarpClock {
         MarketParams memory q = ace.idToMarketParams(midLive);
         q.record = address(flip);
         midFlip = ace.createMarket(q);
+        AceFixtures.installYesPolicy(ace, alice);
         assertGt(CAP, TICK, "fixture: the answered minimum sits ABOVE the tick's book price");
     }
 
-    /* ============ V-R1: the RECORD is the other dependency the roll must ask once ============ */
+    /* ============ V-R1: the RECORD is the other dependency the extension must ask before it writes ============ */
 
-    /// @notice `forceCloseOrContinue` reads the record through `tryPersistedPrice`, which ABSORBS a sick answer.
-    /// @notice `_closeForRefinance` writes `closedAt` inside the same call, so a record reading it can change answer.
-    /// @notice An armed, expired loan must still reach a terminal state under such a record: some verb must resolve it.
+    /// @notice A record whose answer turns on the loan's `closedAt` cannot put a maturing loan beyond every verb.
+    /// @notice On the lender's yes the extension asks the record before any write and then lands, closing nothing, so the record never flips.
+    /// @notice `forceClose` settles, and settlement asks the record nothing after `closedAt` is written, so the flip is harmless.
     /// @dev NO GATE IS WIRED HERE, so the gate leg can never be what carries this test.
-    function test_P11_ArmedLoan_RecordVaryingAcrossTheRoll_SettlementStaysReachable() public {
-        uint256 loanId = _armedLoanOn(midFlip);
-        flip.setTarget(loanId); // armed AFTER the open, so entry saw an unconditional healthy answer
+    function test_P11_RecordVaryingAcrossTheExtension_SettlementStaysReachable() public {
+        uint256 loanId = _loanOn(midFlip);
+        flip.setTarget(loanId); // targeted AFTER the open, so entry saw an unconditional healthy answer
 
         assertEq(ace.idToMarketParams(midFlip).borrower, address(0), "fixture: no gate, so the gate leg cannot be the cause");
 
-        _warpTo(read.loan(loanId).expiry + 1);
-        (bool ok,,) = IAceTryContinueV(address(ace)).tryContinue(loanId);
-        assertTrue(ok, "fixture: the fold's own predicate must admit, or the committed roll is never reached");
+        uint64 x = read.loan(loanId).expiry;
+        _warpTo(uint256(x) - 1);
+        (bool ok,,) = ace.tryExtend(loanId, 0, "", borrower);
+        assertTrue(ok, "fixture: the extension's own predicate must admit, or the extension is never reached");
 
-        bool settled;
-        try ace.finalize(loanId) {
-            settled = true;
-        } catch (bytes memory err) {
-            emit log_named_bytes("finalize reverted with        ", err);
-        }
-        try ace.forceClose(loanId) {
-            settled = true;
-        } catch (bytes memory err) {
-            emit log_named_bytes("forceClose reverted with      ", err);
-            assertEq(bytes4(err), NoRecordPrice.selector, "a refusal here must be the record's own, not some other leg");
-        }
-        /// @dev Guarded: once a verb above settles the loan this one refuses `LoanClosed`, which proves nothing.
-        if (!settled) {
-            try ace.refinanceByPolicy(loanId) {
-                settled = true;
-            } catch (bytes memory err) {
-                emit log_named_bytes("refinanceByPolicy reverted    ", err);
-                assertEq(bytes4(err), NoRecordPrice.selector, "and the permissionless roll must refuse for that same reason");
-            }
-        }
-        assertTrue(settled, "SETTLEMENT UNREACHABLE: no verb resolves an armed, expired loan whose RECORD moves mid-roll");
+        uint256 snap = vm.snapshotState();
+        vm.prank(borrower);
+        ace.extend(loanId, 0, "");
+        assertTrue(_extended(read, loanId, x), "on the lender's yes the extension lands in place, closing nothing");
+        assertEq(flip.minPrice(address(usdc), address(coll)), CAP, "so the record never flipped");
+
+        vm.revertToState(snap);
+        _warpTo(x);
+        ace.forceClose(loanId);
+        assertTrue(ace.isClosed(loanId), "forceClose settles the same loan, though the record flips once the loan closes");
+        assertGt(read.invPotOf(midFlip, loanId), 0, "into the lender's pot");
     }
 
     /// @notice The control: the same market, the same loan, with the record's flip disarmed.
-    /// @dev The rig settles a loan whose record never moves, so a failure above is the flip and not the fixture.
-    function test_P11_Control_UnflippedRecord_TheArmedRollCompletes() public {
-        uint256 loanId = _armedLoanOn(midFlip); // target left at zero: the record answers CAP unconditionally
-        _warpTo(read.loan(loanId).expiry + 1);
-        ace.forceClose(loanId);
-        assertTrue(ace.isClosed(loanId), "control: the armed roll retires the old loan");
+    /// @dev The extension lands on a loan whose record never moves, so a failure above is the flip and not the fixture.
+    function test_P11_Control_UnflippedRecord_TheExtensionCompletes() public {
+        uint256 loanId = _loanOn(midFlip); // target left at zero: the record answers CAP unconditionally
+        uint64 x = read.loan(loanId).expiry;
+        _warpTo(uint256(x) - 1);
+        vm.prank(borrower);
+        ace.extend(loanId, 0, "");
+        assertTrue(_extended(read, loanId, x), "control: the extension lands the loan in place");
     }
 
     /* ================================= fixture ================================= */
@@ -196,15 +181,14 @@ contract AceP11RecordDoubleReadTest is WarpClock {
         vm.stopPrank();
     }
 
-    /// @dev Four times the deposit: the successor draws afresh, so the tick must still fund it after the first loan.
-    function _armedLoanOn(bytes32 mid) internal returns (uint256 loanId) {
+    /// @dev Four times the deposit, which the open draws a part of; the extension draws nothing, and its fee rides the borrower's allowance.
+    function _loanOn(bytes32 mid) internal returns (uint256 loanId) {
         _lend(mid, DEPOSIT * 4);
         coll.mint(borrower, COLL);
         vm.startPrank(borrower);
         coll.approve(address(pm), COLL);
+        usdc.approve(address(ace), type(uint256).max);
         loanId = ace.open(mid, COLL, PRINCIPAL, 0, borrower, OFF);
         vm.stopPrank();
-        vm.prank(borrower);
-        IAceAutoV(address(ace)).setAutoRefinance(loanId, 7 days, 0, 0);
     }
 }

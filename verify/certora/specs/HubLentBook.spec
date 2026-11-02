@@ -2,7 +2,7 @@
 //
 // A pool is one lender's in one quote, `pools[lender][quote]`, and every market naming that pair draws on it. The hub
 // moves `lent` at three sites, each through `LoanAccounting.addLent` or `subLent` and paired with the same pool's claim
-// by the same amount: the draw, the melt and settlement. O51 (the unpaid backstop) rests on the per-loan form,
+// by the same amount: the draw, the melt and settlement. O51 (`forceClose` must execute) rests on the per-loan form,
 // `lent >= claim`, since settlement subtracts the claim from the pool's `lent` checked: a sum of unsigned claims is at
 // least any one of them. The per-collateral `lent` saturates instead, so O51 needs no premise on it.
 //

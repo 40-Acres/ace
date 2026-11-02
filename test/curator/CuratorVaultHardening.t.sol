@@ -12,7 +12,7 @@ import {GateRefused} from "../../src/ace/hub/Lender.sol";
 contract CuratorVaultHardeningTest is CuratorVaultBase {
     uint256 internal constant SEED = 10_000e6;
     uint256 internal constant DRAW = 6_000e6;
-    uint256 internal constant DUST = 10e6; // the market's own `minDebt`; a paydown may legally land under it
+    uint256 internal constant DUST = 10e6; // the market's own `minPrincipal`; a paydown leaves at least it or closes the loan
     address internal attacker = address(0xBAD);
     address internal carol = address(0xCAC0);
 

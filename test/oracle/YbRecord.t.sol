@@ -199,7 +199,7 @@ contract YbRecordTest is WarpClock {
         new YbRecord(address(dapi), address(lt), address(wide), USDC, address(btc), STALE);
     }
 
-    // ---- the rate leg is the LOWER of the two YieldBasis publishes ----
+    // ---- the realizable reads take the LOWER of the two rates YieldBasis publishes ----
 
     /// @notice `pricePerShare` is ACCOUNTING; a redeemer gets an imbalanced pool exit that pays less.
     /// @notice Pricing off the accounting rate lends against a number nobody can realize: ZeroLend's error.
@@ -208,7 +208,7 @@ contract YbRecordTest is WarpClock {
         uint256 both = ltRec.lastObserved(USDC, address(lt));
         assertEq(both, PriceFrame.px((uint256(int256(BTC)) * 1.006194e18) / 1e18, USDC, address(lt)), "PREMISE: equal legs quote the pps");
 
-        lt.setPreviewWithdraw(0.96e8); // UNDERLYING-NATIVE: a discount well inside what has been seen live
+        lt.setPreviewWithdraw(0.96e8); // UNDERLYING-NATIVE: a discount just past the widest seen live
         uint256 discounted = ltRec.lastObserved(USDC, address(lt));
 
         assertLt(discounted, both, "the discount must reach the price, or the second leg is decorative");

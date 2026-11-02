@@ -4,7 +4,7 @@ pragma solidity 0.8.36;
 import {Test, Vm} from "forge-std/Test.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
-import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
+import {MarketParams, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {MockBlockableStakeVault} from "../mocks/MockBlockableStakeVault.sol";
@@ -12,10 +12,11 @@ import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
+import {_extended} from "../utils/Extended.sol";
 
 /// @title AceRefinanceBlockedCollateral
 /// @notice The migration hop must not depend on the HUB being an address the collateral will pay.
-/// @notice A hub-refusing collateral otherwise bricks every refinance entry AND the continue branch.
+/// @notice A hub-refusing collateral otherwise bricks every refinance entry AND the extension in place.
 /// @dev Continuation is the borrower's only alternative to settlement at expiry, so it must be total.
 /// @dev The custody hop is two ledger writes on one pot, so no address is a payer or a payee of it.
 contract AceRefinanceBlockedCollateralTest is WarpClock {
@@ -74,6 +75,7 @@ contract AceRefinanceBlockedCollateralTest is WarpClock {
         _deposit(TOP);
         _deposit(DEEP_CASH);
         usdc.mint(borrower, FLOAT);
+        AceFixtures.installYesPolicy(ace, alice); // a home re-term reuses the claim only on the lender's yes; the rows assumed the reuse
     }
 
     // ---- helpers ----
@@ -103,7 +105,7 @@ contract AceRefinanceBlockedCollateralTest is WarpClock {
         uint256 debtOld = read.loan(oldId).debt;
         bytes[] memory calls = new bytes[](2);
         calls[0] = abi.encodeCall(Ace.repay, (oldId, credit >= debtOld ? 0 : debtOld - credit));
-        calls[1] = abi.encodeCall(Ace.refinance, (oldId, P, TEN30, OFF));
+        calls[1] = abi.encodeCall(Ace.refinanceTo, (MigrateArgs(oldId, id, P, TEN30, OFF, 0, address(0))));
         vm.prank(borrower);
         return abi.decode(ace.multicall(calls)[1], (uint256));
     }
@@ -139,22 +141,20 @@ contract AceRefinanceBlockedCollateralTest is WarpClock {
         assertEq(positionManager.collateralOf(oldId), 0, "and clears the old one");
     }
 
-    /// @notice The continue branch of the expiry fold must survive it too, on the same leg.
-    /// @dev Continuation is the borrower's only alternative to settlement, so a brick here forces a default.
-    /// @dev The principal is smaller than `P`: the carry's derived principal must still clear the gate.
-    function test_ForceCloseOrContinue_ContinueBranchSurvivesAHubBlockedCollateral() public {
-        uint256 oldId = _open(P_CONT, TEN30);
-        vm.prank(borrower);
-        ace.setAutoRefinance(oldId, TEN30, 0, 0);
-
-        _warpTo(t0 + TEN30 + 1);
+    /// @notice A cash extension must survive it too: the collateral never moves, so a hub-blocked token cannot brick it.
+    /// @dev The extension is the borrower's in-place alternative to settlement at expiry, so a brick here forces a default.
+    function test_Extend_SurvivesAHubBlockedCollateral() public {
+        uint256 loanId = _open(P_CONT, TEN30);
+        _warpTo(t0 + TEN30 - 1);
+        uint64 x = read.loan(loanId).expiry;
+        uint256 custody = coll.balanceOf(address(positionManager));
         coll.setBlocked(address(ace), true);
 
-        vm.prank(keeper);
-        ace.forceClose(oldId);
+        vm.prank(borrower);
+        ace.extend(loanId, 0, "");
 
-        assertTrue(read.loan(oldId).closedAt != 0, "the armed loan retires");
-        assertGt(read.debtOf(oldId + 1), 0, "into a live continuation rather than a settlement");
+        assertTrue(_extended(read, loanId, x), "the loan extends in place rather than settling");
+        assertEq(coll.balanceOf(address(positionManager)), custody, "and not one collateral token moved");
     }
 
     /// @notice With nothing blocked at all, a refinance emits NO collateral transfer whatsoever.

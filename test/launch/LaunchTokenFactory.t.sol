@@ -102,6 +102,16 @@ contract LaunchTokenFactoryTest is RunwayFixture {
         assertEq(_factory(BLOCK_SECONDS, FEE, type(int16).max).POOL_TICK_SPACING(), type(int16).max, "the largest spacing was refused");
     }
 
+    /// @notice An auction factory that charges a protocol fee is refused: the team share and the cut are computed on the gross raise.
+    /// @notice A fee-free one is accepted.
+    function test_AFeeChargingAuctionFactoryIsRefused() public {
+        strat.setFeeController(address(0xFEE));
+        vm.expectRevert(LaunchTokenFactory.FeeChargingAuction.selector);
+        new LaunchTokenFactory(address(ace), address(strat), address(usdc), BLOCK_SECONDS, FEE, SPACING, bytes32(0), cutSink, 0);
+        strat.setFeeController(address(0));
+        assertEq(_factory(BLOCK_SECONDS, FEE).AUCTION_FACTORY(), address(strat), "a fee-free auction factory was refused");
+    }
+
     // ---- the token ----
 
     /// @notice The supply is the strategy's two halves plus every allocation, minted ONCE: one Transfer from zero, and nothing else ever mints.
@@ -258,8 +268,8 @@ contract LaunchTokenFactoryTest is RunwayFixture {
         assertEq(abi.encode(s, c, d), abi.encode(m.launchBy, 0, 30 days), "the buyer schedule at the floor");
     }
 
-    /// @notice The launch records exactly its own pool, with its launchBy: the configured key, and not the same token at another fee,
-    /// @notice spacing or hook, which read zero, so the hook refuses them.
+    /// @notice The launch records exactly its own pool, with its launchBy: the configured key, and no other fee, spacing or hook for its token.
+    /// @notice Those read zero, so the hook refuses them.
     function test_OnlyTheConfiguredKeyIsALaunchPool() public {
         Made memory m = _launch();
         assertEq(factory.launchByOf(m.key.toId()), m.launchBy, "the launch's pool");
@@ -394,6 +404,19 @@ contract LaunchTokenFactoryTest is RunwayFixture {
         LaunchTokenFactory.LaunchInput memory p = _input();
         (p.opsAmount, p.teamShareBps, p.operator) = (0, 0, address(0));
         _refuses(p, _sel(LaunchTokenFactory.ZeroOperator.selector));
+    }
+
+    /// @notice An operator at v4's TAKE sentinels is refused: address(1) pays the budget itself and address(2) the PositionManager.
+    /// @notice The next address up launches.
+    function test_ATakeSentinelOperatorIsRefused() public {
+        LaunchTokenFactory.LaunchInput memory p = _input();
+        for (uint160 i = 1; i <= 2; ++i) {
+            p.operator = address(i);
+            _refuses(p, _sel(LaunchTokenFactory.ZeroOperator.selector));
+        }
+        p.operator = address(3);
+        (,, address budget) = factory.launchOf(_launch(p).token);
+        assertTrue(budget != address(0), "an operator past the sentinels was refused");
     }
 
     /// @notice A window that starts after this block and runs a number of blocks dividing the whole launches, in that many even steps.

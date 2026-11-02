@@ -70,7 +70,7 @@ contract AceVaultNoDecimalsTest is WarpClock {
         vm.startPrank(who);
         coll.approve(address(v), 2_000e18);
         vm.expectRevert();
-        v.borrow(BorrowRequest(address(coll), 2_000e18, 1_000e6, 7 days, false, 0, 0, 0), "", "");
+        v.borrow(BorrowRequest(address(coll), 2_000e18, 1_000e6, 7 days, 0, 0, 0), "", "");
         vm.stopPrank();
         uint256 half = shares / 2;
         vm.prank(lp);

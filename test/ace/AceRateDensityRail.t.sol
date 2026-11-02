@@ -6,6 +6,7 @@ import {Ace} from "../../src/ace/hub/Ace.sol";
 import {Borrower} from "../../src/ace/hub/Borrower.sol";
 import {Constants} from "../../src/ace/hub/Constants.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
+import {RefinanceMath} from "../utils/RefinanceMath.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
@@ -15,7 +16,7 @@ import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
 
 /// @title AceRateDensityRail
-/// @notice What bounds the PRICE OF CREDIT once the per-term band is gone, and what that costs at the roll.
+/// @notice What bounds the PRICE OF CREDIT once the per-term band is gone, and what that costs per extension.
 /// @notice The fee-share rail is the only ceiling left, and at a single-tenor market it lands on an exact integer.
 /// @dev `minTenor == maxTenor` cancels the tenor on both sides of `feeFundable`, leaving `b * 11000 <= 2500 * 10000`.
 /// @dev So 2272 admits and 2273 refuses at EVERY term unit; nothing here is a property of the 7-day fixture.
@@ -93,30 +94,34 @@ contract AceRateDensityRailTest is WarpClock {
         vm.stopPrank();
     }
 
-    /// @notice The face a home roll writes, from the decision record's own closed form rather than from `src`.
-    /// @notice `P = ceil(owed * D / (D - N))`, `N = baseBps*tenor*11000`, `D = 1e8*minTenor`, with no refund at expiry.
-    /// @param face The retiring loan's debt.
+    /// @notice An extension's cash fee, from the decision record's own closed form rather than from `src`.
+    /// @notice `ceil(face * N / D)`, `N = baseBps*tenor*11000`, `D = 1e8*minTenor`: the fee on the debt, paid beside it.
+    /// @param face The loan's debt at the extension.
     /// @param baseBps The market's rate.
-    /// @param tenor The armed term.
+    /// @param tenor The time the extension adds.
     /// @param minTenor The market's term unit.
-    /// @return The successor's face.
-    function _rolledFace(uint256 face, uint256 baseBps, uint64 tenor, uint64 minTenor) internal pure returns (uint256) {
+    /// @return The extension's fee.
+    function _extensionFee(uint256 face, uint256 baseBps, uint64 tenor, uint64 minTenor) internal pure returns (uint256) {
         uint256 d = 10000 * 10000 * uint256(minTenor);
-        uint256 den = d - baseBps * uint256(tenor) * 11000;
-        return (face * d + den - 1) / den;
+        uint256 n = baseBps * uint256(tenor) * 11000;
+        return (face * n + d - 1) / d;
     }
 
-    /// @dev Three armed home rolls, each taken at the retiring loan's own expiry so no early-exit refund muddies the face.
-    function _rollThrice(uint256 loanId, uint256 baseBps, uint64 tenor, uint64 minTenor, uint256 wantPerRollBps) internal returns (uint256) {
+    /// @dev Three extensions, each in the last second of the loan's term, so each adds the tenor less that second; the lender consents.
+    /// @dev Each pays the closed form's fee on the time added in cash and leaves the face where it was; returns what the three cost.
+    function _extendThrice(uint256 loanId, uint256 baseBps, uint64 tenor, uint64 minTenor) internal returns (uint256 paid) {
+        AceFixtures.installYesPolicy(ace, lender);
+        uint256 face = read.debtOf(loanId);
         for (uint256 i = 0; i < 3; i++) {
-            uint256 before = read.debtOf(loanId);
-            _warpTo(uint256(read.loan(loanId).expiry));
-            vm.prank(KEEPER);
-            loanId = ace.refinanceByPolicy(loanId);
-            assertEq(read.debtOf(loanId), _rolledFace(before, baseBps, tenor, minTenor), "the successor carries the closed form's face");
-            assertEq(read.debtOf(loanId) * 10000 / before, wantPerRollBps, "and that face is the measured multiple of the one it retired");
+            _warpTo(uint256(read.loan(loanId).expiry) - 1);
+            uint256 wallet = usdc.balanceOf(BORROWER);
+            vm.prank(BORROWER);
+            ace.extend(loanId, 0, "");
+            uint256 fee = wallet - usdc.balanceOf(BORROWER);
+            assertEq(fee, _extensionFee(face, baseBps, tenor - 1, minTenor), "each extension pays the closed form's fee on the time added, in cash");
+            assertEq(read.debtOf(loanId), face, "and leaves the face where it was");
+            paid += fee;
         }
-        return loanId;
     }
 
     /* ============================== the premise the rows below rest on ============================== */
@@ -133,14 +138,14 @@ contract AceRateDensityRailTest is WarpClock {
 
         assertEq(LoanMath.originationFee(100_000e6, 365 days, 2272, 365 days), 24_992e6, "24.992 percent of face, exact at this draw");
         assertEq(LoanMath.originationFee(100_000e6, 365 days, 2272, 365 days), (100_000e6 * 24_992_000) / 100_000_000, "and native arithmetic agrees");
-        assertEq(LoanMath.principalForOwed(DRAW, DAY, 2272, DAY), 66_659_556_314, "a roll writes 1.3331911x of the face it retires");
-        assertEq(_rolledFace(DRAW, 2272, DAY, DAY), 66_659_556_314, "and this file's own closed form writes the same number");
+        assertEq(RefinanceMath.principalForOwed(DRAW, DAY, 2272, DAY), 66_659_556_314, "a refinance retiring DRAW at the ceiling draws 1.3331911x of it");
+        assertEq(LoanMath.originationFee(DRAW, DAY, 2272, DAY), 12_496e6, "an extension at the ceiling costs 0.24992x of the face it extends");
+        assertEq(_extensionFee(DRAW, 2272, DAY, DAY), 12_496e6, "and this file's own closed form charges the same number");
     }
 
     /// @notice THE SECOND PREMISE: the annualization `AceLens.rateBps` owes, hand-computed before the view exists.
     /// @notice It also proves the markets those rows read are ones genesis takes TODAY, so only the wiring is owed.
     /// @dev `lender = baseBps * 365 days / minTenor`, `allIn = baseBps * 11000 * 365 days / (10000 * minTenor)`.
-    /// @dev `worstRollFaceMulWad = 1e18 * D / (D - baseBps*maxTenor*11000)`, `D = 1e8 * minTenor`; flat markets here.
     function test_Premise_TheAnnualizedRateIsTheSameNumberAtEveryTermUnit() public {
         uint64 floor = Constants.MIN_TENOR_FLOOR;
         assertEq(ace.idToMarketParams(_create(floor, floor, 500)).minTenor, floor, "#380's repro, at the tenor floor, is creatable today");
@@ -156,11 +161,6 @@ contract AceRateDensityRailTest is WarpClock {
         assertEq(40 * 11000 * uint256(365 days) / (10000 * uint256(7 days)), 2294, "2294 is the ALL-IN figure, not the lender's");
         assertEq(1 * uint256(365 days) / uint256(365 days), 1, "one bps a year is the smallest rate the view can state");
         assertEq(1 * uint256(365 days) / uint256(730 days), 0, "and half a bps truncates to zero rather than reverting");
-
-        assertEq(uint256(1e18) * 1e8 / (1e8 - 500 * 11000), 1_058_201_058_201_058_201, "the MIN_TENOR_FLOOR market rolls its face 1.0582x");
-        assertEq(uint256(1e18) * 1e8 / (1e8 - 2272 * 11000) / 1e14, 13331, "the ceiling rolls it 1.3331x, the most the hub can write");
-        assertEq(uint256(1e18) * 1e8 / (1e8 - 40 * 11000) / 1e14, 10044, "the shipped market, 1.0044x per weekly roll");
-        assertEq(uint256(1e18) * 1e8 / (1e8 - 160 * 11000) / 1e14, 10179, "and 1.0179x per four-weekly roll at the SAME annual rate");
     }
 
     /* ============================== the ceiling, exactly ============================== */
@@ -248,57 +248,35 @@ contract AceRateDensityRailTest is WarpClock {
         assertEq(corner, (uint256(type(uint128).max) * 24_992_000 + 99_999_999) / 100_000_000, "and the fee is the share, ceiled once");
     }
 
-    /* ============================== the roll, which is what actually changes ============================== */
+    /* ============================== the extension, paid in cash every term ============================== */
 
-    /// @notice THE CONTROL, AND IT IS GREEN TODAY: 1.3333x per roll is ALREADY reachable, on a wide-range market.
-    /// @notice A 500-bps market with a one-day unit funds a 4.545-day term, and an armed policy rolls at that face.
-    /// @notice So the delete does not create the compounding. It changes the CADENCE, which the next row measures.
-    /// @dev The home roll carries no fee ceiling by design, so `AutoPolicy.maxFeeBps` never binds on this path.
-    function test_TheCeilingFaceMultipleIsAlreadyReachableOnAWideRangeMarket() public {
+    /// @notice THE CONTROL: a quarter of the face per extension is ALREADY reachable, on a wide-range market.
+    /// @notice A 500-bps market with a one-day unit funds a 4.545-day term, and the borrower extends by it in each term's last second.
+    /// @notice So the delete does not create the charge. It changes the CADENCE, which the next row measures.
+    /// @dev An extension charges the fee on the debt for the time it adds, in cash; the face never compounds.
+    function test_TheCeilingFeeShareIsAlreadyReachableOnAWideRangeMarket() public {
         bytes32 mid = _create(DAY, WIDE_ARM, 500);
         _fund(mid, CASH);
         uint256 loanId = _open(mid, DRAW, WIDE_ARM);
-        vm.prank(BORROWER);
-        ace.setAutoRefinance(loanId, WIDE_ARM, 0, 0);
 
-        loanId = _rollThrice(loanId, 500, WIDE_ARM, DAY, 13333);
+        uint256 paid = _extendThrice(loanId, 500, WIDE_ARM, DAY);
 
-        assertEq(read.debtOf(loanId) * 10000 / DRAW, 23703, "2.3703x over three rolls");
-        assertEq(_now() - t0, 3 * uint256(WIDE_ARM), "BUT IT COST 13.6 DAYS: the term multiple is the price of the multiple");
+        assertEq(_extensionFee(DRAW, 500, WIDE_ARM, DAY) * 10000 / DRAW, 2499, "a whole term costs 0.2499999x of the face");
+        assertEq(paid, 3 * _extensionFee(DRAW, 500, WIDE_ARM - 1, DAY), "three extensions of a term less a second, on a face that never moved");
+        assertEq(_now() - t0, 3 * uint256(WIDE_ARM - 1), "BUT IT TOOK 13.6 DAYS: the term multiple is the price of the charge");
     }
 
-    /// @notice NEWLY REACHABLE: the same 1.333x face, on a SINGLE-TENOR market, once per term unit instead of once per 4.545.
-    /// @notice Three rolls in three days where the control needed thirteen, and no per-roll consent is asked on the home leg.
-    /// @dev This is #644's subject. If the face multiple is not what the closed form says, the assertion below says so loudly.
-    function test_ThreeHomeRollsAtTheCeilingCompoundTheFaceEveryTermUnit() public {
+    /// @notice NEWLY REACHABLE: the same quarter-of-face charge, on a SINGLE-TENOR market, once per term unit instead of once per 4.545.
+    /// @notice Three extensions in three days where the control needed thirteen, each on the lender's policy's yes.
+    /// @dev This is #644's subject. If the fee is not what the closed form says, the assertion below says so loudly.
+    function test_ThreeExtensionsAtTheCeilingChargeTheFeeShareEveryTermUnit() public {
         bytes32 mid = _create(DAY, DAY, CEILING_BPS);
         _fund(mid, CASH);
         uint256 loanId = _open(mid, DRAW, DAY);
-        vm.prank(BORROWER);
-        ace.setAutoRefinance(loanId, DAY, 0, 0);
 
-        loanId = _rollThrice(loanId, CEILING_BPS, DAY, DAY, 13331);
+        uint256 paid = _extendThrice(loanId, CEILING_BPS, DAY, DAY);
 
-        assertEq(read.debtOf(loanId) * 10000 / DRAW, 23696, "2.3696x over three rolls, against 1.0 of collateral that never moved");
-        assertEq(_now() - t0, 3 * uint256(DAY), "AND IT COST THREE DAYS: the cadence is what the delete moves");
-    }
-
-    /// @notice THE BORROWER IS NOT ASKED, because a fee ceiling on the home leg would make any refusal terminal at expiry.
-    /// @dev A policy armed with the tightest possible ceiling still rolls at 1.333x, so `maxFeeBps` is decoration here.
-    /// @dev It binds only on a ROUTED destination, which is the seam this row exists to keep honest.
-    /// @dev The buffer is 1 bps because a nonzero fee ceiling is venue consent, and consent with no risk distance is refused.
-    function test_TheHomeRollIgnoresTheBorrowersOwnFeeCeiling() public {
-        bytes32 mid = _create(DAY, DAY, CEILING_BPS);
-        _fund(mid, CASH);
-        uint256 loanId = _open(mid, DRAW, DAY);
-        vm.prank(BORROWER);
-        ace.setAutoRefinance(loanId, DAY, 1, 1); // one bps of ceiling: the tightest the field can express
-
-        uint256 before = read.debtOf(loanId);
-        _warpTo(uint256(read.loan(loanId).expiry));
-        vm.prank(KEEPER);
-        uint256 newId = ace.refinanceByPolicy(loanId);
-
-        assertEq(read.debtOf(newId), _rolledFace(before, CEILING_BPS, DAY, DAY), "a 1-bps ceiling did not stop a 2499-bps roll");
+        assertEq(paid, 3 * 12_495_855_371, "0.74976x of the face in cash over three extensions of a day less a second, the collateral never moved");
+        assertEq(_now() - t0, 3 * uint256(DAY - 1), "AND IT TOOK THREE DAYS: the cadence is what the delete moves");
     }
 }

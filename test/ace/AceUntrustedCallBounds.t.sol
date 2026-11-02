@@ -17,12 +17,6 @@ import {AceReader} from "../utils/AceReader.sol";
 
 error RecordUnreadable(); // the record did not answer at all; mirrors the src error, same name and arity so the same selector
 
-/// @notice The hub's total continuation door, declared test-side as the neighbouring fold suites declare it.
-interface IAceAuto {
-    function setAutoRefinance(uint256 id, uint64 tenor, uint16 minBufferBps, uint16 maxFeeBps) external;
-    function tryContinue(uint256 id) external view returns (bool ok, bytes4 reason, uint256 principal);
-}
-
 /// @title AceUntrustedCallBounds
 /// @notice THE INVARIANT: a bound on the COPY is not an answer. `ok = false` must never read as `false`.
 /// @notice Every runtime site that reverts on a sick dependency today must still revert once it is rewired.
@@ -31,7 +25,7 @@ interface IAceAuto {
 /// @dev The sharp cases are the ones where `false` is PERMISSIVE, and they are named as such below.
 /// @dev EVERY SITE CARRIES TWO INDEPENDENT PROPERTIES: totality (it fails closed) and boundedness (it copies one word).
 /// @dev Tag each site for BOTH. Site 2 once read "already total" alone and stayed unbounded behind a tag that looked complete.
-/// @dev The bomb tests below must therefore cover every DOOR, not every site: two measured `deposit` while the fold went unmeasured.
+/// @dev The bomb tests below must therefore cover every DOOR, not every site: two measured `deposit` while the extension went unmeasured.
 contract AceUntrustedCallBoundsTest is WarpClock {
     Ace internal ace;
     AceReader internal read;
@@ -81,37 +75,36 @@ contract AceUntrustedCallBoundsTest is WarpClock {
         sid = ace.createMarket(q);
     }
 
-    /* ====== site 2: Borrower `tryPersistedPrice` -- total AND bounded; the caller does the refusing ====== */
+    /* ====== site 2: Borrower `tryRecordState`, the extension predicate's read -- total AND bounded; the caller does the refusing ====== */
 
-    /// @notice A record that cannot answer leaves the continuation predicate refusing, never admitting.
-    /// @dev `NoRecordPrice` is PRESERVED here: the total side has no revert to name, so it keeps its own selector.
-    function test_Site2_TryPersistedPrice_ASickRecordReadsUnusable_NotUncapped() public {
-        uint256 loanId = _armedLoan();
-        _warpTo(read.loan(loanId).expiry + 1);
+    /// @notice A record that cannot answer leaves the extension's predicate refusing, never admitting, and naming the record as unreadable.
+    /// @dev The predicate reads `tryRecordState`, which keeps a record that did not answer apart from one that answered zero.
+    function test_Site2_TryRecordState_ASickRecordReadsUnusable_NotUncapped() public {
+        uint256 loanId = _loan();
+        _warpTo(read.loan(loanId).expiry - 1);
         record.setSick(true);
 
-        (bool ok, bytes4 reason,) = IAceAuto(address(ace)).tryContinue(loanId);
-        assertFalse(ok, "FAIL-OPEN: an unreadable record admitted a continuation");
-        assertEq(reason, NoRecordPrice.selector, "and the refusal must still name the record");
+        (bool ok, bytes4 reason,) = ace.tryExtend(loanId, 0, "", borrower);
+        assertFalse(ok, "FAIL-OPEN: an unreadable record admitted an extension");
+        assertEq(reason, RecordUnreadable.selector, "and the refusal names the record as unreadable");
     }
 
-    /// @notice The total side CONFLATES the two record states the bubbling sites now separate by selector.
-    /// @notice A record that answered zero and one that could not answer both attribute `NoRecordPrice` here.
-    /// @dev Pinned so the conflation is a visible ruling rather than an accident of `tryPersistedPrice`'s shape.
-    /// @dev It is safe -- both refuse -- but the deposit door's fail-open branch turns on exactly this distinction.
-    function test_Site2b_TheTotalSide_ReportsOneReasonForBothRecordStates() public {
-        uint256 loanId = _armedLoan();
-        _warpTo(read.loan(loanId).expiry + 1);
+    /// @notice The extension's predicate SEPARATES the two record states, as the bubbling sites do by selector.
+    /// @notice A record that answered zero refuses `NoRecordPrice`; one that could not answer refuses `RecordUnreadable`.
+    /// @dev Both refuse, so the loan is left to `forceClose` either way; the names stay apart so a reader can tell a dark feed from a broken one.
+    function test_Site2b_TheExtensionSeparatesAZeroAnswerFromAnUnreadableRecord() public {
+        uint256 loanId = _loan();
+        _warpTo(read.loan(loanId).expiry - 1);
 
         record.setMinPrice(0); // ANSWERED zero: a ring short of the window, a stale feed
-        (bool answeredZero, bytes4 zeroReason,) = IAceAuto(address(ace)).tryContinue(loanId);
+        (bool answeredZero, bytes4 zeroReason,) = ace.tryExtend(loanId, 0, "", borrower);
         record.setMinPrice(AceFixtures.px(2e18, address(usdc), address(coll)));
         record.setSick(true); // did not answer at all
-        (bool unreadable, bytes4 sickReason,) = IAceAuto(address(ace)).tryContinue(loanId);
+        (bool unreadable, bytes4 sickReason,) = ace.tryExtend(loanId, 0, "", borrower);
 
-        assertFalse(answeredZero || unreadable, "both record states must refuse the continuation");
-        assertEq(zeroReason, sickReason, "the total side reports ONE reason for both, which is the ruling");
-        assertEq(zeroReason, NoRecordPrice.selector, "and that reason is NoRecordPrice");
+        assertFalse(answeredZero || unreadable, "both record states must refuse the extension");
+        assertEq(zeroReason, NoRecordPrice.selector, "a zero answer is NoRecordPrice");
+        assertEq(sickReason, RecordUnreadable.selector, "and no answer at all is RecordUnreadable");
     }
 
     /* ====== site 4: Borrower `persistedPrice` -- bubbles today, and the fold-to-false is PERMISSIVE ====== */
@@ -194,45 +187,41 @@ contract AceUntrustedCallBoundsTest is WarpClock {
         assertLe(depBig - depSmall, callee + 1_000, "the price read billed the caller for the record's own pile");
     }
 
-    /// @notice The bound where it decides LIVENESS: the fold's own predicate read, not the deposit door's.
+    /// @notice The bound where it decides LIVENESS: the extension's own predicate read, not the deposit door's.
     /// @notice Both bomb tests above measure `deposit`, so site 2 could stay unbounded while they passed.
-    /// @dev `tryPersistedPrice` is what `forceCloseOrContinue` asks before it must settle, so a pile HERE
-    /// @dev inflates the frame that owes the settlement, which is the one frame that cannot be retried cheaper.
-    function test_ReturnBomb_TheFoldsOwnPredicateCopiesOneWord_NotTheWholePile() public {
+    /// @dev `tryRecordState` is what `extend` asks before it may land, so a pile HERE taxes the borrower's one continuation.
+    function test_ReturnBomb_TheExtensionsOwnPredicateCopiesOneWord_NotTheWholePile() public {
         FloodRecord r = new FloodRecord(address(usdc), address(coll));
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(coll));
         p.record = address(r);
         bytes32 fid = ace.createMarket(p);
         bytes memory call_ = abi.encodeWithSignature("minPrice(address,address)", address(usdc), address(coll));
-        uint256 loanId = _armedLoanOn(fid);
+        uint256 loanId = _loanOn(fid);
 
         r.setWords(1);
         uint256 recSmall = _calleeCost(address(r), call_);
-        uint256 foldSmall = _foldCost(loanId);
+        uint256 extendSmall = _extendPredicateCost(loanId);
 
         r.setWords(32_768); // one mebibyte of answer
         uint256 recBig = _calleeCost(address(r), call_);
-        uint256 foldBig = _foldCost(loanId);
+        uint256 extendBig = _extendPredicateCost(loanId);
 
         uint256 callee = recBig - recSmall;
         assertGt(callee, 1_000_000, "fixture: the pile must really cost the CALLEE a megabyte's expansion");
-        assertLe(foldBig - foldSmall, callee + 1_000, "the fold's predicate billed the caller for the record's own pile");
+        assertLe(extendBig - extendSmall, callee + 1_000, "the extension's predicate billed the caller for the record's own pile");
     }
 
     /* ================================= fixture ================================= */
 
-    /// @dev One fold's cost, under a snapshot: the crank ends the loan either way, so it runs once per measurement.
-    function _foldCost(uint256 loanId) internal returns (uint256 cost) {
-        uint256 snap = vm.snapshotState();
+    /// @dev One run of the extension's predicate for the borrower: the same body `extend` runs, read-only, so nothing needs rolling back.
+    function _extendPredicateCost(uint256 loanId) internal view returns (uint256 cost) {
         uint256 g0 = gasleft();
-        ace.forceClose(loanId);
+        ace.tryExtend(loanId, 0, "", borrower);
         cost = g0 - gasleft();
-        vm.revertToState(snap);
-        _warpTo(_now());
     }
 
-    /// @dev An armed loan on a caller-chosen market, warped to expiry so the fold's predicate is what runs next.
-    function _armedLoanOn(bytes32 m) internal returns (uint256 loanId) {
+    /// @dev A loan on a caller-chosen market, warped to expiry so the extension's predicate reaches the record.
+    function _loanOn(bytes32 m) internal returns (uint256 loanId) {
         usdc.mint(alice, DEPOSIT);
         vm.startPrank(alice);
         usdc.approve(address(ace), DEPOSIT);
@@ -242,7 +231,6 @@ contract AceUntrustedCallBoundsTest is WarpClock {
         vm.startPrank(borrower);
         coll.approve(address(pm), COLL);
         loanId = ace.open(m, COLL, PRINCIPAL, TEN7, borrower, OFF);
-        IAceAuto(address(ace)).setAutoRefinance(loanId, TEN7, 0, 0);
         vm.stopPrank();
         _warpTo(_now() + TEN7);
     }
@@ -278,13 +266,12 @@ contract AceUntrustedCallBoundsTest is WarpClock {
         vm.stopPrank();
     }
 
-    function _armedLoan() internal returns (uint256 loanId) {
+    function _loan() internal returns (uint256 loanId) {
         _lend(mid);
         coll.mint(borrower, COLL);
         vm.startPrank(borrower);
         coll.approve(address(pm), COLL);
         loanId = ace.open(mid, COLL, PRINCIPAL, TEN7, borrower, OFF);
-        IAceAuto(address(ace)).setAutoRefinance(loanId, TEN7, 0, 0);
         vm.stopPrank();
     }
 

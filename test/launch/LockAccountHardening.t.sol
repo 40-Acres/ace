@@ -74,7 +74,7 @@ contract LockAccountHardeningTest is LaunchFixture {
 
     function _borrowFrom(LockAccount a, uint256 units, uint64 tenor) internal returns (uint256) {
         vm.prank(alice);
-        return a.borrow(id, units, MIN_DEBT, tenor, _noBounds());
+        return a.borrow(id, units, MIN_PRINCIPAL, tenor, _noBounds());
     }
 
     // ---- borrow ----
@@ -110,7 +110,7 @@ contract LockAccountHardeningTest is LaunchFixture {
         vm.expectEmit(false, true, false, true, address(acct));
         emit LockAccount.Pledged(0, id, u, uint64(T0 + WEEK));
         uint256 first = _borrow(u, _maxPrincipal(u), WEEK);
-        uint256 second = _borrow(MIN_UNITS, MIN_DEBT, 2 * WEEK);
+        uint256 second = _borrow(MIN_UNITS, MIN_PRINCIPAL, 2 * WEEK);
         assertTrue(first != second, "two borrows booked one loan");
         (uint256 u1, uint64 e1) = acct.pledgeOf(first);
         (uint256 u2, uint64 e2) = acct.pledgeOf(second);
@@ -133,7 +133,7 @@ contract LockAccountHardeningTest is LaunchFixture {
         acct.release(1);
         vm.prank(alice);
         vm.expectRevert(LockAccount.OverCapacity.selector);
-        acct.borrow(id, MIN_UNITS, MIN_DEBT, WEEK, _noBounds());
+        acct.borrow(id, MIN_UNITS, MIN_PRINCIPAL, WEEK, _noBounds());
     }
 
     // ---- release ----
@@ -328,7 +328,7 @@ contract LockAccountHardeningTest is LaunchFixture {
         assertEq(a.capacity(e2), room2, "capacity is not the curve at expiry less what is booked");
         vm.prank(alice);
         vm.expectRevert(LockAccount.OverCapacity.selector);
-        a.borrow(id, room2 + 1, MIN_DEBT, t2, _noBounds());
+        a.borrow(id, room2 + 1, MIN_PRINCIPAL, t2, _noBounds());
         if (room2 >= MIN_UNITS) {
             uint256 loanId = _borrowFrom(a, room2, t2);
             (uint256 units, uint64 expiry) = a.pledgeOf(loanId);

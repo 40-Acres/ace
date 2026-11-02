@@ -49,7 +49,7 @@ contract CuratorVaultInstantHandler is CuratorVaultBase {
         uint256 quote; // the preview: assets for a redeem, shares for a withdraw
         uint256 a;
         uint256 q;
-        uint256 exitable; // idle past the roll hold, before the exit
+        uint256 exitable; // all of idle, before the exit
     }
 
     constructor() {
@@ -266,7 +266,7 @@ contract CuratorVaultInstantHandler is CuratorVaultBase {
         _gift(vault, bound(amtSeed, 1e6, 200e6));
     }
 
-    /// @dev One unarmed door borrow of `principal` against `COLL`; a refusal is swallowed.
+    /// @dev One door borrow of `principal` against `COLL`; a refusal is swallowed.
     function _openLoan(uint256 principal) internal {
         collateral.mint(borrower, COLL);
         vm.startPrank(borrower);

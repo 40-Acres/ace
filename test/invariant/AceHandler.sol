@@ -11,9 +11,8 @@ import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {Borrower} from "../../src/ace/hub/Borrower.sol";
 import {LoanClosed, NotExpired, NotSettleable} from "../../src/ace/hub/Settlement.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
-import {Cfg, Loan, MarketParams, MarketState, MigrateArgs, OpenBounds, Order} from "../../src/ace/hub/Types.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
-import {QuoteMismatch} from "../../src/ace/hub/Borrower.sol";
+import {Cfg, Loan, MarketParams, MarketState, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol";
+import {NotBorrower, QuoteMismatch} from "../../src/ace/hub/Borrower.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {PositionTitleNFT} from "../../src/ace/positions/PositionTitleNFT.sol";
 import {PriceFrame} from "../utils/PriceFrame.sol";
@@ -24,6 +23,7 @@ import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {MockStakeVault} from "../mocks/MockStakeVault.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
+import {GasBurnerPolicy, NoPolicy, YesPolicy} from "../utils/RollPolicyMocks.sol";
 
 /// @title AceHandler
 /// @notice The stateful-invariant fuzzing surface for FOUR DRIVEN markets on the ACE singleton.
@@ -80,7 +80,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
     /// @dev THE CROSS-MARKET LATCH. Isolation is LOGICAL here, so the property is measured, never assumed.
     /// @dev Latched mid-action: `fail_on_revert = false` discards a bare revert, and a crossing inside one with it.
     /// @dev THE ENTITLED SET IS THE ASSERTION: a move in any market a verb did not name is a crossing.
-    /// @dev Two verbs may entitle more than one -- `migrate`, and `refinanceByPolicies` over its ids' markets.
+    /// @dev One verb may entitle more than one: `migrate`, over its source and its destination.
     /// @dev FAILS CLOSED: the mask clears every action, so an unannotated verb is loud, never silently exempt.
     bytes32[6] private _bookSnap; // the booked tuple of every market, hashed, as of this action's start
     uint256 private _entitledMask; // bit i set == this action may move market i
@@ -90,10 +90,6 @@ contract AceHandler is WarpClock, DeleverageCrank {
     string private _tag; // this action's tag, held so a crossing can name the verb that caused it
     uint256 public crossMarketChecks; // snapshots taken with a live second market; logged in afterInvariant, asserted by nothing
 
-    uint256 public batchesAttempted; // refinanceByPolicies calls that reached the hub
-    uint256 public batchesDone; // completed batches
-    uint256 public batchesRefused; // refused ones; the verb is ALL-OR-NOTHING, so one bad id takes the batch
-    uint256 public batchesSpanningMarkets; // batches whose two ids sat in DIFFERENT markets: the cross-market witness
     uint256 public migrationsAttempted; // migrate calls that reached the hub; the denominator for the two below
     uint256 public migrationsDone; // completed cross-market migrations: the M0<->M1 compatible pair
     uint256 public migrationsRefused; // refused ones: the collateral and quote gates, which must be REACHED
@@ -165,6 +161,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
     address public trader = address(0x74AD34);
 
     uint256[] internal _loanIds;
+    mapping(uint256 => uint64) public tenorAtIssue; // each tracked loan's tenor when it was issued, which no later verb may move
     mapping(uint256 => bool) internal _knownLoan;
     mapping(uint256 => bool) public everClosed;
     bool public monotonicityViolated;
@@ -202,44 +199,47 @@ contract AceHandler is WarpClock, DeleverageCrank {
     uint256 public skimsMeasured; // non-vacuity: cranks that actually sold units and were checked
     uint256 public debtMelted; // quote a disposal really took off loan debt, cumulative: the melt leg's witness
 
-    /// @dev THE NO-FLIP GHOSTS (#674, #403 regime 1): a stranger's crank must never turn an armed fold from ROLL into SETTLE.
-    /// @dev The fold is RUN, in a snapshot at expiry with the record healthy, once before the crank and once after; nothing else differs.
-    /// @dev It is the real fold and not `tryContinue(id)`: that view judges the whole lot, the fold the lot less the keeper's sliver.
-    bool public foldFlipped;
-    uint8 public foldFlipCause; // which lever flipped it: one of the CAUSE_ codes below
-    uint256 public foldFlipLoanId;
-    uint256 public foldFlipDebtBefore;
-    uint256 public foldFlipDebtAfter;
-    uint256 internal _debtBeforeLever; // the bracketed loan's debt before its lever ran
-    uint256 public foldChecks; // armed cranks under 3x minDebt, where the cap can bind, judged on both sides
-    uint256 public foldChecksRolled; // of those, the ones whose untouched fold rolled: the only ones that can flip
-    uint256 public smallArmedOpened; // loans the 1.0-1.5x minDebt population opened and armed
+    /// @dev THE DUST GHOSTS: a crank that sells either closes the loan clean or leaves its debt at or over its debt floor.
+    uint256 public crankCloses; // cranks that closed a loan
+    bool public crankLeftDust; // a selling crank left a live loan under its debt floor, or a closing one left debt
+    uint256 public crankDustLoanId;
+    uint256 public crankDustDebt;
     uint256 public nearLineOpened; // draws that LANDED within atoms of their coverage line
+    uint256 public smallOpened; // dust-bound loans `openSmall` landed
+    uint256 public smallCranked; // selling cranks on a dust-bound loan
+    uint256 public smallCloses; // of those, the ones that closed it
+    mapping(uint256 => bool) internal _isSmall;
+    uint256 public floorRepaysTried; // borrower repays sized to leave exactly the debt floor
+    uint256 public repaysToTheFloor; // of those, the ones that landed with the debt exactly on the debt floor
     uint256 private _drawUnits; // a near-line draw's own units for one `_open`; zero means the standard `COLL`
 
-    /// @dev THE THIRD-PARTY LEVERS (#666, #514): no one but the borrower and the lender changes an armed loan's NEXT fold.
-    /// @dev Each lever is bracketed by the REAL fold, before and after, in a snapshot; the subject always holds `reserved >= need`.
-    /// @dev A FLIP (rolled before, settled after) latches `foldFlipped`. A DISARM (armed successor before, disarmed after) is KNOWN.
-    uint8 internal constant CAUSE_CRANK = 0;
-    uint8 internal constant CAUSE_DRAIN = 1;
-    uint8 internal constant CAUSE_ATOMIC = 2;
-    uint8 internal constant CAUSE_FILL = 3;
-    uint8 internal constant CAUSE_REPAY = 4;
-    uint8 internal constant CAUSE_ROUTE = 5;
-    uint8 internal constant CAUSE_RECORD = 6;
-    uint256[7] public bracketJudged; // levers pulled on an armed subject holding its whole need, per cause
-    uint256[7] public bracketLanded; // of those, the ones whose lever actually executed
-    uint256[7] public bracketRolled; // of those, the ones whose untouched fold rolled: the only ones that can flip
-    uint256[7] public bracketFlips; // must stay zero: the property
-    uint256[7] public bracketDisarms; // KNOWN: the fold still rolled, into a successor born disarmed
-    address public stranger = address(0x57A2A6E2); // no loan, no lender role, no stake: the third party
-    address public maker = address(0x3A4E2); // posts honest resting orders the stranger then fills
-    address public feederLender = address(0xFEED1); // the route-in's source market, built inside a snapshot only
-    address public feederBorrower = address(0xFEED2);
+    address public maker = address(0x3A4E2); // posts honest resting orders
     uint256[] internal _orderIds;
-    bool public reserveBreached; // a non-lender action left a market's cash under its roll reserve
-    string public reserveBreachedBy;
-    uint256 private _deficitMask; // bit i: market i already sat under its reserve when the action began
+
+    /// @dev THE ROLL POLICIES the driven markets' two lenders choose between; both start on the yes, installed in the constructor.
+    YesPolicy public yesPolicy;
+    NoPolicy public noPolicy;
+    GasBurnerPolicy public gasPolicy; // burns its whole gas budget, so every ask fails out of gas inside the hub's cap
+    uint256[4] public policySets; // `setRollPolicy` actions that landed, by kind: 0 yes, 1 no, 2 gas burner, 3 none
+
+    /// @dev THE HOLDER'S EXTENSION: its `tryExtend` asked for the holder, then the cash `extend` the holder sends.
+    uint256 public extendCalls; // `extend` actions that found a loan within reach to try
+    uint256 public extendFallbacks; // `extend` actions with none in reach, which asked the seed's own pick so the refusal straddle still runs
+    uint256 public extendTries; // straddles run
+    uint256 public extendsLanded; // of those, the ones that extended
+    uint8 public extendInPlaceCode; // first law broken: 1 minted, 2 expiry, 3 debt, 4 resting moved, 5 cash fee short, 6 draw count off
+    uint256 public extendInPlaceLoanId;
+
+    /// @dev THE CALLER SPLIT of the view-versus-verb straddle: 0 the holder, 1 the market lender.
+    uint256[2] public modeBothAdmit;
+    uint256[2] public modeBothRefuse;
+
+    /// @dev THE E-3 PATH: the market lender, holding the holder's credit grant, extends in cash it pays itself; ungranted it refuses.
+    uint256 public operatorTries; // `lenderExtend` straddles run
+    uint256 public operatorLanded; // of those, the ones that extended: granted
+    uint256 public operatorRefusedByName; // the ungranted asks, refused `NotBorrower` at both doors as they must be
+    uint8 public operatorCode; // first break: 1 landed ungranted, 2 refused it by another name, 3 the fee not the lender's
+    uint256 public operatorLoanId;
 
     /// @dev The refinance ghosts, SUCCEEDING the rotation's: same floor law, different writer.
     /// @dev A refinance retires exactly one loan's floor and writes exactly one new one.
@@ -264,24 +264,21 @@ contract AceHandler is WarpClock, DeleverageCrank {
     uint256 public previewBothAdmit; // straddles where quote and draw both went through, so the numbers were compared
     uint256 public previewBothRefuse; // straddles where both refused, so the selector leg was exercised
 
-    // tryContinue vs refinanceByPolicy: 1 view refused a roll the verb made, 2 view admitted one it refused
-    uint8 public continueCode; // 3 the principal differed, 4 both refused with different selectors
-    uint256 public continueLoanId; // the roll the first disagreement landed on
-    bytes4 public continueSelector; // what the view reported, zero when it admitted
-    bytes4 public verbSelector; // what the verb refused with, zero when it rolled
-    uint256 public continueExpected; // the principal the view reported, on code 3
-    uint256 public continueActual; // the debt the successor then carried, on code 3
-    uint256 public continueChecks; // straddles run at all: the non-vacuity counter
-    uint256 public continueBothAdmit; // straddles where view and verb both went through
-    uint256 public continueBothRefuse; // straddles where both refused, so the selector leg was exercised
-    uint256 public policiesArmed; // loans this campaign armed, so the roll verb has something to reach
-    uint256 public policyRollsDone; // rolls that actually landed
+    // tryExtend vs extend: 1 view refused an extension the verb made, 2 view admitted one it refused
+    uint8 public extendCode; // 3 the fee differed, 4 both refused with different selectors
+    uint256 public extendCodeLoanId; // the extension the first disagreement landed on
+    bytes4 public extendViewSelector; // what the view reported, zero when it admitted
+    bytes4 public extendVerbSelector; // what the verb refused with, zero when it extended
+    uint256 public extendViewFee; // the fee the view reported, on code 3
+    uint256 public extendVerbFee; // the fee the verb then charged, on code 3
+    uint256 public extendBothAdmit; // straddles where view and verb both went through
+    uint256 public extendBothRefuse; // straddles where both refused, so the selector leg was exercised
 
     bool public strangerMovedMoney; // a deposit, withdraw or redeemInKind by someone other than the market's lender LANDED
     string public strangerMovedBy; // the door it landed through, first violation only
     uint256 public strangerDoorsRefused; // stranger attempts at those three doors that refused, as sole tenancy requires
     bool public claimableDisagreed; // AceLens.claimable promised an amount claimUnits did not pay
-    bool public lenderDoorLeftDust; // a deposit or withdraw RETURNED leaving unreserved cash in (0, minDebt); a draw may, they may not
+    bool public lenderDoorLeftDust; // a deposit or withdraw RETURNED leaving resting cash in (0, minPrincipal); a draw may, they may not
     address public claimableLender; // WAS `claimableMarket`: the preview is keyed on the pool, not a market
     address public claimableQuote; // and the pool's other half, so a mismatch names the token it happened in
     uint256 public claimablePromised;
@@ -296,16 +293,12 @@ contract AceHandler is WarpClock, DeleverageCrank {
     uint256 public settleableAdmits; // finalizes that completed with the lens agreeing
     uint256 public settleableRefusals; // NotSettleable refusals the lens agreed with
 
-    // forceClose vs its own promise: 1 refused on a precondition the caller had already established, 2 refused past both
+    // forceClose vs its own promise: 1 refused on a precondition the caller had already established, 2 refused past both, 3 left the loan live
     uint8 public forceCloseCode;
     uint256 public forceCloseLoanId;
     bytes4 public forceCloseSelector; // the refusal the latch caught, so a red names the leg rather than the tally
     uint256 public forceCloseOwed; // attempts on a LIVE loan at or past expiry: the calls the promise binds
-    uint256 public forceCloseHonoured; // of those, the ones that settled or rolled
-    uint256 public unpaidSettles; // settleExpired calls that settled a loan, inside the action's rolled-back snapshot
-    uint256 public backstopEarlyRefused; // settleExpired calls inside the roll window that refused, as they must
-    uint8 public backstopCode; // 1 the unpaid backstop landed inside the roll window, 2 it credited its caller
-    uint256 public backstopLoanId;
+    uint256 public forceCloseHonoured; // of those, the ones that settled
 
     /// @dev Coverage evidence: proof this run moved real inventory, real units and real settlements.
     uint256 public buyInventoryUnits;
@@ -329,8 +322,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
     bool public collectReachedAnotherPool; // WAS `collectPaidTheCaller`: a stranger's collect moved the market lender's pool
     uint256 public settlements; // finalize + forceClose: the TOTAL, and it cannot tell them apart
     uint256 public settlementsFinalized; // finalize completed: the distress settlement
-    uint256 public expiryFolds; // forceClose that SETTLED: the expiry fold, the channel the total can hide
-    uint256 public expiryRolls; // ZERO until a verb arms an auto-policy; it exists so that day is visible
+    uint256 public forceCloseSettles; // forceClose that SETTLED: the expiry settle, the channel the total can hide
     uint256 public distressArmed; // crashBelow after which the record answers settleable, not merely armed
     uint256 public loansOpened;
     uint256 public opensRefusedAtCap;
@@ -376,13 +368,14 @@ contract AceHandler is WarpClock, DeleverageCrank {
         /// @dev The incumbent joins `lenders[0]`'s pool alongside M1 and M3, so that pool spans THREE
         /// @dev markets across two quotes -- which is what the cross-market properties need to be non-trivial.
         p.lender = lenders[0];
-        // the six roll params are GONE; `refinance` is the only continuation verb the handler drives
+        // `extend` lengthens a loan in place; `refinanceTo` is the only verb that replaces one
         AceFixtures.Deployment memory d = AceFixtures.deploy(p);
         (ace, positionManager, read, id) = (d.ace, d.positionManager, d.read, d.id);
         lens = new AceLens(address(ace)); // before the baselines, so every straddle below already has it
         unitScale = read.marketState(id).unitScale;
         (mids[0], records[0], unitScales[0]) = (id, record, unitScale);
         _buildDrivenMarkets();
+        _installPolicies();
 
         record.setAbove(true); // healthy by default; crashBelow arms distress, heal dissolves it
         /// @dev A FINITE windowed min, above every tick in TICKS so the draw cap still admits them all.
@@ -439,64 +432,40 @@ contract AceHandler is WarpClock, DeleverageCrank {
         require(debtMelted > 0, "BASELINE: the ctor crank melted no debt -- the melt leg is unwitnessed");
     }
 
-    /// @notice THE NO-FLIP GHOST'S WITNESS, pre-snapshot: a 1.2x `minDebt` armed loan at an 85% trigger, cranked in band.
-    /// @notice An uncapped crank melts it to ~0.4x and its fold settles, so a regression of the `minDebt` cap fails HERE, in setUp.
-    /// @dev Its own entry point, called only by the suite that asserts the ghost: `baselineSkim`'s other callers keep their baselines.
-    /// @dev It requires the SAME branch on both sides of its own crank: rolled before, rolled after, and a crank that really sold.
-    function baselineNoFlip() external {
-        _openSmallArmed(0, 12e6, 8500);
-        require(smallArmedOpened > 0, "BASELINE: the small armed loan did not open, so the no-flip ghost has no subject");
-        uint256 loanId = _loanIds[_loanIds.length - 1];
-        uint256 debtBefore = read.loan(loanId).debt;
+    /// @notice THE CLOSE'S WITNESS, pre-snapshot: a loan at 1.2x its debt floor, whose restore would leave dust, closes clean.
+    /// @dev Opened at 12e6 (2.4 floors, over `minPrincipal`), then repaid to 1.2 floors: the crank arms off the live trigger, so the margin carries.
+    /// @dev The close is counted and the dust ghost stays clear.
+    function baselineCrankCloses() external {
+        uint256 n = _loanIds.length;
+        _openSizedAt(0, 12e6, 8500, borrowers[0]);
+        require(_loanIds.length == n + 1, "BASELINE: the dust-bound loan did not open, so the close has no subject");
+        uint256 loanId = _loanIds[n];
+        uint256 pay = read.loan(loanId).debt - LoanMath.debtFloor(ace.idToMarketParams(mids[0]).minPrincipal) * 12 / 10;
+        _fundQuote(borrowers[0], 0, pay);
+        vm.prank(borrowers[0]);
+        ace.repay(loanId, pay);
         _crankDisposal(loanId);
-        require(read.loan(loanId).debt < debtBefore, "BASELINE: the armed crank melted nothing, so its fold was never put at risk");
-        require(foldChecksRolled > 0, "BASELINE: the no-flip ghost never judged an armed fold that rolled before its crank");
-        require(!foldFlipped, "BASELINE: the crank flipped the armed fold from ROLL to SETTLE -- the minDebt cap has regressed");
+        require(read.loan(loanId).closedAt != 0, "BASELINE: the dust-bound crank did not close the loan");
+        require(read.loan(loanId).debt == 0, "BASELINE: the closing crank left debt behind");
+        require(crankCloses > 0, "BASELINE: the close ghost never counted the close");
+        require(!crankLeftDust, "BASELINE: the closing crank tripped the dust ghost");
     }
 
-    /// @notice THE THIRD-PARTY LEVERS' WITNESS, pre-snapshot: one armed loan, and every lever pulled on it once.
-    /// @notice Each lever must be JUDGED on a fold that rolled before it, and none may flip it; a disarm is KNOWN, not a flip.
-    /// @dev The order is deliberate: the snapshot-only levers first, then the fill, then the drain of every unreserved atom,
-    /// @dev which disarms the successor; the repay comes last, since the slack it frees would back that successor instead.
-    function baselineThirdParty() external {
-        _seed(lenders[0], 20_000e6);
+    /// @notice THE EXTENSION'S WITNESS, pre-snapshot: a loan in a market resting NOTHING, extended in place twice by its holder in cash.
+    /// @notice Each lands with zero cash resting, its fee pulled from the holder and its debt unmoved.
+    /// @dev Structural, as the other baselines are: a regression in either refuses setUp, not a seed.
+    function baselineExtend() external {
+        _seed(lenders[0], 2_000e6);
         _open(borrowers[0], 2_000e6);
         uint256 loanId = _loanIds[_loanIds.length - 1];
-        vm.prank(borrowers[0]);
-        ace.setAutoRefinance(loanId, ProtocolPolicy.MIN_TENOR, 0, 0);
-        _bracket(loanId, CAUSE_ATOMIC, _leverAtomic, _unreserved(), true, true);
-        _bracket(loanId, CAUSE_ROUTE, _leverRoute, _unreserved() / 2, true, true);
-        _bracket(loanId, CAUSE_RECORD, _leverRecord, _safeRecord(loanId), false, false);
-        _healRecord(records[0]);
-        _baselineOrder(_unreserved() / 2);
-        _bracket(loanId, CAUSE_FILL, _leverFill, _orderIds[_orderIds.length - 1], true, false);
-        _bracket(loanId, CAUSE_DRAIN, _leverDrain, _unreserved(), true, false);
-        _bracket(loanId, CAUSE_REPAY, _leverRepay, read.loan(loanId).debt - ace.idToMarketParams(id).minDebt, true, false);
-        for (uint256 c = 1; c < 7; c++) {
-            require(bracketRolled[c] > 0, "BASELINE: a third-party lever was never judged on a fold that rolled");
-            require(bracketLanded[c] > 0, "BASELINE: a third-party lever never executed, so its bracket judged nothing");
-        }
-        require(!foldFlipped, "BASELINE: a third party flipped an armed fold from ROLL to SETTLE -- the reservation has regressed");
-        require(bracketDisarms[CAUSE_DRAIN] > 0, "BASELINE: the full drain did not disarm the successor, so the KNOWN residual is unwitnessed");
-        _seed(lenders[0], 20_000e6); // the drain took M0's unreserved cash; the campaign gets its headroom back
-    }
-
-    /// @dev M0's cash a fresh draw may take: resting less the roll reserve.
-    function _unreserved() internal view returns (uint256) {
-        uint256 cash = read.restingOf(id);
-        uint256 rr = read.rollReserve(id);
-        return cash > rr ? cash - rr : 0;
-    }
-
-    /// @dev One honest maker order in M0, for the fill witness; `postOrder`'s own body, without the action's bump.
-    function _baselineOrder(uint256 principal) internal {
-        MarketParams memory p = ace.idToMarketParams(id);
-        uint256 units = 3 * _unitsFor(0, principal, 2);
-        vault.mint(maker, units);
-        vm.startPrank(maker);
-        vault.approve(address(positionManager), units);
-        _orderIds.push(ace.postOrder(id, principal, p.price / 2, p.price / 2, principal, p.minTenor, 0));
-        vm.stopPrank();
+        uint256 rested = read.restingOf(id);
+        vm.prank(lenders[0]);
+        ace.withdraw(id, type(uint256).max, lenders[0], 0);
+        require(read.restingOf(id) == 0, "BASELINE: the incumbent still rests cash");
+        require(_extendOne(loanId, 0), "BASELINE: the holder's cash extension did not land with nothing resting");
+        require(_extendOne(loanId, 0), "BASELINE: the holder's second cash extension did not land with nothing resting");
+        require(extendInPlaceCode == 0 && extendCode == 0, "BASELINE: an extension broke an in-place law");
+        _seed(lenders[0], rested); // the campaign gets its headroom back; the loan stays live for the walk to pay
     }
 
     /// @notice One M1 -> M0 migration and one refused one, pre-snapshot, like every other baseline.
@@ -519,7 +488,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
         try ace.refinanceTo(MigrateArgs(loanId, mids[0], draw, l.tenor, OpenBounds(0, 0, 0), 0, address(0))) returns (uint256 n) {
             migrationsDone++;
             loansOpened++;
-            _loanIds.push(n);
+            _track(n);
             landedInMarket[0]++;
         } catch (bytes memory err) {
             migrateRefusalSelector = _revertSelector(err);
@@ -616,6 +585,17 @@ contract AceHandler is WarpClock, DeleverageCrank {
             ace.deposit(mids[i], 5_000e6);
         }
         vm.stopPrank();
+    }
+
+    /// @dev Deploy the three policies and name the yes for both driven lenders, before any baseline, so the campaign starts consenting.
+    /// @dev The canaries' lenders name none: their markets are never addressed, so no extension there asks anything.
+    function _installPolicies() internal {
+        (yesPolicy, noPolicy, gasPolicy) = (new YesPolicy(), new NoPolicy(), new GasBurnerPolicy());
+        for (uint256 i; i < 2; i++) {
+            vm.prank(lenders[i]);
+            ace.setRollPolicy(address(yesPolicy));
+            require(read.rollPolicyOf(lenders[i]) == address(yesPolicy), "TOPOLOGY: a driven lender's yes policy did not land");
+        }
     }
 
     /// @dev The quote of a DRIVEN market, by index. `quoteOf` spans the canaries too; this one does not.
@@ -748,33 +728,9 @@ contract AceHandler is WarpClock, DeleverageCrank {
         _tag = tag;
         _foldOwed();
         _snapBook();
-        _deficitMask = _deficits();
     }
 
-    /// @dev Bit i set when driven market i rests less cash than its armed loans reserved; only a lender's withdraw may put it there.
-    function _deficits() internal view returns (uint256 mask) {
-        for (uint256 i; i < 4; i++) {
-            if (read.restingOf(mids[i]) < read.rollReserve(mids[i])) mask |= (1 << i);
-        }
-    }
-
-    /// @dev The lowest driven market under its reserve; only called when `_deficits()` is nonzero.
-    function _firstDeficit() internal view returns (uint256 i) {
-        uint256 mask = _deficits();
-        while (mask & (1 << i) == 0) i++;
-    }
-
-    /// @dev Latches the first action other than a lender door that left a market newly under its reserve.
-    /// @dev A draw never can: `cashAdmits` holds `fresh + rollReserve <= cash`, and a successor re-reserves only from what is left.
-    function _checkReserve() internal {
-        if (reserveBreached) return;
-        uint256 fresh = _deficits() & ~_deficitMask;
-        if (fresh == 0) return;
-        bytes32 t = keccak256(bytes(_tag));
-        if (t == keccak256("withdraw") || t == keccak256("depositThenExit") || t == keccak256("exitTo")) return; // the lender's own doors
-        reserveBreached = true;
-        reserveBreachedBy = _tag;
-    }
+    // DELETED with the roll reservation: `_deficits`, `_firstDeficit` and `_checkReserve`, the latch on a non-lender action leaving a market under it.
 
     /// @dev The booked tuple of one market, hashed: quantities no OTHER market's action may move.
     /// @dev MARKET-LOCAL ONLY, and the narrowing is deliberate rather than a casualty. `totalLent` and
@@ -811,6 +767,12 @@ contract AceHandler is WarpClock, DeleverageCrank {
     function _pickLoan(uint256 seed) internal returns (uint256 loanId) {
         loanId = _loanIds[seed % _loanIds.length];
         _entitle(_marketIndexOf(loanId));
+    }
+
+    /// @dev Track a freshly issued loan, with the tenor it was issued at.
+    function _track(uint256 loanId) internal {
+        _loanIds.push(loanId);
+        tenorAtIssue[loanId] = read.loan(loanId).tenor;
     }
 
     /// @dev `_pickLoan`, but the first LIVE tracked loan from the seed's slot on, wrapping once; the seed's own pick when none is.
@@ -879,12 +841,10 @@ contract AceHandler is WarpClock, DeleverageCrank {
     /// @dev The dust-wall check, asked ONLY after a lender door RETURNED. A draw is allowed to leave the
     /// @dev band and does so in one ordinary call, so reading this off the state would latch on a legal
     /// @dev draw; asked here it holds exactly the two doors that are floored to their own contract.
-    /// @dev ON UNRESERVED CASH: what the roll reserve holds is a roll's to draw, so a door may leave or refill just that.
+    /// @dev ON CASH ALONE: there is no roll reserve to exempt, so a door may leave nothing or a whole floor.
     function _checkDustWall(uint256 mi) internal {
         uint256 cash = read.marketState(mids[mi]).cash;
-        uint256 reserved = read.rollReserve(mids[mi]);
-        uint256 free = cash > reserved ? cash - reserved : 0;
-        if (free == 0 || free >= ace.idToMarketParams(mids[mi]).minDebt) return;
+        if (cash == 0 || cash >= ace.idToMarketParams(mids[mi]).minPrincipal) return;
         lenderDoorLeftDust = true;
     }
 
@@ -979,7 +939,6 @@ contract AceHandler is WarpClock, DeleverageCrank {
         if (!everInventory && _sumInventory() > 0) everInventory = true;
         _foldOwed();
         _checkIsolation();
-        _checkReserve();
         _checkAskOffPots();
     }
 
@@ -1042,13 +1001,9 @@ contract AceHandler is WarpClock, DeleverageCrank {
         _bump("deposit");
         uint256 mi = _pickMarket(marketSeed);
         uint256 amt = bound(amtSeed, 1e6, 20_000e6);
-        /// @dev ONE IN FOUR, while some driven market sits under its reserve, the lender aims half a floor past that DEFICIT.
-        /// @dev That is the band the door must refuse, else the dust wall latches; a random pick almost never reaches it.
-        bool aimed = amtSeed % 4 == 1 && _deficits() != 0;
-        if (aimed) {
-            mi = _firstDeficit();
-            amt = read.rollReserve(mids[mi]) - read.marketState(mids[mi]).cash + ace.idToMarketParams(mids[mi]).minDebt / 2;
-        }
+        /// @dev ONE IN FOUR, the lender aims half a floor into an EMPTY market: the band the door must refuse, else the dust wall latches.
+        bool aimed = amtSeed % 4 == 1 && read.marketState(mids[mi]).cash == 0;
+        if (aimed) amt = ace.idToMarketParams(mids[mi]).minPrincipal / 2;
         _entitle(mi);
         address who = !aimed && actorSeed % 4 == 0 ? lenders[actorSeed % lenders.length] : ace.idToMarketParams(mids[mi]).lender;
         _fundQuote(who, mi, amt);
@@ -1084,23 +1039,22 @@ contract AceHandler is WarpClock, DeleverageCrank {
         address who = actorSeed % 4 == 0 ? lenders[actorSeed % lenders.length] : ace.idToMarketParams(mids[mi]).lender;
         /// @dev ONE DRAW IN FOUR AIMS AT THE DUST BAND ON PURPOSE, and it is the only way that state is
         /// @dev reached. A bound of `[1, max]` almost always exceeds the balance, so the withdraw drains
-        /// @dev the market whole and the sub-`minDebt` remainder never exists -- MEASURED: with the dust
+        /// @dev the market whole and the sub-`minPrincipal` remainder never exists -- MEASURED: with the dust
         /// @dev wall mutated out of `Lender.withdraw`, the campaign stayed GREEN. The property was sound
         /// @dev and simply unreached, which is issue #190's class and not a weak assertion.
         /// @dev It is EXPECTED TO REVERT on a healthy hub. That is the point: the invariant then catches
         /// @dev the market sitting in the band only if the guard that refuses this call ever stops refusing.
         /// @dev ONE IN SIXTEEN, not one in four. At a quarter it measurably starved the deep lane: the
-        /// @dev expiry-fold guard at depth 256 went from passing on 6 seeds of 10 to none, because a
+        /// @dev expiry-settle guard at depth 256 went from passing on 6 seeds of 10 to none, because a
         /// @dev dust-aimed withdraw is REFUSED and a refused verb advances no state toward an expiry.
         /// @dev The band still has to be reached -- the mutation above proves the property is otherwise
         /// @dev unreached -- so the draw stays; what changed is that it no longer crowds the sequence.
-        /// @dev The band is UNRESERVED cash: the aim leaves the reserve plus half a floor, since the reserve alone is legal.
+        /// @dev The band is resting cash alone: the aim leaves half a floor, with no reserve to exempt.
         uint256 amt = bound(amtSeed, 1, type(uint256).max);
         if (amtSeed % 16 == 1) {
             uint256 resting = read.marketState(mids[mi]).cash;
-            uint256 floor = ace.idToMarketParams(mids[mi]).minDebt;
-            uint256 reserved = read.rollReserve(mids[mi]);
-            if (resting > reserved + floor) amt = resting - reserved - (floor / 2); // squarely in the unreserved band
+            uint256 floor = ace.idToMarketParams(mids[mi]).minPrincipal;
+            if (resting > floor) amt = resting - (floor / 2); // squarely in the dust band
         }
         uint256[] memory m = _preFloors();
         bool stranger = who != ace.idToMarketParams(mids[mi]).lender;
@@ -1419,8 +1373,8 @@ contract AceHandler is WarpClock, DeleverageCrank {
     }
 
     /// @notice The settlement PROMISE, checked at the call site instead of inferred from a tally later.
-    /// @notice `forceCloseOrContinue` declares exactly two refusals, and the caller established both false.
-    /// @dev So a live loan at or past expiry MUST settle or roll; a refusal is a regression, not seed luck.
+    /// @notice `forceClose` declares exactly two refusals, and the caller established both false.
+    /// @dev So a live loan at or past expiry MUST settle; a refusal is a regression, not seed luck.
     /// @dev Latched rather than asserted: `fail_on_revert` is off, so a revert in here would be swallowed whole.
     /// @dev Code 1 is the sharp one -- the hub contradicted a precondition this call had already proven.
     function _checkForceClose(uint256 loanId, bool owed, bytes4 sel) internal {
@@ -1442,26 +1396,12 @@ contract AceHandler is WarpClock, DeleverageCrank {
         _tail();
     }
 
-    /// @notice A loan at 1.0 to 1.5x its market's `minDebt`, armed to roll, its trigger at 70-95% of the market's price.
-    /// @dev The regime #403 names as unreachable: `open` draws ~400x `minDebt`, so no crank there ever lands near the floor.
-    /// @dev Before the `minDebt` cap a crank on one of these melted under the floor and the fold settled; `_checkFoldBranch` watches it.
-    function openSmallArmed(uint256 marketSeed, uint256 sizeSeed, uint256 thetaSeed) external {
-        _bump("openSmallArmed");
-        if (_loanIds.length >= MAX_LOANS) {
-            opensRefusedAtCap++;
-            return;
-        }
-        _openSmallArmed(_pickMarket(marketSeed), sizeSeed, thetaSeed);
-        _tail();
-    }
-
+    /// @dev One loan of exactly `debt` with its trigger at `thetaBps` of the market's price; the close witness opens through it.
     /// @dev The collateral is SIZED, never `COLL`: `units = k * debt / (theta * price)` puts the trigger at `theta` of the price.
-    function _openSmallArmed(uint256 mi, uint256 sizeSeed, uint256 thetaSeed) internal {
+    function _openSizedAt(uint256 mi, uint256 debt, uint256 thetaBps, address who) internal {
         _entitle(mi);
         MarketParams memory p = ace.idToMarketParams(mids[mi]);
-        uint256 debt = bound(sizeSeed, p.minDebt, (p.minDebt * 3) / 2);
-        uint256 units = FullMath.mulDiv(p.minCoverageWad * debt, unitScales[mi] * 10000, bound(thetaSeed, 7000, 9500) * p.price * 1e18);
-        address who = borrowers[sizeSeed % borrowers.length];
+        uint256 units = FullMath.mulDiv(p.minCoverageWad * debt, unitScales[mi] * 10000, thetaBps * p.price * 1e18);
         MockStakeVault v = MockStakeVault(_collAt(mi));
         v.mint(who, units);
         vm.startPrank(who);
@@ -1470,13 +1410,9 @@ contract AceHandler is WarpClock, DeleverageCrank {
             landedInMarket[mi]++;
             if (!_knownLoan[loanId]) {
                 _knownLoan[loanId] = true;
-                _loanIds.push(loanId);
+                _track(loanId);
                 loansOpened++;
             }
-            try ace.setAutoRefinance(loanId, ProtocolPolicy.MIN_TENOR, 0, 0) {
-                policiesArmed++;
-                smallArmedOpened++;
-            } catch {}
         } catch {}
         vm.stopPrank();
     }
@@ -1513,7 +1449,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
             landedInMarket[mi]++;
             if (!_knownLoan[loanId]) {
                 _knownLoan[loanId] = true;
-                _loanIds.push(loanId);
+                _track(loanId);
                 loansOpened++;
             }
         } catch (bytes memory err) {
@@ -1530,7 +1466,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
 
     /// @notice A draw posting units within atoms of its coverage line: one under it, on it, or just past it.
     /// @dev Every other draw here posts far more than the line asks, so the line's refusal at both doors went unexercised.
-    /// @dev Half the landed draws are armed, so the expiry fold must also judge a successor sitting near its own line.
+    /// @dev The landed ones reach expiry as any loan does, so `forceClose` also settles a loan sitting near its own line.
     function openNearLine(uint256 marketSeed, uint256 borrowerSeed, uint256 drawSeed, uint256 slackSeed) external {
         _bump("openNearLine");
         if (_loanIds.length >= MAX_LOANS) {
@@ -1541,44 +1477,55 @@ contract AceHandler is WarpClock, DeleverageCrank {
         Cfg memory c;
         c.p = ace.idToMarketParams(mids[mi]);
         c.unitScale = unitScales[mi];
-        uint256 principal = bound(drawSeed, c.p.minDebt, 4_000e6);
+        uint256 principal = bound(drawSeed, c.p.minPrincipal, 4_000e6);
         _drawUnits = Borrower.coverageLine(c, principal, c.p.price) + (slackSeed % 4) - 1; // the line less one, on it, one or two past
-        if (slackSeed % 8 == 7) _drawUnits = _successorEdge(c, principal); // armed below, and its fold lands on the one-atom window
         uint256 n = _loanIds.length;
-        address who = borrowers[borrowerSeed % borrowers.length];
-        _open(who, principal, mi);
+        _open(borrowers[borrowerSeed % borrowers.length], principal, mi);
         _drawUnits = 0;
+        if (_loanIds.length > n) nearLineOpened++;
+        _tail();
+    }
+
+    /// @notice A dust-bound loan, 2x to 2.5x the debt floor (`minPrincipal` to 1.25x it) at an 85% trigger: within the close's reach here.
+    /// @dev Every other draw is large, so without it every close the campaign counts is the baseline's.
+    /// @dev One seed in eight proposes `minPrincipal - 1`, which the hub must refuse: the only sub-floor birth the born-at invariant ever sees.
+    function openSmall(uint256 marketSeed, uint256 borrowerSeed, uint256 sizeSeed) external {
+        _bump("openSmall");
+        if (_loanIds.length >= MAX_LOANS) {
+            opensRefusedAtCap++;
+            return;
+        }
+        uint256 mi = _pickMarket(marketSeed);
+        uint256 mp = ace.idToMarketParams(mids[mi]).minPrincipal;
+        uint256 n = _loanIds.length;
+        uint256 size = sizeSeed % 8 == 7 ? mp - 1 : bound(sizeSeed, mp, mp * 5 / 4);
+        _openSizedAt(mi, size, 8500, borrowers[borrowerSeed % borrowers.length]);
         if (_loanIds.length > n) {
-            nearLineOpened++;
-            if (slackSeed % 8 >= 4) {
-                vm.prank(who);
-                try ace.setAutoRefinance(_loanIds[_loanIds.length - 1], ProtocolPolicy.MIN_TENOR, 0, 0) {
-                    policiesArmed++;
-                } catch {}
-            }
+            smallOpened++;
+            _isSmall[_loanIds[n]] = true;
         }
         _tail();
     }
 
-    /// @dev Units that leave the expiry fold's successor EXACTLY on its trigger's requirement once the sliver is paid.
-    /// @dev The roll predicate asks the trigger before the line, and the line is one atom tighter, so ONLY here does the line decide.
-    /// @dev Spelled from the fold's own inputs: the successor principal at expiry and the sliver the paid door takes off the lot.
-    function _successorEdge(Cfg memory c, uint256 debt) internal pure returns (uint256) {
-        uint256 next = Borrower.successorPrincipal(c, debt, ProtocolPolicy.MIN_TENOR);
-        uint256 sliver = FullMath.mulDiv(debt * c.p.settleBountyBps, c.unitScale, 10000 * c.p.price);
-        return Borrower.requiredAt(c, next, c.p.price) + sliver;
-    }
-
+    /// @dev A partial that would leave the loan under its debt floor lands ON it instead, or pays it off where there is no room.
+    /// @dev Unsnapped it only reverts into the catch; snapped, it drives the floor state. An in-range seed is still the amount.
     function repay(uint256 loanSeed, uint256 amtSeed) external {
         _bump("repay");
         if (_loanIds.length == 0) return;
         uint256 loanId = _pickLoan(loanSeed);
         Loan memory l = read.loan(loanId);
         if (l.debt == 0) return;
+        uint256 md = LoanMath.debtFloor(ace.idToMarketParams(ace.loanMarket(loanId)).minPrincipal);
+        uint256 room = l.debt > md ? l.debt - md : 0;
         uint256 amt = bound(amtSeed, 1, l.debt);
+        if (amt < l.debt && amt > room) amt = room == 0 ? l.debt : room;
+        bool toFloor = amt == room && l.closedAt == 0;
+        if (toFloor) floorRepaysTried++;
         _fundQuote(l.borrower, _marketIndexOf(loanId), amt); // a dai loan is repaid in dai, never in usdc
         vm.prank(l.borrower);
-        try ace.repay(loanId, amt) {} catch {}
+        try ace.repay(loanId, amt) {
+            if (toFloor && read.loan(loanId).debt == md) repaysToTheFloor++;
+        } catch {}
         _tail();
     }
 
@@ -1628,15 +1575,18 @@ contract AceHandler is WarpClock, DeleverageCrank {
     }
 
     /// @notice The continuation verb: close and reopen atomically at a fuzzed new principal.
-    /// @dev REPLACES rollover, roll, topUpRoll, setAutoRoll and the armed rotation, all deleted.
+    /// @dev The one verb that REPLACES a loan; `extend` lengthens one in place.
+    /// @dev Picks among LIVE, UNEXPIRED loans only, as `deleverage` does: from expiry a refinance refuses `LoanMatured`, and the catch would hide it.
     function refinance(uint256 loanSeed, uint256 principalSeed) external {
         _bump("refinance");
         if (_loanIds.length == 0) return;
-        uint256 loanId = _pickLoan(loanSeed);
+        (bool found, uint256 idx) = _crankableIndex(loanSeed);
+        if (!found) return;
+        uint256 loanId = _pickLoan(idx);
         Loan memory l = read.loan(loanId);
-        if (l.closedAt != 0 || l.debt == 0) return;
+        if (l.debt == 0) return;
         // the loan's OWN params, exactly as `migrate` bounds against its destination's
-        uint256 newPrincipal = bound(principalSeed, ace.idToMarketParams(ace.loanMarket(loanId)).minDebt, l.debt + 2_000e6);
+        uint256 newPrincipal = bound(principalSeed, ace.idToMarketParams(ace.loanMarket(loanId)).minPrincipal, l.debt + 2_000e6);
 
         _doRefinance(loanId, newPrincipal);
         _tail();
@@ -1650,11 +1600,12 @@ contract AceHandler is WarpClock, DeleverageCrank {
         /// @dev The loan's OWN quote: funded in usdc a dai refinance cannot pay its fee, and the catch hides it.
         _fundQuote(l.borrower, _marketIndexOf(loanId), newPrincipal + _fee(newPrincipal, l.tenor) + 5_000e6);
 
+        MigrateArgs memory home = MigrateArgs(loanId, l.market, newPrincipal, l.tenor, OpenBounds(0, 0, 0), 0, address(0));
         vm.prank(l.borrower);
-        try ace.refinance(loanId, newPrincipal, l.tenor, OpenBounds(0, 0, 0)) returns (uint256 n) {
+        try ace.refinanceTo(home) returns (uint256 n) {
             refinancesDone++;
             loansOpened++;
-            _loanIds.push(n);
+            _track(n);
         } catch {
             refinancesRefused++;
         }
@@ -1686,17 +1637,20 @@ contract AceHandler is WarpClock, DeleverageCrank {
     }
 
     /// @notice `refinanceTo`: retires a loan in one market and opens its successor in another.
-    /// @notice The only verb that MOVES A POSITION between markets; `refinanceByPolicies` spans them by batching.
+    /// @notice The only verb that MOVES A POSITION between markets.
     /// @dev The destination is picked over ALL four on purpose: M0->M1 is the only compatible pair.
     /// @dev M0->M2 refuses on collateral and M0->M3 on quote, and a gate nothing reaches is a gate nothing proved.
+    /// @dev Picks among LIVE, UNEXPIRED loans only: from expiry it refuses `LoanMatured`, a refusal that would thin the gate's tallies.
     function migrate(uint256 loanSeed, uint256 dstSeed, uint256 principalSeed) external {
         _bump("migrate");
         if (_loanIds.length == 0 || _loanIds.length >= MAX_LOANS) return;
-        uint256 loanId = _pickLoan(loanSeed);
+        (bool found, uint256 idx) = _crankableIndex(loanSeed);
+        if (!found) return;
+        uint256 loanId = _pickLoan(idx);
         Loan memory l = read.loan(loanId);
-        if (l.closedAt != 0 || l.debt == 0) return;
+        if (l.debt == 0) return;
         uint256 dst = dstSeed % 4;
-        uint256 newPrincipal = bound(principalSeed, ace.idToMarketParams(mids[dst]).minDebt, l.debt + 2_000e6);
+        uint256 newPrincipal = bound(principalSeed, ace.idToMarketParams(mids[dst]).minPrincipal, l.debt + 2_000e6);
         uint256[] memory floorsBefore = _snapFloors(loanId);
 
         uint256 mi = _marketIndexOf(loanId);
@@ -1710,7 +1664,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
         try ace.refinanceTo(MigrateArgs(loanId, mids[dst], newPrincipal, l.tenor, OpenBounds(0, 0, 0), 0, address(0))) returns (uint256 n) {
             migrationsDone++;
             loansOpened++;
-            _loanIds.push(n);
+            _track(n);
             landedInMarket[dst]++;
         } catch (bytes memory err) {
             migrationsRefused++;
@@ -1732,7 +1686,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
         _tail();
     }
 
-    /// @dev The first live, unexpired tracked loan at or after the seed's own pick, wrapping once round.
+    /// @dev The first live, unexpired tracked loan at or after the seed's own pick, wrapping once round: what a crank or a refinance can act on.
     /// @dev A seed that already names such a loan still gets that loan, so a written sequence keeps its target.
     function _crankableIndex(uint256 seed) internal view returns (bool found, uint256 idx) {
         uint256 n = _loanIds.length;
@@ -1758,23 +1712,28 @@ contract AceHandler is WarpClock, DeleverageCrank {
         uint256 ps = trig + trig / 20; // 5% over the trigger: inside the band, well above the stop
         r.setBelowBand(FullMath.mulDivRoundingUp(trig, 1e18, 1e18 - BAND_BPS * 1e14));
         r.setMinPrice(ps);
-        bool judged = _capCanTouch(loanId, mi, debtBefore);
-        bool rolledBefore;
-        if (judged) (rolledBefore,,) = _foldAtExpiry(loanId, r, true, _noLever, 0);
-        try ace.deleverage(loanId, 0, "") {
+        try ace.deleverage(loanId, 0, "") returns (uint256 u, uint256) {
             skimSuccesses++;
-            _checkSkimDirection(loanId, debtBefore, collBefore);
-            if (judged) _checkFoldBranch(loanId, r, rolledBefore, debtBefore);
+            _checkSkimDirection(loanId, debtBefore, collBefore, u);
+            _checkDust(loanId, mi, u);
         } catch {}
         _healRecord(r);
     }
 
-    /// @dev The no-flip ghost runs the REAL fold twice per crank, so it is spent only where the `minDebt` cap can bind: armed loans under 3x `minDebt`.
-    /// @dev This crank prices 5% over the trigger and restores to target 4000 at k 1.4, eps 100, no cut: it melts at most ~65% of the debt.
-    /// @dev So the cap binds only under ~2.88x `minDebt`; every `openSmallArmed` loan (1.0-1.5x) is inside the gate.
-    function _capCanTouch(uint256 loanId, uint256 mi, uint256 debt) internal view returns (bool) {
-        (uint64 armedTenor,,) = read.autoPolicyOf(loanId);
-        return armedTenor != 0 && debt < 3 * ace.idToMarketParams(mids[mi]).minDebt;
+    /// @dev Count a close, and latch the first selling crank that left a live loan under its debt floor or a closed one holding debt.
+    function _checkDust(uint256 loanId, uint256 mi, uint256 u) internal {
+        Loan memory l = read.loan(loanId);
+        if (l.closedAt != 0) crankCloses++;
+        if (u != 0 && _isSmall[loanId]) {
+            smallCranked++;
+            if (l.closedAt != 0) smallCloses++;
+        }
+        if (u == 0 || crankLeftDust) return;
+        bool dust = l.closedAt != 0 ? l.debt != 0 : l.debt < LoanMath.debtFloor(ace.idToMarketParams(mids[mi]).minPrincipal);
+        if (!dust) return;
+        crankLeftDust = true;
+        crankDustLoanId = loanId;
+        crankDustDebt = l.debt;
     }
 
     /// @dev The healthy print the rest of the campaign draws against.
@@ -1782,65 +1741,6 @@ contract AceHandler is WarpClock, DeleverageCrank {
         r.setBelowBand(0);
         r.setBelow(false);
         r.setMinPrice(AceFixtures.px(2e18, address(dai), address(vault)));
-    }
-
-    /// @dev Runs the REAL fold at the loan's expiry inside a snapshot and rolls it all back.
-    /// @dev `heal` holds the record path at a healthy print; a record push is judged under the record it left, so it passes false.
-    /// @dev `lever` runs FIRST, inside the snapshot: the atomic drain and the route-in exist only there, and land or not with it.
-    /// @return rolled Whether the fold opened the borrower's successor rather than settling.
-    /// @return armed Whether that successor was born armed.
-    /// @return landed What the lever reported.
-    function _foldAtExpiry(uint256 loanId, MockPersistenceRecord r, bool heal, function(uint256, uint256) internal returns (bool) lever, uint256 arg)
-        internal
-        returns (bool rolled, bool armed, bool landed)
-    {
-        uint256 snap = vm.snapshotState();
-        uint256 n = read.loanCount(); // BEFORE the lever: the atomic drain's own crank mints the successor inside it
-        landed = lever(loanId, arg);
-        _warpAtLeastTo(read.loan(loanId).expiry);
-        if (heal) _healRecord(r);
-        if (read.loan(loanId).closedAt == 0) {
-            try ace.forceClose(loanId) {} catch {}
-        }
-        uint256 s = _successorAfter(loanId, n);
-        rolled = s != 0;
-        if (rolled) {
-            (uint64 t,,) = read.autoPolicyOf(s);
-            armed = t != 0;
-        }
-        vm.revertToState(snap);
-    }
-
-    /// @dev The empty lever: the fold judged as it stands.
-    function _noLever(uint256, uint256) internal pure returns (bool) {
-        return true;
-    }
-
-    /// @dev The borrower's live successor to `loanId`, opened this block after id `n`; zero when the fold settled instead.
-    /// @dev A scan rather than `n + 1`: the atomic drain mints the stranger's own loan inside the same call.
-    function _successorAfter(uint256 loanId, uint256 n) internal view returns (uint256) {
-        Loan memory v = read.loan(loanId);
-        if (v.closedAt == 0 || read.invPotOf(v.market, loanId) != 0) return 0;
-        uint256 m = read.loanCount();
-        for (uint256 i = n + 1; i <= m; i++) {
-            Loan memory l = read.loan(i);
-            if (l.market == v.market && l.borrower == v.borrower && l.closedAt == 0 && l.openTime == v.closedAt) return i;
-        }
-        return 0;
-    }
-
-    /// @dev Latch the first armed fold a crank flipped from ROLL to SETTLE. A fold that already settled untouched cannot flip.
-    function _checkFoldBranch(uint256 loanId, MockPersistenceRecord r, bool rolledBefore, uint256 debtBefore) internal {
-        foldChecks++;
-        if (!rolledBefore) return;
-        foldChecksRolled++;
-        (bool rolledAfter,,) = _foldAtExpiry(loanId, r, true, _noLever, 0);
-        if (rolledAfter || foldFlipped) return;
-        foldFlipped = true;
-        foldFlipCause = CAUSE_CRANK;
-        foldFlipLoanId = loanId;
-        foldFlipDebtBefore = debtBefore;
-        foldFlipDebtAfter = read.loan(loanId).debt;
     }
 
     /// @dev Which driven market a tracked loan belongs to. Every tracked loan is opened into one, so a
@@ -1860,8 +1760,9 @@ contract AceHandler is WarpClock, DeleverageCrank {
     /// @dev The trigger is `k * debt * S / (coll * 1e18)`, so it does not rise iff `pay/unitsSold >= debt/coll`.
     /// @dev Cross-multiplied here rather than recomputed, so the check cannot drift from the formula.
     /// @dev A crank that sold nothing is skipped: it moves neither side and would only pad the counter.
-    function _checkSkimDirection(uint256 loanId, uint256 debtBefore, uint256 collBefore) internal {
-        uint256 unitsSold = collBefore - read.loan(loanId).collateralUnits;
+    /// @dev On a CLOSED loan `closeClean` zeroed the position, so the units sold are the crank's own `u`; `_checkDust` holds its pay to the whole debt.
+    function _checkSkimDirection(uint256 loanId, uint256 debtBefore, uint256 collBefore, uint256 u) internal {
+        uint256 unitsSold = read.loan(loanId).closedAt != 0 ? u : collBefore - read.loan(loanId).collateralUnits;
         if (unitsSold == 0) return;
         uint256 pay = debtBefore - read.loan(loanId).debt;
         skimsMeasured++;
@@ -1888,157 +1789,223 @@ contract AceHandler is WarpClock, DeleverageCrank {
         _tail();
     }
 
-    /// @notice Arm a loan's automatic continuation, so the roll verb and its predicate have something to reach.
-    /// @dev Borrower-only by design, so this pranks the title holder rather than a seeded actor.
-    function armPolicy(uint256 loanSeed, uint256 bufSeed) external {
-        _bump("armPolicy");
-        if (_loanIds.length == 0) return;
-        uint256 loanId = _pickLoan(loanSeed);
-        uint16 buf = uint16(bound(bufSeed, 0, 500));
-        vm.prank(ace.borrowerOf(loanId));
-        try ace.setAutoRefinance(loanId, ProtocolPolicy.MIN_TENOR, buf, 0) {
-            policiesArmed++;
+    /// @notice A driven market's lender names its roll policy: the yes, the no, one that burns its whole gas budget, or none.
+    /// @dev Biased five in eight to the yes, so the holder's extension keeps landing between the refusals.
+    /// @dev Entitles NOTHING: a policy lives in the lender's record, so a market book that moves here is a crossing.
+    function setRollPolicy(uint256 lenderSeed, uint256 kindSeed) external {
+        _bump("setRollPolicy");
+        address lender = lenders[lenderSeed % 2];
+        uint256 r = kindSeed % 8;
+        uint256 kind = r < 5 ? 0 : r - 4;
+        address[4] memory policies = [address(yesPolicy), address(noPolicy), address(gasPolicy), address(0)];
+        vm.prank(lender);
+        try ace.setRollPolicy(policies[kind]) {
+            policySets[kind]++;
         } catch {}
         _tail();
     }
 
-    /// @notice THE SECOND CROSS-MARKET SURFACE, cross-market by BATCHING rather than by moving a position.
-    /// @notice `refinanceByPolicies` caches each id against its OWN market, so one call may move several.
-    /// @dev The entitled set is therefore COMPUTED, never a constant: the hub's cross-market surface is two wide.
-    /// @dev `_pickLoan` entitles each id's market as it picks it, so no separate bookkeeping can drift from the ids.
-    /// @dev ALL-OR-NOTHING by design: one refusal reverts the batch, so a refusal is a real outcome here.
-    function refinanceByPolicies(uint256 seedA, uint256 seedB) external {
-        _bump("refinanceByPolicies");
-        if (_loanIds.length < 2) return;
-        uint256[] memory ids = new uint256[](2);
-        ids[0] = _pickLoan(seedA);
-        ids[1] = _pickLoan(seedB);
-        if (ids[0] == ids[1]) return; // a repeated id reverts on its second pass, which tests nothing new
-        if (ace.loanMarket(ids[0]) != ace.loanMarket(ids[1])) batchesSpanningMarkets++;
-        batchesAttempted++;
-        try ace.refinanceByPolicies(ids) returns (uint256[] memory newIds) {
-            batchesDone++;
-            for (uint256 i; i < newIds.length; i++) {
-                if (_knownLoan[newIds[i]]) continue;
-                _knownLoan[newIds[i]] = true;
-                _loanIds.push(newIds[i]);
-            }
-        } catch {
-            batchesRefused++;
+    /// @notice THE HOLDER'S EXTENSION, in cash: `tryExtend` asked for the holder, straddled against the `extend` it then sends.
+    /// @notice It tries loans within reach from the seed's pick on until one extends, so the cash fee and the re-spread are reached.
+    /// @notice With none in reach it asks the seed's own pick, closed or matured, so the refusal straddle still runs.
+    /// @dev Same block, same state: the view is read IMMEDIATELY before the call it predicts, and both name the same caller.
+    /// @dev Matured loans are skipped: each refuses `LoanMatured`, and trying it healed its market's record and padded the refusal tally.
+    function extend(uint256 loanSeed, uint256 whenSeed) external {
+        _bump("extend");
+        uint256 n = _loanIds.length;
+        bool found;
+        for (uint256 k; k < n; k++) {
+            uint256 loanId = _loanIds[(loanSeed % n + k) % n];
+            if (!_reachable(loanId)) continue;
+            found = true;
+            _entitle(_marketIndexOf(loanId));
+            if (_extendOne(loanId, whenSeed)) break;
+        }
+        if (found) {
+            extendCalls++;
+        } else if (n != 0) {
+            extendFallbacks++;
+            _extendOne(_pickLoan(loanSeed), whenSeed);
         }
         _tail();
     }
 
-    /// @notice THE CONTINUATION STRADDLE: the filter's answer latched against the verb it filters for.
-    /// @dev Same block, same state, and the view is read IMMEDIATELY before the call it predicts.
-    /// @dev It pins the view against the VERB and never against the expiry fold: the fold judges
-    /// @dev `units - sliver` while these two judge the whole lot, so those two disagree CORRECTLY.
-    function refinanceByPolicy(uint256 loanSeed) external {
-        _bump("refinanceByPolicy");
-        if (_loanIds.length == 0) return;
-        uint256 loanId = _pickLoan(loanSeed);
-        (bool vOk, bytes4 vSel, uint256 vPrincipal) = ace.tryContinue(loanId);
-        continueChecks++;
-        try ace.refinanceByPolicy(loanId) returns (uint256 newId) {
-            policyRollsDone++;
-            _viewVsRolledPolicy(vOk, vSel, vPrincipal, loanId, newId);
-            if (!_knownLoan[newId]) {
-                _knownLoan[newId] = true;
-                _loanIds.push(newId);
-            }
-        } catch (bytes memory err) {
-            _viewVsRefusedPolicy(vOk, vSel, loanId, _revertSelector(err));
-        }
-        _tail();
+    /// @dev Whether an extension can still land: live, and short of its expiry.
+    /// @dev `_extendOne` first warps to a seeded second past the open one, where an extension adds no time, and short of expiry.
+    /// @dev Judged at the later of the clock and the chain, which is the time `_warpAtLeastTo` re-anchors to and the hub reads.
+    function _reachable(uint256 loanId) internal view returns (bool) {
+        Loan memory l = read.loan(loanId);
+        return l.closedAt == 0 && _later() < l.expiry;
     }
 
-    /// @dev The roll went through: the view must have admitted it, and its principal IS the successor's debt.
-    function _viewVsRolledPolicy(bool vOk, bytes4 vSel, uint256 vPrincipal, uint256 loanId, uint256 newId) internal {
-        if (!vOk) {
-            if (continueCode == 0) (continueCode, continueLoanId, continueSelector) = (1, loanId, vSel);
-            return;
-        }
-        continueBothAdmit++;
-        uint256 debt = read.debtOf(newId);
-        if (vPrincipal != debt && continueCode == 0) {
-            (continueCode, continueLoanId) = (3, loanId);
-            (continueExpected, continueActual) = (vPrincipal, debt);
-        }
+    /// @dev The later of the campaign clock and the chain's.
+    function _later() internal view returns (uint256) {
+        uint256 chain = vm.getBlockTimestamp(); // a cheatcode read, which the optimizer cannot hoist past a warp
+        return chain > _now() ? chain : _now();
     }
 
-    /// @dev The roll was refused: the view must have refused too, with the SAME selector.
-    function _viewVsRefusedPolicy(bool vOk, bytes4 vSel, uint256 loanId, bytes4 got) internal {
-        if (vOk) {
-            if (continueCode == 0) (continueCode, continueLoanId, verbSelector) = (2, loanId, got);
-            return;
-        }
-        continueBothRefuse++;
-        if (vSel != got && continueCode == 0) {
-            (continueCode, continueLoanId) = (4, loanId);
-            (continueSelector, verbSelector) = (vSel, got);
-        }
+    /// @dev Warp to a seeded second inside `loanId`'s term: past its open second and the present, short of its expiry.
+    function _warpIntoTerm(uint256 loanId, uint256 whenSeed) internal {
+        Loan memory l = read.loan(loanId);
+        uint256 t = _later();
+        uint256 lo = t > l.openTime ? t : uint256(l.openTime) + 1;
+        _warpAtLeastTo(bound(whenSeed, lo, uint256(l.expiry) - 1));
     }
 
-    // ---- third-party levers on an armed loan's NEXT fold (#666, #514) ----
+    /// @notice Whether an extension can still land on `loanId`: the reach `extend` and `lenderExtend` pick by.
+    function reachable(uint256 loanId) external view returns (bool) {
+        return _reachable(loanId);
+    }
 
-    /// @dev A tracked loan a stranger may aim at: live, unexpired, armed, and holding at least its roll's fresh need.
-    /// @dev THE `reserved >= need` GATE IS THE PROPERTY'S OWN PREMISE: `repay` here pranks the BORROWER, whose repay under
-    /// @dev `minDebt` raises the need past the reservation and forfeits the guarantee by their own act.
-    function _subject(uint256 seed, bool m0Only) internal returns (bool found, uint256 loanId) {
+    /// @dev The first tracked loan within reach from the seed's slot on, wrapping once, its market entitled; not found when none is.
+    function _reachableLoan(uint256 seed) internal returns (bool found, uint256 loanId) {
         uint256 n = _loanIds.length;
         for (uint256 k; k < n; k++) {
             loanId = _loanIds[(seed % n + k) % n];
-            Loan memory l = read.loan(loanId);
-            if (l.closedAt != 0 || _now() >= l.expiry) continue;
-            if (m0Only && l.market != mids[0]) continue;
-            (uint64 t,,) = read.autoPolicyOf(loanId);
-            if (t == 0 || read.reservedOf(loanId) < _need(l, t)) continue;
+            if (!_reachable(loanId)) continue;
             _entitle(_marketIndexOf(loanId));
             return (true, loanId);
         }
     }
 
-    /// @dev The fresh cash this loan's expiry roll draws: the hub's own sizing, at its market's params.
-    function _need(Loan memory l, uint64 tenor) internal view returns (uint256) {
-        Cfg memory c;
-        c.p = ace.idToMarketParams(l.market);
-        return Borrower.rollNeed(c, l.debt, tenor);
+    /// @notice THE E-3 PATH: the market lender, holding the holder's credit grant, extends a loan within reach in cash it pays itself.
+    /// @notice One ask in four runs ungranted: it must refuse `NotBorrower`, at the view and at the verb.
+    /// @dev The holder sets or revokes the grant first, so the grant is the seed's, never a leftover of an earlier call.
+    function lenderExtend(uint256 loanSeed, uint256 grantSeed) external {
+        _bump("lenderExtend");
+        (bool found, uint256 loanId) = _reachableLoan(loanSeed);
+        if (found) _lenderExtendOne(loanId, grantSeed % 4 != 0, grantSeed >> 8);
+        _tail();
     }
 
-    /// @dev One bracket: the fold before the lever, the lever, the fold after. `inSnapshot` levers exist only inside the fold.
-    function _bracket(uint256 loanId, uint8 cause, function(uint256, uint256) internal returns (bool) lever, uint256 arg, bool heal, bool inSnapshot) internal {
-        MockPersistenceRecord r = records[_marketIndexOf(loanId)];
-        _debtBeforeLever = read.loan(loanId).debt; // in storage, so `_judge` logs the real "before" without another stack slot
-        (bool rb, bool ab,) = _foldAtExpiry(loanId, r, true, _noLever, 0);
-        bool landed;
-        bool ra;
-        bool aa;
-        if (inSnapshot) {
-            (ra, aa, landed) = _foldAtExpiry(loanId, r, heal, lever, arg);
-        } else {
-            landed = lever(loanId, arg);
-            (ra, aa,) = _foldAtExpiry(loanId, r, heal, _noLever, 0);
+    /// @dev One operator extension, straddled as the holder's is; the fee is funded to the lender, and only the lender's wallet may pay it.
+    /// @return landed Whether the verb extended the loan.
+    function _lenderExtendOne(uint256 loanId, bool granted, uint256 whenSeed) internal returns (bool landed) {
+        uint256 mi = _marketIndexOf(loanId);
+        address holder = ace.borrowerOf(loanId);
+        address lender = ace.idToMarketParams(mids[mi]).lender;
+        if (holder == lender) return false; // the lender's own loan is the holder's path, not this one
+        _warpIntoTerm(loanId, whenSeed);
+        _healRecord(records[mi]);
+        vm.prank(holder);
+        ace.setCreditOperator(lender, granted);
+        operatorTries++;
+        ExtendPre memory s = _extendView(loanId, mi, lender);
+        _fundQuote(lender, mi, s.vFee);
+        s.hubQuote = MockERC20(_quoteAt(mi)).balanceOf(address(ace));
+        (uint256 lenderHad, uint256 holderHad) = (_quoteBal(lender, mi), _quoteBal(holder, mi));
+        vm.prank(lender);
+        try ace.extend(loanId, 0, "") returns (uint256 fee) {
+            landed = true;
+            operatorLanded++;
+            _viewVsExtended(s.vOk, s.vSel, s.vFee, loanId, fee, 1);
+            _checkExtendInPlace(loanId, mi, s, fee);
+            if (!granted) _latchOperator(1, loanId);
+            else if (_quoteBal(lender, mi) + fee != lenderHad || _quoteBal(holder, mi) != holderHad) _latchOperator(3, loanId);
+        } catch (bytes memory err) {
+            bytes4 got = _revertSelector(err);
+            _viewVsRefusedExtension(s.vOk, s.vSel, loanId, got, 1);
+            if (granted) return false;
+            if (got == NotBorrower.selector) operatorRefusedByName++;
+            else _latchOperator(2, loanId);
         }
-        _judge(loanId, cause, landed, rb, ab, ra, aa);
     }
 
-    /// @dev The tallies, and the latch. A disarm is counted apart from a flip: the property is the NEXT fold only.
-    function _judge(uint256 loanId, uint8 cause, bool landed, bool rb, bool ab, bool ra, bool aa) internal {
-        bracketJudged[cause]++;
-        if (landed) bracketLanded[cause]++;
-        if (!rb) return;
-        bracketRolled[cause]++;
-        if (!ra) {
-            bracketFlips[cause]++;
-            if (foldFlipped) return;
-            foldFlipped = true;
-            foldFlipCause = cause;
-            foldFlipLoanId = loanId;
-            foldFlipDebtBefore = _debtBeforeLever;
-            foldFlipDebtAfter = read.loan(loanId).debt;
+    /// @dev First violation only, like every other latch here.
+    function _latchOperator(uint8 code, uint256 loanId) internal {
+        if (operatorCode == 0) (operatorCode, operatorLoanId) = (code, loanId);
+    }
+
+    /// @dev What an extension must leave as it was, or move by exactly its own terms.
+    struct ExtendPre {
+        uint256 loans;
+        uint64 expiry;
+        uint256 debt;
+        uint256 resting;
+        uint256 hubQuote;
+        uint64 tenor; // the loan's own, which an extension runs again from now
+        bool vOk; // the view's answer, asked for the holder before the verb
+        bytes4 vSel;
+        uint256 vFee;
+        uint256 draws; // the market's draw counter: an extension bumps it once
+    }
+
+    /// @dev One holder's extension, at a seeded second inside the loan's term with its record healed.
+    /// @dev The holder is funded the view's fee exactly, so the pull is what the in-place check measures.
+    /// @dev A pick out of reach is neither warped to nor healed: its refusal reads no record, and a closed loan may keep a future expiry.
+    /// @return landed Whether the verb extended the loan.
+    function _extendOne(uint256 loanId, uint256 whenSeed) internal returns (bool landed) {
+        uint256 mi = _marketIndexOf(loanId);
+        if (_reachable(loanId)) {
+            _warpIntoTerm(loanId, whenSeed);
+            _healRecord(records[mi]);
+        }
+        address holder = ace.borrowerOf(loanId);
+        extendTries++;
+        ExtendPre memory s = _extendView(loanId, mi, holder);
+        _fundQuote(holder, mi, s.vFee);
+        s.hubQuote = MockERC20(_quoteAt(mi)).balanceOf(address(ace));
+        vm.prank(holder);
+        try ace.extend(loanId, 0, "") returns (uint256 fee) {
+            landed = true;
+            extendsLanded++;
+            _viewVsExtended(s.vOk, s.vSel, s.vFee, loanId, fee, 0);
+            _checkExtendInPlace(loanId, mi, s, fee);
+        } catch (bytes memory err) {
+            _viewVsRefusedExtension(s.vOk, s.vSel, loanId, _revertSelector(err), 0);
+        }
+    }
+
+    /// @dev The pre-state, and `caller`'s view of the extension now, which runs the loan's own tenor again from now.
+    function _extendView(uint256 loanId, uint256 mi, address caller) internal view returns (ExtendPre memory s) {
+        Loan memory l = read.loan(loanId);
+        s.tenor = l.tenor;
+        (s.vOk, s.vSel, s.vFee) = ace.tryExtend(loanId, 0, "", caller);
+        (s.loans, s.expiry, s.debt, s.resting) = (read.loanCount(), l.expiry, l.debt, read.restingOf(mids[mi]));
+        s.draws = read.marketState(mids[mi]).drawCount;
+    }
+
+    /// @dev A landed extension kept the loan in place: no loan minted, the term re-anchored at now on its own tenor, the debt unmoved.
+    /// @dev No cash rested or drawn, the fee reached the hub whole, and it bumped the market's draw counter once, the lender contract's change detector.
+    function _checkExtendInPlace(uint256 loanId, uint256 mi, ExtendPre memory s, uint256 fee) internal {
+        if (extendInPlaceCode != 0) return;
+        Loan memory l = read.loan(loanId);
+        uint8 code;
+        if (read.loanCount() != s.loans) code = 1;
+        else if (l.openTime != _later() || l.tenor != s.tenor || l.expiry != _later() + s.tenor) code = 2;
+        else if (l.debt != s.debt) code = 3;
+        else if (read.restingOf(mids[mi]) != s.resting) code = 4;
+        else if (MockERC20(_quoteAt(mi)).balanceOf(address(ace)) != s.hubQuote + fee) code = 5;
+        else if (read.marketState(mids[mi]).drawCount != s.draws + 1) code = 6;
+        if (code != 0) (extendInPlaceCode, extendInPlaceLoanId) = (code, loanId);
+    }
+
+    /// @dev The extension went through: the view must have admitted it, at the fee the verb charged.
+    function _viewVsExtended(bool vOk, bytes4 vSel, uint256 vFee, uint256 loanId, uint256 fee, uint8 mode) internal {
+        if (!vOk) {
+            if (extendCode == 0) (extendCode, extendCodeLoanId, extendViewSelector) = (1, loanId, vSel);
             return;
         }
-        if (ab && !aa) bracketDisarms[cause]++;
+        extendBothAdmit++;
+        modeBothAdmit[mode]++;
+        if (vFee != fee && extendCode == 0) {
+            (extendCode, extendCodeLoanId) = (3, loanId);
+            (extendViewFee, extendVerbFee) = (vFee, fee);
+        }
+    }
+
+    /// @dev The extension was refused: the view must have refused too, with the SAME selector.
+    function _viewVsRefusedExtension(bool vOk, bytes4 vSel, uint256 loanId, bytes4 got, uint8 mode) internal {
+        if (vOk) {
+            if (extendCode == 0) (extendCode, extendCodeLoanId, extendVerbSelector) = (2, loanId, got);
+            return;
+        }
+        extendBothRefuse++;
+        modeBothRefuse[mode]++;
+        if (vSel != got && extendCode == 0) {
+            (extendCode, extendCodeLoanId) = (4, loanId);
+            (extendViewSelector, extendVerbSelector) = (vSel, got);
+        }
     }
 
     /// @dev Collateral that puts `principal`'s trigger at `1/div` of the market's price: a draw every gate admits.
@@ -2047,85 +2014,14 @@ contract AceHandler is WarpClock, DeleverageCrank {
         return FullMath.mulDiv(p.minCoverageWad * principal, unitScales[mi] * div, p.price * 1e18) + 1;
     }
 
-    /// @dev The stranger's collateral and quote for one draw of `amount` in market `mi`, approved on both doors.
-    function _armStranger(uint256 mi, uint256 amount) internal returns (uint256 units) {
-        units = _unitsFor(mi, amount, 2);
-        MockStakeVault(_collAt(mi)).mint(stranger, units);
-        MockERC20(_quoteAt(mi)).mint(stranger, amount);
-        vm.startPrank(stranger);
-        MockStakeVault(_collAt(mi)).approve(address(positionManager), units);
-        MockERC20(_quoteAt(mi)).approve(address(ace), type(uint256).max);
-        vm.stopPrank();
-    }
-
-    /// @dev A draw size spanning the unreserved cash and past it, so a refusal at the reserve is reached as often as a landing.
-    function _drainSize(uint256 loanId, uint256 seed) internal view returns (uint256) {
-        bytes32 m = ace.loanMarket(loanId);
-        uint256 lo = ace.idToMarketParams(m).minDebt;
-        uint256 hi = read.restingOf(m);
-        return bound(seed, lo, hi > lo ? hi : lo);
-    }
-
-    /// @notice The persistent lever: a stranger opens and repays in one call, so repaid principal goes to `owed`, never to cash.
-    function strangerDrain(uint256 loanSeed, uint256 amtSeed) external {
-        _bump("strangerDrain");
-        (bool found, uint256 loanId) = _subject(loanSeed, false);
-        if (found) _bracket(loanId, CAUSE_DRAIN, _leverDrain, _drainSize(loanId, amtSeed), true, false);
-        _tail();
-    }
-
-    function _leverDrain(uint256 loanId, uint256 amount) internal returns (bool) {
-        uint256 mi = _marketIndexOf(loanId);
-        uint256 units = _armStranger(mi, amount);
-        uint256 g = read.loanCount() + 1;
-        bytes[] memory calls = new bytes[](3);
-        calls[0] = abi.encodeCall(Ace.open, (mids[mi], units, amount, 0, stranger, OpenBounds(0, 0, 0)));
-        calls[1] = abi.encodeCall(Ace.repay, (g, amount));
-        calls[2] = abi.encodeWithSignature("claimOwed(uint256,address)", g, stranger);
-        vm.prank(stranger);
-        try ace.multicall(calls) {
-            return true;
-        } catch {
-            return false;
-        }
-    }
-
-    /// @notice The ATOMIC lever at expiry: draw, crank the victim's fold, unwind, all in the stranger's one call.
-    function strangerAtomicDrain(uint256 loanSeed, uint256 amtSeed) external {
-        _bump("strangerAtomicDrain");
-        (bool found, uint256 loanId) = _subject(loanSeed, false);
-        if (found) _bracket(loanId, CAUSE_ATOMIC, _leverAtomic, _drainSize(loanId, amtSeed), true, true);
-        _tail();
-    }
-
-    /// @dev Runs inside the fold's snapshot: it warps to expiry and heals first, so the stranger's crank is THE fold.
-    function _leverAtomic(uint256 loanId, uint256 amount) internal returns (bool) {
-        uint256 mi = _marketIndexOf(loanId);
-        _warpAtLeastTo(read.loan(loanId).expiry);
-        _healRecord(records[mi]);
-        uint256 units = _armStranger(mi, amount);
-        uint256 g = read.loanCount() + 1;
-        bytes[] memory calls = new bytes[](4);
-        calls[0] = abi.encodeCall(Ace.open, (mids[mi], units, amount, 0, stranger, OpenBounds(0, 0, 0)));
-        calls[1] = abi.encodeCall(Ace.forceClose, (loanId));
-        calls[2] = abi.encodeCall(Ace.repay, (g, amount));
-        calls[3] = abi.encodeWithSignature("claimOwed(uint256,address)", g, stranger);
-        vm.prank(stranger);
-        try ace.multicall(calls) {
-            return true;
-        } catch {
-            return false;
-        }
-    }
-
-    /// @notice An honest maker's all-or-nothing resting order, sized across the market's cash so a fill can reach the reserve.
+    /// @notice An honest maker's all-or-nothing resting order, sized across the market's cash, so posted escrow is part of the books.
     function postOrder(uint256 marketSeed, uint256 sizeSeed) external {
         _bump("postOrder");
         uint256 mi = _pickMarket(marketSeed);
         _entitle(mi);
         MarketParams memory p = ace.idToMarketParams(mids[mi]);
         uint256 cash = read.restingOf(mids[mi]);
-        uint256 principal = bound(sizeSeed, p.minDebt, cash > p.minDebt ? cash : p.minDebt);
+        uint256 principal = bound(sizeSeed, p.minPrincipal, cash > p.minPrincipal ? cash : p.minPrincipal);
         uint256 units = 3 * _unitsFor(mi, principal, 2);
         MockStakeVault(_collAt(mi)).mint(maker, units);
         vm.startPrank(maker);
@@ -2135,157 +2031,6 @@ contract AceHandler is WarpClock, DeleverageCrank {
         } catch {}
         vm.stopPrank();
         _tail();
-    }
-
-    /// @notice A stranger fills somebody else's resting order, permissionlessly, with an armed loan's roll in view.
-    function strangerFill(uint256 loanSeed, uint256 orderSeed) external {
-        _bump("strangerFill");
-        (bool found, uint256 loanId) = _subject(loanSeed, false);
-        if (found) {
-            uint256 oid = _openOrderIn(ace.loanMarket(loanId), orderSeed);
-            if (oid != 0) _bracket(loanId, CAUSE_FILL, _leverFill, oid, true, false);
-        }
-        _tail();
-    }
-
-    /// @dev A live, unfilled order in market `m`, starting from the seed's pick; zero when there is none.
-    function _openOrderIn(bytes32 m, uint256 seed) internal view returns (uint256) {
-        uint256 n = _orderIds.length;
-        for (uint256 k; k < n; k++) {
-            uint256 oid = _orderIds[(seed % n + k) % n];
-            Order memory o = ace.orderOf(oid);
-            if (o.market == m && !o.closed && o.principal != 0) return oid;
-        }
-        return 0;
-    }
-
-    function _leverFill(uint256, uint256 oid) internal returns (bool) {
-        Order memory o = ace.orderOf(oid);
-        vm.prank(stranger);
-        try ace.fillOrder(oid, o.principal, o.collateralUnits) returns (uint256 newLoan) {
-            if (_loanIds.length < MAX_LOANS && !_knownLoan[newLoan]) {
-                _knownLoan[newLoan] = true;
-                _loanIds.push(newLoan);
-                loansOpened++;
-            }
-            return true;
-        } catch {
-            return false;
-        }
-    }
-
-    /// @notice A stranger pays an armed loan DOWN, never off: a full repay closes the loan, which is not a fold.
-    /// @dev The sizes span the `(0, minDebt)` band, which the hub now refuses to anyone but the borrower.
-    function strangerRepayPartial(uint256 loanSeed, uint256 amtSeed) external {
-        _bump("strangerRepayPartial");
-        (bool found, uint256 loanId) = _subject(loanSeed, false);
-        if (found) {
-            uint256 debt = read.loan(loanId).debt;
-            if (debt > 1) _bracket(loanId, CAUSE_REPAY, _leverRepay, bound(amtSeed, 1, debt - 1), true, false);
-        }
-        _tail();
-    }
-
-    function _leverRepay(uint256 loanId, uint256 amount) internal returns (bool) {
-        MockERC20 q = MockERC20(_quoteAt(_marketIndexOf(loanId)));
-        q.mint(stranger, amount);
-        vm.startPrank(stranger);
-        q.approve(address(ace), amount);
-        try ace.repay(loanId, amount) {
-            vm.stopPrank();
-            return true;
-        } catch {
-            vm.stopPrank();
-            return false;
-        }
-    }
-
-    /// @notice A keeper routes ANOTHER market's armed loan into this one, drawing its cash: the whole route runs in the snapshot.
-    /// @dev The source market is built there too, on M0's record and dials with a one-day `minTenor`, so its roll window
-    /// @dev opens before the victim's expiry; nothing of it survives the bracket, so no ledger outside the six ever holds it.
-    function routeIn(uint256 loanSeed, uint256 sizeSeed) external {
-        _bump("routeIn");
-        (bool found, uint256 loanId) = _subject(loanSeed, true);
-        if (found && read.loan(loanId).expiry > _now() + 1 days) {
-            _bracket(loanId, CAUSE_ROUTE, _leverRoute, _drainSize(loanId, sizeSeed), true, true);
-        }
-        _tail();
-    }
-
-    function _leverRoute(uint256 loanId, uint256 size) internal returns (bool) {
-        MarketParams memory p = ace.idToMarketParams(mids[0]);
-        p.lender = feederLender;
-        p.minTenor = 1 days;
-        bytes32 f;
-        try ace.createMarket(p) returns (bytes32 x) {
-            f = x;
-        } catch {
-            return false;
-        }
-        usdc.mint(feederLender, 2 * size);
-        vm.startPrank(feederLender);
-        usdc.approve(address(ace), 2 * size);
-        ace.deposit(f, 2 * size);
-        vm.stopPrank();
-        uint256 fl = _openFeeder(f, size, p.maxTenor);
-        uint256 at = uint256(read.loan(fl).expiry) - MarketInit.autoRefinanceWindow(1 days) / 2;
-        if (at >= read.loan(loanId).expiry) return false;
-        _warpAtLeastTo(at);
-        vm.prank(keeper);
-        try ace.refinanceByPolicyTo(fl, mids[0]) {
-            return true;
-        } catch {
-            return false;
-        }
-    }
-
-    /// @dev The feeder loan: a one-day term armed to roll at M0's term, with a buffer and a fee ceiling, so it may be routed.
-    function _openFeeder(bytes32 f, uint256 size, uint64 rollTenor) internal returns (uint256 fl) {
-        uint256 units = _unitsFor(0, size, 4);
-        vault.mint(feederBorrower, units);
-        vm.startPrank(feederBorrower);
-        vault.approve(address(positionManager), units);
-        fl = ace.open(f, units, size, 1 days, feederBorrower, OpenBounds(0, 0, 0));
-        ace.setAutoRefinance(fl, rollTenor, 100, 2000);
-        vm.stopPrank();
-    }
-
-    /// @notice A third party pushes a MOVABLE record under the lender's price but clear of the successor's own buffer.
-    /// @dev R-g: the home roll judges the successor at `min(price, record)`, so a push there must not settle it.
-    /// @dev Pushed only where the successor stays admissible with a 1% margin; under that the record is right to settle.
-    function recordPush(uint256 loanSeed, uint256 pxSeed) external {
-        _bump("recordPush");
-        (bool found, uint256 loanId) = _subject(loanSeed, false);
-        if (found) {
-            uint256 mi = _marketIndexOf(loanId);
-            uint256 lo = _safeRecord(loanId);
-            uint256 price = ace.idToMarketParams(mids[mi]).price;
-            if (lo < price) _bracket(loanId, CAUSE_RECORD, _leverRecord, bound(pxSeed, lo, price - 1), false, false);
-            _healRecord(records[mi]);
-        }
-        _tail();
-    }
-
-    function _leverRecord(uint256 loanId, uint256 px) internal returns (bool) {
-        records[_marketIndexOf(loanId)].setMinPrice(px);
-        return true;
-    }
-
-    /// @dev The lowest record at which the fold's successor clears its trigger and the borrower's buffer, with 1% to spare.
-    /// @dev Spelled from the fold's own inputs: the principal at expiry, and the lot less the keeper's sliver.
-    function _safeRecord(uint256 loanId) internal view returns (uint256) {
-        Loan memory l = read.loan(loanId);
-        MarketParams memory p = ace.idToMarketParams(l.market);
-        (uint64 t, uint16 buf,) = read.autoPolicyOf(loanId);
-        Cfg memory c;
-        c.p = p;
-        uint256 pp = Borrower.successorPrincipal(c, l.debt, t);
-        uint256 scale = read.marketState(l.market).unitScale;
-        uint256 sliver = FullMath.mulDiv(l.debt * p.settleBountyBps, scale, 10000 * p.price);
-        if (sliver >= l.collateralUnits) return type(uint256).max;
-        uint256 trig = LoanMath.triggerPrice(pp, l.collateralUnits - sliver, p.minCoverageWad, scale);
-        uint256 lo = FullMath.mulDivRoundingUp(trig, 1e18, 1e18 - uint256(buf) * 1e14);
-        return (lo * 101) / 100 + 1;
     }
 
     // ---- fill + settlement actions ----
@@ -2303,7 +2048,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
         _tail();
     }
 
-    /// @dev Self-arm the ask the way `forceClose` self-arms the fold: settled inventory RESTS before it opens.
+    /// @dev Self-arm the ask the way `forceClose` warps to expiry: settled inventory RESTS before it opens.
     /// @dev Every fill is try/catch-guarded, so an unarmed leg would revert into the catch and go unexercised.
     /// @dev That failure is silent by construction -- the verb tally still rises while the ask drains nothing.
     /// @dev The window is bounded by an hour, so the campaign clock gains far less than the `warp` action does.
@@ -2354,14 +2099,14 @@ contract AceHandler is WarpClock, DeleverageCrank {
 
     /// @dev Seeds inventory pre-snapshot the ONLY way it now arrives: a loan that matures unpaid.
     /// @dev `sellFill` used to mint it directly; with the bid side gone, settlement is the door.
-    /// @dev ASSUMES AN UNARMED LOAN: an armed one ROLLS at expiry instead, and seeds no inventory.
+    /// @dev `forceClose` at expiry always settles, so the loan it opens is the inventory it seeds.
     function _baselineInventory(address who, uint256 principal) internal {
         _open(who, principal);
         uint256 loanId = _loanIds[_loanIds.length - 1];
         uint256 nBefore = read.loanCount();
         _warpBy(ProtocolPolicy.MAX_TENOR + 1);
-        try ace.forceClose(loanId) {} catch {} // no expiryFolds++: that tally must prove the FUZZER folded
-        require(read.loan(loanId).closedAt != 0 && read.loanCount() == nBefore, "BASELINE: the ctor expiry fold did not settle");
+        try ace.forceClose(loanId) {} catch {} // no forceCloseSettles++: that tally must prove the FUZZER settled one
+        require(read.loan(loanId).closedAt != 0 && read.loanCount() == nBefore, "BASELINE: the ctor forceClose at expiry did not settle");
         _warpAtLeastTo(read.inventoryAskOpensAt(loanId)); // the ctor buy is a stranger's ask, and it rests first
         if (!everInventory && _sumInventory() > 0) everInventory = true;
     }
@@ -2420,7 +2165,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
     /// @dev The refusal is CAUGHT, not swallowed: a settlement regression must not read as a seed that missed expiry.
     /// @dev `owed` is measured AFTER the warp, so it is the state the hub itself will judge and not the pre-warp one.
     /// @dev It picks a LIVE loan: a closed pick is not owed, so it checked nothing, and once the tracked list filled with closed
-    /// @dev loans that was most picks. Measured at depth 256, it is what left whole runs without a single expiry fold.
+    /// @dev loans that was most picks. Measured at depth 256, it is what left whole runs without a single expiry settle.
     function forceClose(uint256 loanSeed) external {
         _bump("forceClose");
         if (_loanIds.length == 0) return;
@@ -2429,69 +2174,27 @@ contract AceHandler is WarpClock, DeleverageCrank {
         if (exp != 0 && _now() < exp) _warpTo(uint256(exp) + 1);
         bool owed = exp != 0 && _now() >= exp && read.loan(loanId).closedAt == 0;
         if (owed) forceCloseOwed++;
-        uint256 nBefore = read.loanCount(); // a roll MINTS a loan, a fold does not: the only discriminator
+        if (_forceCloseOne(loanId) && owed) forceCloseHonoured++;
+        _tail();
+    }
+
+    /// @dev One keeper `forceClose`, which always settles: a return that leaves the loan live latches code 3.
+    /// @dev The settle mints nothing, so the loan's own `closedAt` is the discriminator, never the loan count.
+    /// @return landed Whether the call returned and closed the loan.
+    function _forceCloseOne(uint256 loanId) internal returns (bool landed) {
+        Loan memory l = read.loan(loanId);
         vm.prank(keeper);
         try ace.forceClose(loanId) {
-            settlements++;
-            if (read.loanCount() == nBefore) expiryFolds++;
-            else expiryRolls++;
-            if (owed) forceCloseHonoured++;
+            if (read.loan(loanId).closedAt != 0) {
+                landed = true;
+                settlements++;
+                forceCloseSettles++;
+            } else if (forceCloseCode == 0) {
+                (forceCloseCode, forceCloseLoanId, forceCloseSelector) = (3, loanId, bytes4(0));
+            }
         } catch (bytes memory err) {
-            _checkForceClose(loanId, owed, _revertSelector(err));
+            _checkForceClose(loanId, l.closedAt == 0 && _now() >= l.expiry, _revertSelector(err));
         }
-        _tail();
-    }
-
-    /// @notice The UNPAID backstop: settles an expired loan once its roll window has passed, reading no record.
-    /// @dev Inside the window it must refuse, so a landing latches code 1; it pays its caller nothing, so a credit latches code 2.
-    /// @dev IT RUNS INSIDE A SNAPSHOT AND IS ROLLED BACK, like the third-party levers: it judges the backstop and changes nothing.
-    /// @dev Persisted, every loan it settled is one the expiry fold can no longer reach, and `make reach` measures that fold.
-    /// @dev Rolled back it cannot take one: measured at depth 256, 18 of 30 seeds folded with it and 14 of 30 on the tree before it.
-    /// @dev It never warps either: the window is judged wherever the clock stands, and `settleExpiredAtExpiry` aims at it.
-    /// @dev The backstop's persistent effects are the staged campaign's, which settles through it for real.
-    function settleExpired(uint256 loanSeed) external {
-        _bump("settleExpired");
-        if (_loanIds.length == 0) return;
-        _judgeBackstop(_pickLoan(loanSeed));
-        _tail();
-    }
-
-    /// @notice The same judgement at the loan's expiry, inside its roll window: NOT a fuzz target, for written rows only.
-    /// @dev The warp persists, which is exactly why no selector array may hold this: a moved clock starves the fold.
-    function settleExpiredAtExpiry(uint256 loanSeed) external {
-        uint256 loanId = _pickLoan(loanSeed);
-        _warpAtLeastTo(read.loan(loanId).expiry);
-        _judgeBackstop(loanId);
-    }
-
-    /// @dev The backstop's terms, judged on a rolled-back call: code 1 a landing inside the window, code 2 a paid caller.
-    function _judgeBackstop(uint256 loanId) internal {
-        if (read.loan(loanId).closedAt != 0) return;
-        (bool landed, bool inWindow, bool paidCaller) = _backstopInSnapshot(loanId);
-        if (landed) unpaidSettles++;
-        if (landed && inWindow) _latchBackstop(1, loanId);
-        else if (landed && paidCaller) _latchBackstop(2, loanId);
-        if (!landed && inWindow) backstopEarlyRefused++;
-    }
-
-    /// @dev One `settleExpired` where the clock stands, in a snapshot; the outcome rides out in memory.
-    /// @dev NO WARP, not even inside the snapshot: whether a revert restores the chain's clock is not this action's to bet on.
-    function _backstopInSnapshot(uint256 loanId) internal returns (bool landed, bool inWindow, bool paidCaller) {
-        Loan memory l = read.loan(loanId);
-        uint256 snap = vm.snapshotState();
-        inWindow = _now() < uint256(l.expiry) + MarketInit.autoRefinanceWindow(l.tenor);
-        uint256 callerHad = read.unitsOwedOf(loanId, keeper);
-        vm.prank(keeper);
-        try ace.settleExpired(loanId) {
-            landed = true;
-            paidCaller = read.unitsOwedOf(loanId, keeper) != callerHad;
-        } catch {}
-        vm.revertToState(snap);
-    }
-
-    function _latchBackstop(uint8 code, uint256 loanId) internal {
-        if (backstopCode != 0) return;
-        (backstopCode, backstopLoanId) = (code, loanId);
     }
 
     function warp(uint256 dtSeed) external {
@@ -2536,7 +2239,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
         p.deleverageBandBps = BAND_BPS;
         p.deleverageTargetBps = 4000;
         p.deleverageStopBps = 1;
-        p.minDebt = bound(seed >> 16, p.minDebt, p.minDebt * 50);
+        p.minPrincipal = bound(seed >> 16, p.minPrincipal, p.minPrincipal * 50);
         p.settleBountyBps = bound(seed >> 48, 0, p.settleBountyBps);
         p.inventoryAsk = (seed >> 80) % 2 == 0; // either setting is a genesis the fuzzer may land mid-sequence; the baseline names no fill fee
         genesisAttempted++;

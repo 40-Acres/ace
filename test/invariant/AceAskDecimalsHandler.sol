@@ -198,6 +198,7 @@ contract AceAskDecimalsHandler is WarpClock {
     }
 
     /// @notice A keeper settles a live loan at expiry, warping there first; settlement is what fills a pot.
+    /// @dev Counted a settle only when the loan closed, which `forceClose` from expiry always does once it returns.
     function forceClose(uint256 loanSeed) external {
         _bump("forceClose");
         uint256 loanId = _pick(loanSeed, true);
@@ -205,7 +206,7 @@ contract AceAskDecimalsHandler is WarpClock {
         _warpAtLeastTo(read.loan(loanId).expiry);
         vm.prank(keeper);
         try ace.forceClose(loanId) {
-            settlesLanded++;
+            if (read.loan(loanId).closedAt != 0) settlesLanded++;
         } catch {}
     }
 

@@ -48,7 +48,7 @@ abstract contract CuratorVaultBase is WarpClock {
     uint256 internal constant MIN_DEP = 1e6;
     uint64 internal constant VEST_W = 1 days; // NON-ZERO by rule: a zero default hides the mechanism it disables
 
-    uint256 internal constant RIG_MIN_DEBT = 10e6; // the fixture's floor ticket, under the shipped 5000e6 so small rig draws open
+    uint256 internal constant RIG_MIN_PRINCIPAL = 10e6; // the fixture's floor ticket, under the shipped 5000e6 so small rig draws open
     uint64 internal constant RIG_TIMELOCK = 1 days; // the shortest the vault admits, so `_list` waits as little as it can
     uint16 internal constant RIG_BUFFER_BPS = 5000; // half the record's 2x-par minimum: the door lends at par gridded down
 
@@ -143,7 +143,7 @@ abstract contract CuratorVaultBase is WarpClock {
 
     /// @dev Deploy a vault from `c` with the rig collateral listed, and name its door market `mid`.
     function _deploy(VaultConfig memory c, string memory name, string memory symbol) internal returns (CuratorVault v) {
-        v = new CuratorVault(c, RIG_MIN_DEBT, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, _listing(), name, symbol);
+        v = new CuratorVault(c, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, _listing(), name, symbol);
         mid = _doorMarket(v, address(collateral));
     }
 
@@ -164,9 +164,9 @@ abstract contract CuratorVaultBase is WarpClock {
         v.accept(coll);
     }
 
-    /// @dev A door request for `units` of `coll` drawing `principal` over the row's shortest term, unarmed, with no floors.
+    /// @dev A door request for `units` of `coll` drawing `principal` over the row's shortest term, with no floors.
     function _request(address coll, uint256 units, uint256 principal) internal pure returns (BorrowRequest memory) {
-        return BorrowRequest({collateral: coll, units: units, principal: principal, tenor: 0, arm: false, minPayout: 0, minBufferWad: 0, deadline: 0});
+        return BorrowRequest({collateral: coll, units: units, principal: principal, tenor: 0, minPayout: 0, minBufferWad: 0, deadline: 0});
     }
 
     /// @dev A USDC-quoted market whose ONE lender is `lender`, for NON-VAULT lenders: a vault lends only in markets its door opens.
@@ -239,7 +239,7 @@ abstract contract CuratorVaultBase is WarpClock {
         _crankAllTicks(v, loanId, 0);
     }
 
-    uint256 internal constant CLASS_DRAW = 100e6; // one position's draw, comfortably over the rig's `minDebt`
+    uint256 internal constant CLASS_DRAW = 100e6; // one position's draw, comfortably over the rig's `minPrincipal`
 
     /// @dev Build at least `target` carried positions, one door borrow per round; `band` is tracked and ignored.
     function _buildClasses(CuratorVault v, uint256 target, uint256 band) internal {
@@ -296,16 +296,16 @@ abstract contract CuratorVaultBase is WarpClock {
         vm.stopPrank();
     }
 
-    /// @dev A DISTINCT market on the same quote and collateral; `minDebt` gives it its own id.
+    /// @dev A DISTINCT market on the same quote and collateral; `minPrincipal` gives it its own id.
     /// @dev No vault lends here -- it is the FOREIGN market, for refusal tests and stranger activity.
     /// @dev THE LENDER IS NAMED BY THE CALLER, and must be: sole tenancy refuses every address but the one it names.
-    function _marketLike(uint256 minDebt, address lender) internal returns (bytes32) {
+    function _marketLike(uint256 minPrincipal, address lender) internal returns (bytes32) {
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(collateral));
         MockPersistenceRecord r = new MockPersistenceRecord(address(usdc), address(collateral));
         r.setObserved(AceFixtures.px(1e18, address(usdc), address(collateral)));
         r.setMinPrice(AceFixtures.px(2e18, address(usdc), address(collateral)));
         p.record = address(r);
-        p.minDebt = minDebt;
+        p.minPrincipal = minPrincipal;
         p.lender = lender;
         return ace.createMarket(p);
     }

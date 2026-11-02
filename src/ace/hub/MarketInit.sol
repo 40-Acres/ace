@@ -19,24 +19,6 @@ error MarketExists(); // a live quote at this id: genesis runs once per market, 
 library MarketInit {
     uint256 private constant UNIT_SCALE = 1 << 96; // the price frame, one in every market: the ticket rail, the record check and the state write
 
-    /// @notice A keeper-latency budget: `min(2 hours, tenor / 5)`, used on BOTH sides of expiry.
-    /// @notice Before expiry it is how early an armed policy may be executed; after it, how long the roll keeps priority.
-    /// @dev DERIVED so a minute-scale market is creatable at all; a fixed 2h made one uncreatable.
-    /// @dev Under the tenor by construction, so its ceiling needs no rail; its floor is genesis's `MIN_TENOR_FLOOR`, which keeps it off zero.
-    /// @dev The caller chooses the argument: the market floor for admission, the LOAN'S own tenor for its roll window.
-    function autoRefinanceWindow(uint64 minTenor) internal pure returns (uint64) {
-        uint64 w = minTenor / Constants.AUTO_REFINANCE_WINDOW_DIVISOR;
-        return uint64(Math.min(w, Constants.AUTO_REFINANCE_WINDOW));
-    }
-
-    /// @notice The roll window's TRAILING share, counted back from expiry, in which a stranger's market may also fund the roll.
-    /// @notice The `window - hold` before it is the incumbent lender's alone: their span to keep the loan before a stranger routes it.
-    /// @dev DERIVED, never independent: at a divisor of 2 the incumbent's span is never the shorter; a whole-window hold leaves them none.
-    /// @dev At or above genesis's `MIN_TENOR_FLOOR` the hold is at least a second, so a stranger may still route before expiry.
-    function homeRollHold(uint64 minTenor) internal pure returns (uint64) {
-        return autoRefinanceWindow(minTenor) / Constants.AUTO_ROLL_HOME_SHARE_DIVISOR;
-    }
-
     /// @notice How long settled inventory rests before its ask opens: `min(1 hours, minTenor / 2)`.
     /// @notice It is the lender's window to take their own goods in kind before a stranger may buy them.
     /// @notice ITS SECOND JOB, where a record floors the ask: the read that settles a loan is never the read that prices its pot.
@@ -92,7 +74,7 @@ library MarketInit {
         /// @dev THE CEILING IS REPRESENTATIONAL, NOT POLICY: `feeFundable` below binds at 2272, under this 2500 at every shape.
         /// @dev Without it an unbounded `baseBps` reaches `feeFundable`'s multiply first and reverts Panic instead of by name.
         require(p.baseBps >= Constants.MIN_BASE_BPS && p.baseBps <= Constants.MAX_FEE_SHARE_BPS, "base bps out of band");
-        /// @dev The floor is DERIVED from the window divisors: at it no tenor-derived window or hold is zero.
+        /// @dev The floor sits at or over the hold's divisor: at it no tenor-derived hold is zero.
         /// @dev MUST precede the two fee rails below: at `minTenor == 0` one misnames the refusal and the other divides by it.
         require(p.minTenor >= Constants.MIN_TENOR_FLOOR, "min tenor under floor");
         require(p.maxTenor >= p.minTenor, "max tenor below min");
@@ -100,17 +82,17 @@ library MarketInit {
         /// @dev the all-in fee stays inside `MAX_FEE_SHARE_BPS` of the draw at every term the market offers
         require(LoanMath.feeFundable(p.baseBps, p.maxTenor, p.minTenor), "fee bps too high");
         /// @dev A TERM IS ADMISSIBLE IFF IT LIES IN `[minTenor, maxTenor]`: nothing quantises a tenor, so a borrower picks any in that range.
-        require(p.minDebt > 0, "min debt zero"); // it floors BOTH doors, and a zero floor admits dust at each
+        require(p.minPrincipal >= 2, "debt floor zero"); // its half floors every live loan, so it must be positive
         /// @dev The SHARE rail above bounds a fraction and cannot bound one wei, because the fee CEILS; so this checks the hardest ends.
-        /// @dev Those are maxTenor and minDebt: the fee is monotone in tenor, and `ceil(P r) < P` binds at the smallest P.
-        /// @dev MUST stay below `min debt zero`: at zero the fee is zero too, so `0 < 0` would fail here and shadow it
-        require(LoanMath.originationFee(p.minDebt, p.maxTenor, p.baseBps, p.minTenor) < p.minDebt, "min debt under fee");
-        /// @dev THE DEPOSIT FLOOR IS `minDebt` ITSELF, so its smallest legal deposit must fit the cash cap or no deposit could ever book.
-        require(p.minDebt <= type(uint128).max, "min debt over cash cap");
+        /// @dev Those are maxTenor and minPrincipal: the fee is monotone in tenor, and `ceil(P r) < P` binds at the smallest P.
+        /// @dev MUST stay below `debt floor zero`: at 0 or 1 the ceiled fee equals the principal, so this rail would fail first and shadow it
+        require(LoanMath.originationFee(p.minPrincipal, p.maxTenor, p.baseBps, p.minTenor) < p.minPrincipal, "min principal under fee");
+        /// @dev The deposit floor and the smallest loan are both `minPrincipal`, so one cap covers both.
+        require(p.minPrincipal <= type(uint128).max, "min principal over cash cap");
         /// @dev THE MINIMUM TICKET MUST OPEN: its coverage line at the price must fit the widest lot an open admits, `max / 1e18`.
         /// @dev EXACT, on the open door's own arithmetic: at the line the trigger sits at or under the price, so that lot opens.
-        /// @dev MUST follow the coverage band and `min debt over cash cap`: they bound `minCoverageWad * minDebt`, which otherwise panics.
-        require(Borrower.coverageLine(p.minCoverageWad, UNIT_SCALE, p.minDebt, p.price) <= type(uint256).max / 1e18, "min ticket unopenable");
+        /// @dev MUST follow the coverage band and `min principal over cash cap`: they bound `minCoverageWad * minPrincipal`, which otherwise panics.
+        require(Borrower.coverageLine(p.minCoverageWad, UNIT_SCALE, p.minPrincipal, p.price) <= type(uint256).max / 1e18, "min ticket unopenable");
         require(p.settleBountyBps <= Constants.MAX_SETTLE_BOUNTY_BPS, "settle bps too high");
         /// @dev eps is immutable, so a mis-set value is permanent: a sold unit melts (1-eps) of the record floor, less the cut on a restoring crank
         /// @dev unconditional, above both band arms, though band-off eps must be zero: an over-ceiling eps is refused by this name either way

@@ -48,7 +48,7 @@ contract WidthSource {
 /// @notice `Probe.askWord` on its own, where both of its properties are one assertion each.
 /// @notice TOTALITY: no code, a revert, and a short answer are all `ok == false`, never an in-band value.
 /// @notice BOUNDEDNESS: a megabyte answer costs this caller no more than the callee's own expansion.
-/// @dev The door suites measure the bound through `deposit` and the expiry fold; this measures it at the source.
+/// @dev The door suites measure the bound through `deposit` and the extension's predicate; this measures it at the source.
 /// @dev The bound is on MEMORY, never on GAS: a callee that burns its allowance still drains the caller.
 /// @dev That non-property is pinned in `AceVenueExposureEdges` and is deliberately not re-asserted here.
 contract AceProbeBoundsTest is Test {

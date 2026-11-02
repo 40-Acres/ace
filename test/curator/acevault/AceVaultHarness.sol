@@ -4,10 +4,11 @@ pragma solidity 0.8.36;
 import {MarketParams} from "../../../src/ace/hub/Types.sol";
 import {AceVault, VaultConfig} from "../../../src/curator/AceVault.sol";
 import {AceVaultFlows, BorrowRequest, Terms} from "../../../src/curator/AceVaultFlows.sol";
+import {Extension} from "../../../src/interfaces/IRollPolicy.sol";
 
-/// @notice A test product on the base: its terms, its two roll legs and its cap room are whatever a row sets.
+/// @notice A test product on the base: its terms, its two extension legs and its cap room are whatever a row sets.
 /// @dev It lets a row hand the core door a market no shipped product would build, so the core's own refusals are what answers.
-/// @dev `settle` is a product settle door, the shape PawnShop, SetVault and NftVault run, over the base's promise split.
+/// @dev `settle` is a product settle door, the shape PawnShop, SetVault and NftVault run, over the base's `endLoan`.
 contract AceVaultHarness is AceVault {
     MarketParams internal _mp;
     Terms internal _t;
@@ -30,7 +31,7 @@ contract AceVaultHarness is AceVault {
         roomLeft = r;
     }
 
-    /// @notice A product settle door: end the loan by the base's promise split, then take the pot home.
+    /// @notice A product settle door: end the loan by the base's `endLoan`, then take the pot home.
     function settle(uint256 loanId) external nonReentrant door {
         AceVaultFlows.endLoan(ACE, loanId);
     }
@@ -39,11 +40,13 @@ contract AceVaultHarness is AceVault {
         return (_mp, _t);
     }
 
-    function _priceAdmits(MarketParams memory, uint256, bytes calldata) internal view override returns (bool) {
+    /// @dev The extension's price leg is whatever the row set, in either form.
+    function _priceAdmits(Extension calldata, bytes calldata) internal view override returns (bool) {
         return priceOk;
     }
 
-    function _rollAdmits(MarketParams memory) internal view override returns (bool) {
+    /// @dev The extension's curator legs are whatever the row set.
+    function _legsAdmit(Extension calldata) internal view override returns (bool) {
         return rollOk;
     }
 

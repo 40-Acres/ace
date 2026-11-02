@@ -127,10 +127,19 @@ fi
 
 # EVERY RUN IS MEMORY-CAPPED TOO, in its own cgroup scope. Neither -Xmx nor a core cap bounds a run: -Xmx caps only
 # the JVM, and one yices query alone has reached 52 GB. Over the cap the kernel OOM-kills the largest process in the
-# scope -- a runaway solver, not the JVM -- and OOMPolicy=continue keeps the rest of the run going
+# scope -- a runaway solver, not the JVM -- and the run must SURVIVE that kill rather than be torn down with it.
+#
+# THE SURVIVAL IS BOUGHT BY Delegate=yes, NOT BY OOMPolicy=continue, and the difference is a systemd version.
+# `-p OOMPolicy=continue` is refused outright by systemd 249 on a SCOPE ("Unknown assignment: OOMPolicy=continue"),
+# so a machine on 249 could not start a capped run at all. Dropping the property is not the fix either: OOMPolicy
+# falls back to DefaultOOMPolicy=, which ships as `stop`, and `stop` tears down the whole scope the moment one
+# solver is OOM-killed -- turning the cap into a kill switch for the run it exists to protect. Delegate=yes gets
+# `continue` as its own documented default (systemd.service(5): the default is continue for units with Delegate=
+# turned on), it is accepted on every version in play, and delegation is what a scope holding a process tree
+# wants regardless. Keep both properties: a newer systemd honours the explicit one, 249 needs it absent.
 MEM="${CERTORA_MEM:-40G}"
 if [ "$MEM" != "off" ]; then
-  LIMIT=(systemd-run --user --scope --quiet -p "MemoryMax=$MEM" -p MemorySwapMax=0 -p OOMPolicy=continue -- "${LIMIT[@]}")
+  LIMIT=(systemd-run --user --scope --quiet -p "MemoryMax=$MEM" -p MemorySwapMax=0 -p Delegate=yes -- "${LIMIT[@]}")
 fi
 
 cd "$ROOT"

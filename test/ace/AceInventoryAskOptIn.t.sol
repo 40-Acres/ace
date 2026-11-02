@@ -290,7 +290,7 @@ contract AceInventoryAskProtocolDefaultTest is WarpClock {
         MockERC20 usdc = new MockERC20("USD Coin", "USDC", 6);
         MockERC20 item = new MockERC20("Item", "ITEM", 18);
         PositionManager pm = new PositionManager(vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1));
-        Ace ace = new Ace(address(0x7EA5), address(pm), PocDeployConfig.PUSH_GAS);
+        Ace ace = new Ace(address(0x7EA5), address(pm), PocDeployConfig.PUSH_GAS, AceFixtures.POLICY_GAS);
         AceReader read = new AceReader(address(ace));
 
         MarketParams memory p;
@@ -301,7 +301,7 @@ contract AceInventoryAskProtocolDefaultTest is WarpClock {
         p.baseBps = 40;
         p.minTenor = 7 days;
         p.maxTenor = 30 days;
-        p.minDebt = 10e6;
+        p.minPrincipal = 10e6;
         p.lender = lender;
         bytes32 id = ace.createMarket(p);
         assertFalse(ace.idToMarketParams(id).inventoryAsk, "an unset flag stores as off");

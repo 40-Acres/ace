@@ -122,7 +122,7 @@ contract CuratorVaultLastOutUnderAFeeTest is CuratorVaultExitsRig {
         VaultConfig memory c = _cfg(BPS);
         c.curator = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
         vm.expectRevert(AceVault.ZeroCurator.selector);
-        new CuratorVault(c, RIG_MIN_DEBT, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, "Self", "cSELF");
+        new CuratorVault(c, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, "Self", "cSELF");
     }
 
     /// @notice THE CURATOR'S OWN FREE SHARES KEEP ITS CLAIM FROM RELEASING: as the last requester it is paid net, and `maxClaim` takes all of exitable.

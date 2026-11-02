@@ -16,7 +16,6 @@ import {AceReader} from "../utils/AceReader.sol";
 import {Loan, Storage} from "../../src/ace/hub/Types.sol";
 import {BelowCoverageLine} from "../../src/ace/hub/Borrower.sol";
 import {Constants} from "../../src/ace/hub/Constants.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
 
 /// @dev The two-word read, spelled here so the settled-count rows decode it without trusting the hub's own type.
 interface IUnresolvedPair {
@@ -68,7 +67,7 @@ contract AceUnsoldPotsTest is WarpClock {
     // ---- fixtures ----
 
     /// @dev A market of `cd`-decimal collateral, its record's draw cap at `capWad` (a human price; 1e18 is par).
-    function _market(MockERC20 quote, uint8 cd, address who, bool ask, uint256 capWad, uint256 minDebt) internal returns (Mkt memory m) {
+    function _market(MockERC20 quote, uint8 cd, address who, bool ask, uint256 capWad, uint256 minPrincipal) internal returns (Mkt memory m) {
         m.quote = quote;
         m.coll = new MockERC20("Collateral", "COLL", cd);
         m.lender = who;
@@ -81,7 +80,7 @@ contract AceUnsoldPotsTest is WarpClock {
         p.lender = who;
         p.inventoryAsk = ask;
         p.fillFeeBps = ask ? FEE_BPS : 0;
-        p.minDebt = minDebt;
+        p.minPrincipal = minPrincipal;
         m.id = ace.createMarket(p);
     }
 
@@ -229,8 +228,8 @@ contract AceUnsoldPotsTest is WarpClock {
         assertEq(_count(m), 0, "and the count cleared with it");
     }
 
-    /// @notice An expiry settlement counts too, through either expiry door.
-    function test_Count_AnExpirySettlementCountsThroughForceCloseAndSettleExpired() public {
+    /// @notice An expiry settlement counts too, through the one expiry door, once per settled loan.
+    function test_Count_AnExpirySettlementCountsThroughForceClose() public {
         Mkt memory m = _eighteen();
         uint256 a = _loan(m);
         _warpTo(read.loan(a).expiry + 1);
@@ -242,9 +241,9 @@ contract AceUnsoldPotsTest is WarpClock {
         uint256 b = _loan(m);
         _warpTo(read.loan(b).expiry + 1 days);
         vm.prank(keeper);
-        ace.settleExpired(b);
-        assertGt(read.invPotOf(m.id, b), 0, "PREMISE: settleExpired left a pot");
-        assertEq(_count(m), 2, "and settleExpired's counts beside it");
+        ace.forceClose(b);
+        assertGt(read.invPotOf(m.id, b), 0, "PREMISE: the second forceClose left a pot");
+        assertEq(_count(m), 2, "and it counts beside the first");
     }
 
     /// @notice A partial buy leaves the pot unsold, so the count holds; only the buy that empties it clears it.
@@ -452,8 +451,8 @@ contract AceUnsoldPotsTest is WarpClock {
         assertEq(s, 2, "and both pots in this lender's USDC pair stay counted as settled");
     }
 
-    /// @notice Both expiry doors count a settled pot, as `finalize` does.
-    function test_Settled_EachExpiryDoorCountsOne() public {
+    /// @notice The expiry door counts a settled pot per settlement, as `finalize` does.
+    function test_Settled_EachExpirySettlementCountsOne() public {
         Mkt memory m = _eighteen();
         uint256 a = _loan(m);
         _warpTo(read.loan(a).expiry + 1);
@@ -465,9 +464,9 @@ contract AceUnsoldPotsTest is WarpClock {
         uint256 b = _loan(m);
         _warpTo(read.loan(b).expiry + 1 days);
         vm.prank(keeper);
-        ace.settleExpired(b);
+        ace.forceClose(b);
         (, s) = _pair(m);
-        assertEq(s, 2, "settleExpired counts beside it");
+        assertEq(s, 2, "a second forceClose counts beside it");
     }
 
     /// @notice What leaves no new pot leaves the settled count alone: a clean close, a partial buy, a buy on an empty pot.
@@ -540,32 +539,31 @@ contract AceUnsoldPotsTest is WarpClock {
     function test_Settled_ASettlementThatLeavesNoPotMovesNeitherWord() public {
         Mkt memory m = _eighteen();
         uint256 a = _loan(m);
-        uint256 paid = _loan(m);
-        uint256 unpaid = _loan(m);
+        uint256 first = _loan(m);
+        uint256 second = _loan(m);
         _finalize(m, a);
         (uint256 u0, uint256 s0) = _pair(m);
         assertEq(u0, 1, "PREMISE: one real pot unsold");
         assertEq(s0, 1, "PREMISE: and settled, so a stray raise has a word to move");
 
-        _forgeZeroLot(paid);
-        _forgeZeroLot(unpaid);
-        assertEq(read.loan(paid).collateralUnits + read.loan(unpaid).collateralUnits, 0, "PREMISE: the forged word is each loan's lot");
-        assertEq(read.claimOf(m.id, paid) + read.claimOf(m.id, unpaid), 2 * PRINCIPAL, "PREMISE: and both claims are still live");
+        _forgeZeroLot(first);
+        _forgeZeroLot(second);
+        assertEq(read.loan(first).collateralUnits + read.loan(second).collateralUnits, 0, "PREMISE: the forged word is each loan's lot");
+        assertEq(read.claimOf(m.id, first) + read.claimOf(m.id, second), 2 * PRINCIPAL, "PREMISE: and both claims are still live");
 
-        Loan memory l = read.loan(unpaid);
-        _warpTo(uint256(l.expiry) + MarketInit.autoRefinanceWindow(l.tenor));
+        _warpAtLeastTo(uint256(read.loan(second).expiry));
         vm.prank(keeper);
-        ace.forceClose(paid);
-        _assertSettledBare(m, paid);
+        ace.forceClose(first);
+        _assertSettledBare(m, first);
         (uint256 u1, uint256 s1) = _pair(m);
-        assertEq(u1, u0, "the paid door left no pot, so nothing is unsold");
+        assertEq(u1, u0, "the bare settlement left no pot, so nothing is unsold");
         assertEq(s1, s0, "and nothing is settled: the word counts pots, not settlements");
 
         vm.prank(keeper);
-        ace.settleExpired(unpaid);
-        _assertSettledBare(m, unpaid);
+        ace.forceClose(second);
+        _assertSettledBare(m, second);
         (u1, s1) = _pair(m);
-        assertEq(u1, u0, "nor did the unpaid door");
+        assertEq(u1, u0, "nor did a second one");
         assertEq(s1, s0, "so the settled count still reads the one real pot");
     }
 
@@ -595,7 +593,7 @@ contract AceUnsoldPotsTest is WarpClock {
         uint256 k = bound(kSeed, Constants.MIN_COVERAGE_WAD, Constants.MAX_COVERAGE_WAD);
         uint16 bounty = uint16(bound(bountySeed, 0, Constants.MAX_SETTLE_BOUNTY_BPS));
         uint8 cd = shapeSeed % 3 == 0 ? 0 : (shapeSeed % 3 == 1 ? 6 : 18);
-        uint256 door = (shapeSeed / 3) % 3; // 0 finalize, 1 forceClose, 2 settleExpired
+        uint256 door = (shapeSeed / 3) % 2; // 0 finalize, 1 forceClose
         Mkt memory m = _marketKB(cd, k, bounty);
         uint256 principal = bound(principalSeed, 10e6, SEED);
         uint256 scale = read.marketState(m.id).unitScale;
@@ -616,18 +614,14 @@ contract AceUnsoldPotsTest is WarpClock {
         vm.stopPrank();
 
         Loan memory l = read.loan(id);
-        if (door == 0) {
-            m.record.setBelow(true);
-        } else {
-            _warpTo(uint256(l.expiry) + (door == 2 ? MarketInit.autoRefinanceWindow(l.tenor) : 0));
-        }
+        if (door == 0) m.record.setBelow(true);
+        else _warpTo(uint256(l.expiry));
         vm.prank(keeper);
         if (door == 0) ace.finalize(id);
-        else if (door == 1) ace.forceClose(id);
-        else ace.settleExpired(id);
+        else ace.forceClose(id);
 
         uint256 need = FullMath.mulDivRoundingUp(principal, scale, price);
-        uint256 sliver = door == 2 ? 0 : FullMath.mulDiv(principal * bounty, scale, 10000 * price);
+        uint256 sliver = FullMath.mulDiv(principal * bounty, scale, 10000 * price);
         assertEq(read.unitsOwedOf(id, keeper), sliver, "PREMISE: the keeper took exactly the sliver this door pays");
         assertGe(need, 1, "PREMISE: a live claim needs at least one unit");
         assertEq(read.invPotOf(m.id, id), need, "the pot is the claims' whole need, so it is never empty");

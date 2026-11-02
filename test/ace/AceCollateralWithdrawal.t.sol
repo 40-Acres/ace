@@ -23,7 +23,7 @@ import {AceReader} from "../utils/AceReader.sol";
 /// @notice ONE leg is frozen and one is live: the funding floor is written once at the draw, the cap is re-read.
 /// @notice So the composite tracks the record downward but never rises above the floor the draw pinned.
 /// @dev `open` enforces the ADMISSIBILITY predicate only, so the withdrawal line sits one atom above it.
-/// @dev The asymmetry is deliberate: `minDebt` floors a principal at open and nothing floors debt afterwards.
+/// @dev The asymmetry is deliberate: `minPrincipal` floors a principal at open and nothing floors debt afterwards.
 /// @dev The verb exists because a live loan draws once (`AlreadyFunded`): without it the surplus needs a close-and-reopen.
 /// @dev THE RECORD IS REAL, NOT MOCKED: `MockPersistenceRecord.minPriceOverWindow` ignores its window argument.
 /// @dev Against that mock every draw-cap assertion is VACUOUS, so this fixture writes real observations.

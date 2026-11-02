@@ -8,7 +8,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {MarketParams, MarketState, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {MarketPairMismatch, NotBorrower, QuoteMismatch} from "../../src/ace/hub/Borrower.sol";
-import {BelowMinDebt, TenorOutOfRange, TriggerAboveFloor} from "../../src/ace/hub/Borrower.sol";
+import {BelowMinPrincipal, TenorOutOfRange, TriggerAboveFloor} from "../../src/ace/hub/Borrower.sol";
 import {InsufficientCash} from "../../src/ace/hub/Borrower.sol";
 import {NoMarket} from "../../src/ace/hub/Ace.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
@@ -24,12 +24,11 @@ import {AceReader} from "../utils/AceReader.sol";
 import {IAceRefinance, MigrateArgs} from "../utils/RebateHarness.sol";
 
 /// @notice A borrower contract that tries to continue its own loan from inside its deleverage callback.
-/// @dev Both verbs are probed: `refinance` pins today's guard, `refinanceTo` pins the new entry's.
+/// @dev `refinanceTo` is probed, the one continuation into a new loan; the plain `refinance` it once shared the slot with is deleted.
 /// @dev The point is the SHARED transient slot, which relocating the body into `Borrower` must not move.
 contract ReentrantMigrator is IAceDeleverageCallback {
     Ace internal immutable ACE;
     MigrateArgs internal args;
-    bool internal useDestination;
 
     constructor(Ace ace) {
         ACE = ace;
@@ -42,9 +41,8 @@ contract ReentrantMigrator is IAceDeleverageCallback {
         return ACE.open(mid, units, principal, tenor, address(this), OpenBounds(0, 0, 0));
     }
 
-    function arm(MigrateArgs memory m, bool destination) external {
+    function arm(MigrateArgs memory m) external {
         args = m;
-        useDestination = destination;
     }
 
     function crank(uint256 id) external {
@@ -52,12 +50,7 @@ contract ReentrantMigrator is IAceDeleverageCallback {
     }
 
     function onAceDeleverage(uint256, uint256, bytes calldata) external {
-        MigrateArgs memory m = args;
-        if (useDestination) {
-            IAceRefinance(address(ACE)).refinanceTo(m);
-        } else {
-            IAceRefinance(address(ACE)).refinance(m.id, m.newPrincipal, m.newTenor, m.bnd);
-        }
+        IAceRefinance(address(ACE)).refinanceTo(args);
     }
 }
 
@@ -502,14 +495,14 @@ contract AceCrossMarketRefinanceTest is WarpClock {
     /// @dev The gates that matter are on the RESULTING state in the destination, never on the origin.
     function test_CrossMarket_RefusesBelowTheDestinationsMinDebt() public {
         MarketParams memory pd = _paramsB();
-        pd.minDebt = 100_000e6; // P is a legal loan in A and dust here; also what makes D a distinct id
+        pd.minPrincipal = 100_000e6; // P is a legal loan in A and dust here; also what makes D a distinct id
         bytes32 idD = ace.createMarket(pd);
         _deposit(idD, TOP_CASH);
 
         uint256 oldId = _open(idA, P, TEN30);
         _warpTo(t0 + 15 days);
 
-        _refuses(borrower, _args(oldId, idD, P, TEN30), BelowMinDebt.selector, "B's own dust floor binds");
+        _refuses(borrower, _args(oldId, idD, P, TEN30), BelowMinPrincipal.selector, "B's own dust floor binds");
     }
 
     /// @notice Plan test 12: a tenor legal in A but off B's grid is refused by B's range check.
@@ -644,55 +637,13 @@ contract AceCrossMarketRefinanceTest is WarpClock {
         _refuses(address(this), _args(oldId, idB, P, TEN30), NotBorrower.selector, "and nor may anyone else");
     }
 
-    /// @notice Plan test 17: `refinanceTo` with `dst == src` IS `refinance`, outcome for outcome.
-    /// @dev Both legs run from the SAME state via a snapshot: a second draw walks a ladder the first
-    /// @dev already thinned, so running them back to back would not be a control at all.
-    function test_CrossMarket_MigratingToTheSourceMarket_EqualsARefinance() public {
-        uint256 oldId = _open(idA, P, TEN30);
-        _warpTo(t0 + 15 days);
-        uint256 root = vm.snapshotState();
-
-        bytes[] memory calls = new bytes[](2);
-        calls[0] = abi.encodeCall(Ace.repay, (oldId, _gap(_args(oldId, idA, P, TEN30))));
-        calls[1] = abi.encodeCall(Ace.refinance, (oldId, P, TEN30, OFF));
-        vm.prank(borrower);
-        uint256 refiId = abi.decode(ace.multicall(calls)[1], (uint256));
-        Snap memory viaRefinance = _snap(oldId);
-        uint256 refiFloor = read.fundingFloor(idA, refiId);
-        uint256 refiDebt = read.debtOf(refiId);
-        uint256 refiEscrow = read.feeEscrowOf(refiId);
-
-        vm.revertToState(root);
-        uint256 migId = _migrate(borrower, _args(oldId, idA, P, TEN30));
-
-        assertEq(migId, refiId, "the same fresh id");
-        assertEq(read.debtOf(migId), refiDebt, "the same debt");
-        assertEq(read.fundingFloor(idA, migId), refiFloor, "the same funding floor");
-        assertEq(read.feeEscrowOf(migId), refiEscrow, "the same withheld fee");
-        _assertSnapEq(viaRefinance, _snap(oldId), "and the same market and old-loan state");
-    }
-
     // ============ 18. the shared guard ============
 
-    /// @notice Plan test 18: today's `refinance` is unreachable from inside an ACE callback.
-    /// @notice This leg is GREEN and stays green: it is the regression guard on the relocation.
-    /// @dev Relocating the body into `Borrower` turns a private call into a DELEGATECALL library jump.
-    /// @dev The guard slot is the hub's either way, so the refusal must not move with the code.
-    function test_CrossMarket_RefinanceFromInsideACallback_RefusedByTheSharedSlot() public {
-        (ReentrantMigrator attacker, uint256 loanId) = _armAttacker();
-        attacker.arm(_args(loanId, idB, P, TEN7), false);
-
-        vm.expectRevert(GUARD_TRIP);
-        attacker.crank(loanId);
-
-        assertFalse(read.loan(loanId).closedAt != 0, "and the loan is exactly where it was");
-    }
-
-    /// @notice Plan test 18, the new entry: `refinanceTo` must answer to the SAME one transient slot.
+    /// @notice Plan test 18: `refinanceTo` must answer to the SAME one transient slot as every hub verb.
     /// @dev A callback that could migrate would see A's melt half-applied, which is the whole hazard.
     function test_CrossMarket_RefinanceToFromInsideACallback_RefusedByTheSharedSlot() public {
         (ReentrantMigrator attacker, uint256 loanId) = _armAttacker();
-        attacker.arm(_args(loanId, idA, P, TEN7), true);
+        attacker.arm(_args(loanId, idA, P, TEN7));
 
         vm.expectRevert(GUARD_TRIP);
         attacker.crank(loanId);
@@ -793,8 +744,8 @@ contract AceCrossMarketRefinanceTest is WarpClock {
     function _gasAt(uint256 n) private {
         MarketParams memory pa = _paramsA();
         MarketParams memory pb = _paramsB();
-        pa.minDebt = 10e6 + n; // inert; it only makes each measurement point a distinct market id
-        pb.minDebt = 10e6 + n;
+        pa.minPrincipal = 10e6 + n; // inert; it only makes each measurement point a distinct market id
+        pb.minPrincipal = 10e6 + n;
         bytes32 srcId = ace.createMarket(pa);
         bytes32 dstId = ace.createMarket(pb);
 

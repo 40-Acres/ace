@@ -58,7 +58,7 @@ contract AceZeroFloorGuardsTest is Test {
     }
 
     /// @notice And the sliver is clamped to the position: a bounty wider than the collateral takes the lot.
-    /// @dev The clamp is what keeps the fold total from the OTHER side, at a floor so low the bounty explodes.
+    /// @dev The clamp is what keeps settlement total from the OTHER side, at a floor so low the bounty explodes.
     function test_SliverUnits_ClampsToTheAvailableUnits() public {
         M.claim[ID] = DEBT;
         assertEq(LoanAccounting.sliverUnits(B, M, _cfg(1), ID, UNITS), UNITS, "the sliver never exceeds what the loan holds");

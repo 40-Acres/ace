@@ -5,7 +5,7 @@ import {IPersistenceRecord} from "../../src/interfaces/IPersistenceRecord.sol";
 
 /// @notice A persistence record that can be made to REVERT on `minPriceOverWindow` mid-test.
 /// @dev Healthy at genesis (the frame and span rails read it), then `setRevoked(true)` sickens it.
-/// @dev Exists to pin the must-execute backstop: a sick record routes an armed loan to SETTLEMENT.
+/// @dev Exists to pin fail-closed reads: a sick record refuses what asks it, and `forceClose` asks it nothing.
 contract MockRevertingRecord is IPersistenceRecord {
     address public QUOTE;
     address public COLLATERAL;

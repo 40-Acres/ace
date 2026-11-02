@@ -4,7 +4,7 @@ pragma solidity 0.8.36;
 import {Test} from "forge-std/Test.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
-import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
+import {MarketParams, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {DrawBelowDebt, PayoutBelowMin} from "../../src/ace/hub/Borrower.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
@@ -96,7 +96,7 @@ contract AceDrawPathDocumentedContractsTest is WarpClock {
         uint256 before = usdc.balanceOf(borrower);
         vm.prank(borrower);
         vm.expectRevert(DrawBelowDebt.selector);
-        fin.refinance(oldId, P, TEN30, OpenBounds(1, 0, 0));
+        fin.refinanceTo(MigrateArgs(oldId, id, P, TEN30, OpenBounds(1, 0, 0), 0, address(0)));
         assertEq(usdc.balanceOf(borrower), before, "and nothing was pulled from the borrower");
     }
 
@@ -116,13 +116,13 @@ contract AceDrawPathDocumentedContractsTest is WarpClock {
 
         vm.prank(borrower);
         vm.expectRevert(PayoutBelowMin.selector);
-        fin.refinance(oldId, pNew, TEN30, OpenBounds(out + 1, 0, 0));
+        fin.refinanceTo(MigrateArgs(oldId, id, pNew, TEN30, OpenBounds(out + 1, 0, 0), 0, address(0)));
 
         assertEq(usdc.balanceOf(borrower), before, "a refused refinance moves nothing");
         assertEq(read.debtOf(oldId), P, "and leaves the old loan whole");
 
         vm.prank(borrower);
-        uint256 newId = fin.refinance(oldId, pNew, TEN30, OpenBounds(out, 0, 0));
+        uint256 newId = fin.refinanceTo(MigrateArgs(oldId, id, pNew, TEN30, OpenBounds(out, 0, 0), 0, address(0)));
         assertTrue(read.loan(oldId).closedAt != 0, "at the floor exactly the same refinance is admitted");
         assertFalse(read.loan(newId).closedAt != 0, "and its successor is live");
     }
@@ -137,7 +137,7 @@ contract AceDrawPathDocumentedContractsTest is WarpClock {
 
         bytes[] memory calls = new bytes[](2);
         calls[0] = abi.encodeCall(Ace.repay, (oldId, TOPUP_AT15));
-        calls[1] = abi.encodeCall(Ace.refinance, (oldId, P, TEN30, OpenBounds(0, 0, 0)));
+        calls[1] = abi.encodeCall(Ace.refinanceTo, (MigrateArgs(oldId, id, P, TEN30, OpenBounds(0, 0, 0), 0, address(0))));
         vm.prank(borrower);
         uint256 newId = abi.decode(ace.multicall(calls)[1], (uint256));
 
@@ -165,7 +165,7 @@ contract AceDrawPathDocumentedContractsTest is WarpClock {
     /// @dev Every wei repaid must retire a wei of claim, or the borrower's payment and the lender's book diverge.
     function testFuzz_PartialRepay_RetiresExactlyWhatWasPaid(uint256 amount) public {
         uint256 loanId = _open(80_000e6, TEN30);
-        amount = bound(amount, 1, 80_000e6 - ace.idToMarketParams(id).minDebt); // a repay to dust is refused
+        amount = bound(amount, 1, 80_000e6 - ace.idToMarketParams(id).minPrincipal); // a repay to dust is refused
         uint256 before = read.claimOf(id, loanId);
         vm.prank(borrower);
         ace.repay(loanId, amount);

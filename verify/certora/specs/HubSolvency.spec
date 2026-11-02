@@ -32,7 +32,7 @@ using DummyERC20 as quoteToken;
 
 methods {
     function FullMath.mulDiv(uint256 a, uint256 b, uint256 d) internal returns (uint256) => fmDown(a, b, d);
-    function FullMath.mulDivRoundingUp(uint256 a, uint256 b, uint256 d) internal returns (uint256) => fmUp(a, b, d);
+    // NO SUMMARY for mulDivRoundingUp: via-IR inlines it, so one cannot bind and requesting it fails the run. Its body runs on the mulDiv above; see HubLoans.spec.
     function Math.mulDiv(uint256 x, uint256 y, uint256 d) internal returns (uint256) => ozPlain(x, y, d);
     function Math.mulDiv(uint256 x, uint256 y, uint256 d, Math.Rounding r) internal returns (uint256) => ozRounded(x, y, d, r);
     function Mul512.gt512(uint256 a, uint256 b, uint256 c, uint256 d) internal returns (bool) => gt512Ghost(a, b, c, d);
@@ -75,10 +75,14 @@ methods {
     function idCount() external returns (uint256) envfree; // AceHarness, through Storage.book()
     function feeEscrowOfLoan(uint256) external returns (uint256) envfree; // AceHarness
     function orderMakerOf(uint256) external returns (address) envfree; // AceHarness
+    function loanMarket(uint256) external returns (bytes32) envfree;
+    function marketQuoteOf(bytes32) external returns (address) envfree; // AceHarness
+    function loanDebtOf(uint256) external returns (uint256) envfree; // AceHarness
+    function loanClaimOf(uint256) external returns (uint256) envfree; // AceHarness: read in the loan's own market
+    function closedAtOf(uint256) external returns (uint64) envfree; // AceHarness
 }
 
 persistent ghost fmDown(uint256, uint256, uint256) returns uint256;
-persistent ghost fmUp(uint256, uint256, uint256) returns uint256;
 persistent ghost ozPlain(uint256, uint256, uint256) returns uint256;
 persistent ghost ozFloor(uint256, uint256, uint256) returns uint256;
 persistent ghost ozCeil(uint256, uint256, uint256) returns uint256;
@@ -196,10 +200,19 @@ definition hubVerb(method f) returns bool =
 // A FRESH ID CARRIES NO ESCROW: an id above the counter has never been issued, so nothing has written its escrow.
 // Without it the prover opens a loan onto an id holding a stale escrow, and the open's write "unbooks" quote.
 // (The freshness half O11's monotonic counter leaves open, proven here for the one field O1 books per loan.)
+// An extension adds escrow on the loan it names, through that loan's market cache; a fresh id has no market and market
+// zero is never created, so its cache refuses. Both facts are PROVEN in HubLoans.spec (`aFreshIdHasNeverClosed`,
+// `marketZeroIsNeverCreated`), which this spec cannot import (its methods block is this one's), so the preserved block
+// assumes them.
 invariant aFreshIdCarriesNoEscrow(uint256 id)
     id > idCount() => feeEscrowOfLoan(id) == 0
     filtered { f -> hubVerb(f) }
-    { preserved with (env e) { require e.msg.sender != currentContract; } }
+    {
+        preserved with (env e) {
+            require e.msg.sender != currentContract;
+            require (id > idCount() => loanMarket(id) == to_bytes32(0)) && marketQuoteOf(to_bytes32(0)) == 0;
+        }
+    }
 
 // NO ORDER IS THE HUB'S: `postOrder` takes its maker from `msg.sender`, and the hub never posts on its own behalf.
 // Without it the prover fills an order the hub "made", the open skips paying a hub payee, and quote is unbooked.
@@ -209,19 +222,46 @@ invariant noOrderIsTheHubs(uint256 id)
     filtered { f -> hubVerb(f) && f.selector != sig:pushToken(address,address,uint256).selector }
     { preserved with (env e) { require e.msg.sender != currentContract; } }
 
-// O1, CLAIM 1: no hub verb creates or destroys unbooked quote.
-// A FILL is its own rule below, since the order it fills is an argument the parametric form cannot name.
-rule theFloatNeverMoves(env e, method f, calldataarg args)
-    filtered { f -> hubVerb(f) && f.selector != sig:fillOrder(uint256,uint256,uint256).selector }
-{
+// THE MIGRATION NETS THE RETIRING DEBT AGAINST WHAT IT RETIRES. `_net` reads the debt word, while `_retire` melts the
+// CLAIM, so the float stands still only while that loan's debt IS its claim: O10, proven in HubClaims.spec and assumed
+// here of the loan the migration retires. `refinanceTo` is the one migration, so it is its own rule below, where the
+// premise can name the loan; the parametric rule takes every other verb, `forceClose` and both extend doors included.
+definition migrationVerb(method f) returns bool = f.selector == sig:refinanceTo(AceHarness.MigrateArgs).selector;
+
+// O10 of a loan a migration may retire, PROVEN IN HubClaims.spec (`aLoanCarriesItsDebtAsItsClaim`); a closed loan
+// refuses every migration, so only the live leg is assumed
+function retiresAtItsClaim(uint256 id) {
+    require closedAtOf(id) == 0 => loanDebtOf(id) == loanClaimOf(id);
+}
+
+function floatPremises(env e) {
     require e.msg.sender != currentContract && treasuryOf() != currentContract;
-    // the ids a verb can issue: one per open, and the batch refinance is unrolled twice (loop_iter 2)
+    // the id a verb can issue: one per open, a fill and a refinance alike
     requireInvariant aFreshIdCarriesNoEscrow(require_uint256(idCount() + 1));
-    requireInvariant aFreshIdCarriesNoEscrow(require_uint256(idCount() + 2));
+}
+
+// O1, CLAIM 1: no hub verb creates or destroys unbooked quote.
+// A FILL is its own rule below, since the order it fills is an argument the parametric form cannot name; so is each
+// migration, whose premise names the loan it retires.
+rule theFloatNeverMoves(env e, method f, calldataarg args)
+    filtered { f -> hubVerb(f) && f.selector != sig:fillOrder(uint256,uint256,uint256).selector && !migrationVerb(f) }
+{
+    floatPremises(e);
     mathint float0 = quoteToken.balanceOf(currentContract) - booked[quoteToken];
     f(e, args);
     assert quoteToken.balanceOf(currentContract) - booked[quoteToken] == float0,
         "a hub verb moved quote it did not book, or booked quote it did not move";
+}
+
+// ---- O1, CLAIM 1, on the migration: O10 of the loan it retires is the premise ----
+
+// into its own market or another, a re-term, a re-size or a move: `refinance`, its own market as `dst`, is deleted into it
+rule theFloatNeverMovesOnARefinanceTo(env e, AceHarness.MigrateArgs m) {
+    floatPremises(e);
+    retiresAtItsClaim(m.id);
+    mathint float0 = quoteToken.balanceOf(currentContract) - booked[quoteToken];
+    refinanceTo(e, m);
+    assert quoteToken.balanceOf(currentContract) - booked[quoteToken] == float0, "a refinance moved unbooked quote";
 }
 
 // ANTI-VACUITY for the fill rule below: under its exact requirements a fill can complete and pay its maker.
@@ -267,7 +307,7 @@ rule aCloseCanPushTheLender(env e, uint256 id, address lender) {
     require lender != currentContract && e.msg.sender != currentContract;
     mathint owed0 = lenderOwed(lender, quoteToken);
     mathint bal0 = quoteToken.balanceOf(lender);
-    settleExpired(e, id);
+    forceClose(e, id);
     satisfy lenderOwed(lender, quoteToken) < owed0 && quoteToken.balanceOf(lender) > bal0;
 }
 
@@ -279,10 +319,15 @@ rule aWithdrawPaysTheQuote(env e, bytes32 id, uint256 assets, address to, uint25
 }
 
 // O1, CLAIM 2: the hub always holds at least what it has booked
+// The migration names the loan it retires, so its preserved block can assume that loan's O10 (see `migrationVerb`).
 invariant theHubIsSolvent()
     to_mathint(quoteToken.balanceOf(currentContract)) >= booked[quoteToken]
     filtered { f -> hubVerb(f) }
     {
         preserved with (env e) { require e.msg.sender != currentContract && treasuryOf() != currentContract; }
+        preserved refinanceTo(AceHarness.MigrateArgs m) with (env e) {
+            require e.msg.sender != currentContract && treasuryOf() != currentContract;
+            retiresAtItsClaim(m.id);
+        }
         preserved constructor() { require quoteToken.balanceOf(currentContract) >= 0; }
     }

@@ -23,6 +23,12 @@ library Constants {
     uint256 internal constant MAX_PUSH_GAS = 250_000; // its ceiling: bounds a hostile quote's burn per push, and the limit every close carries
     uint256 internal constant PUSH_TAIL = 40_000; // the lender push's frame past its budget, 2x measured: a from-zero restore is 20k of it
     uint256 internal constant SWEEP_TAIL = 47_000; // the sweep's frame past its budget: its stamp, counter, restore and event, 2x measured
+    uint256 internal constant POLICY_TAIL = 300; // the roll-policy ask's gas between its floor check and its STATICCALL, warm target, 2x measured
+
+    // ---- the roll-policy ask: a fixed budget per deploy, railed here ----
+
+    uint256 internal constant MIN_POLICY_GAS = 50_000; // the budget's floor: a policy reading a record and two params needs well under it
+    uint256 internal constant MAX_POLICY_GAS = 500_000; // its ceiling: on a chain charging the whole limit, every extend and reuse ask carries it
 
     // ---- genesis rails: the universal envelope, enforced by MarketInit ----
 
@@ -38,14 +44,8 @@ library Constants {
     uint256 internal constant MAX_FEE_SHARE_BPS = 2500; // most of a principal an origination fee may consume, at any admissible term
     uint256 internal constant MIN_DELEVERAGE_BAND_BPS = 3000; // solvency floor: below it a fast decline crosses the corridor between prints
 
-    uint64 internal constant AUTO_REFINANCE_WINDOW = 2 hours; // keeper-latency budget, not a risk dial
-    uint64 internal constant AUTO_REFINANCE_WINDOW_DIVISOR = 5; // the leg that binds on minute-scale tenors
-    uint64 internal constant AUTO_ROLL_HOME_SHARE_DIVISOR = 2; // window / this is the stranger-open tail; the leading rest is the incumbent's alone
-
     uint64 internal constant INVENTORY_HOLD = 1 hours; // where a market has the ask, settled inventory rests this long before it opens
     uint64 internal constant INVENTORY_HOLD_DIVISOR = 2; // the leg that binds on minute-scale tenors
 
-    uint64 internal constant MIN_TENOR_FLOOR = AUTO_REFINANCE_WINDOW_DIVISOR * AUTO_ROLL_HOME_SHARE_DIVISOR > INVENTORY_HOLD_DIVISOR
-        ? AUTO_REFINANCE_WINDOW_DIVISOR * AUTO_ROLL_HOME_SHARE_DIVISOR
-        : INVENTORY_HOLD_DIVISOR; // the smallest minTenor at which no tenor-derived window or hold is zero
+    uint64 internal constant MIN_TENOR_FLOOR = 10; // ruled, not derived: at least the hold's divisor, so no tenor-derived hold is zero
 }

@@ -5,7 +5,7 @@ import {Test, stdError} from "forge-std/Test.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
-import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
+import {MarketParams, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {DeleverageDisabled, Distressed, LoanClosed, NotInBand} from "../../src/ace/hub/Deleverage.sol";
 import {BelowCallerFloor} from "../../src/ace/hub/Ace.sol";
 import {GUARD_TRIP} from "../utils/GuardTrip.sol";
@@ -63,7 +63,7 @@ contract ReentrantKeeper is MockDeleverageKeeper {
     /// @dev A payment leg here would give a broken guard a second way to fail and blur which one fired.
     function onAceDeleverage(uint256, uint256, bytes calldata) external override {
         if (mode == Mode.Deleverage) ACE.deleverage(target, 0, "");
-        else if (mode == Mode.Refinance) ACE.refinance(target, 1, 0, OpenBounds(0, 0, 0));
+        else if (mode == Mode.Refinance) ACE.refinanceTo(MigrateArgs(target, ACE.loanMarket(target), 1, 0, OpenBounds(0, 0, 0), 0, address(0)));
         else if (mode == Mode.Repay) ACE.repay(target, 1);
         else if (mode == Mode.WithdrawCollateral) ACE.withdrawCollateral(target, 1, address(this));
     }
@@ -817,7 +817,7 @@ contract AceDeleverageTest is WarpClock {
 
         uint64 tenor = ace.idToMarketParams(id).minTenor; // HOISTED: a call in the argument list eats the prank
         vm.prank(borrower);
-        uint256 newId = ace.refinance(loanId, debt0 + 100e6, tenor, OpenBounds(0, 0, 0));
+        uint256 newId = ace.refinanceTo(MigrateArgs(loanId, id, debt0 + 100e6, tenor, OpenBounds(0, 0, 0), 0, address(0)));
 
         assertTrue(read.loan(loanId).closedAt != 0, "the old loan was retired by the roll");
         _assertClaimTracksDebt(loanId, "and the melt took its claim to zero with its debt");

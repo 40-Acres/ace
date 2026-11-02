@@ -132,11 +132,11 @@ contract AceMulticallTest is Test {
     /// @notice The premise of the row above: a leg AT the floor goes through where an empty one does not.
     /// @dev Without this row the change above reads as a cosmetic swap of one small amount for another.
     /// @dev Was `test_ADustLegPassesWhileTheFloorIsOff`, which sent one wei against a stored floor of zero.
-    /// @dev THE FLOOR IS `minDebt` ITSELF NOW. It was `ceil(minDebt / maxClaimTicks)`, because a draw could
+    /// @dev THE FLOOR IS `minPrincipal` ITSELF NOW. It was `ceil(minPrincipal / maxClaimTicks)`, because a draw could
     /// @dev reach the debt floor from many lots; one price collapses the two doors onto one number.
     function test_ALegAtTheFloorPasses() public {
         MarketParams memory p = ace.idToMarketParams(mid);
-        uint256 ticket = p.minDebt;
+        uint256 ticket = p.minPrincipal;
         assertEq(ticket, 10e6, "PREMISE: the market's own quantum, which floors BOTH doors");
 
         bytes[] memory calls = new bytes[](2);

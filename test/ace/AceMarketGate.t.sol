@@ -16,6 +16,7 @@ import {MockStakeVault} from "../mocks/MockStakeVault.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {ProtocolPolicy} from "../../src/config/Defaults.sol";
 import {AceReader} from "../utils/AceReader.sol";
+import {_extended} from "../utils/Extended.sol";
 
 /// @title AceMarketGate
 /// @notice The entry seam: a market's `borrower` is checked on the open doors and nowhere else.
@@ -213,10 +214,10 @@ contract AceMarketGateTest is WarpClock {
 
     /// @notice EXITS ARE NEVER CHECKED. A market naming one borrower is inert on every verb but the open doors.
     /// @dev The classification below is derived from Ace.sol's external mutating surface, not from memory.
-    /// @dev ENTRY (checked): both deposit doors; both open doors; refinanceTo (dst); refinanceByPolicy.
+    /// @dev ENTRY (checked): both deposit doors; both open doors; refinanceTo (dst); extend.
     /// @dev EXIT: withdraw, collect, redeemInKind, buyInventory, repay, finalize.
     /// @dev EXIT, continued: withdrawCollateral, forceClose, deleverage, sweeps, retitle.
-    /// @dev NEUTRAL: setAutoRefinance, setCreditOperator, createMarket.
+    /// @dev NEUTRAL: setRollPolicy, setCreditOperator, createMarket.
     /// @dev A verb added to Ace later must be classified into one of the lists above.
     /// @dev THE HOSTILE FLIP IS GONE: this used to arm a denying gate mid-test, which the write-once field
     /// @dev cannot express. What is left is the exit surface run by parties the market never named, which is
@@ -304,25 +305,27 @@ contract AceMarketGateTest is WarpClock {
         assertEq(reason, GateRefused.selector, "and names the refusal");
     }
 
-    // ---- the fold constraint ----
+    // ---- the extension constraint ----
 
-    /// @notice An armed loan on a market that names its borrower ROLLS at expiry: the home roll always admits.
-    /// @dev STRUCTURAL: an armed loan's holder is the market's named one, because only that holder arms and any title move disarms.
-    /// @dev So a HOME roll of an armed loan is never refused on admission; the title can change, the armed state cannot survive it.
-    /// @dev The refusable case is a ROUTED roll into a foreign destination, which `AceCrossMarketRoll` owns.
-    function test_ArmedLoan_OnAMarketNamingItsBorrower_Rolls() public {
+    /// @notice A loan on a market that names its borrower EXTENDS a second before expiry when that borrower pays, on its lender's yes.
+    /// @dev The borrower rule reads the title's CURRENT holder, so it admits the named holder here and refuses any other.
+    function test_TheNamedBorrower_ExtendsBeforeExpiry() public {
         bytes32 mid = _market(borrower);
         _deposit(alice, mid, T, TOP);
+        AceFixtures.installYesPolicy(ace, ace.idToMarketParams(mid).lender);
         uint256 loanId = _open(borrower, mid, P, TEN7);
-        vm.prank(borrower);
-        ace.setAutoRefinance(loanId, TEN7, 0, 0);
 
         uint256 before = read.loanCount();
-        _warpTo(uint256(read.loan(loanId).expiry) + 1);
-        vm.prank(mallory);
-        ace.forceClose(loanId);
+        uint64 x = read.loan(loanId).expiry;
+        _warpTo(uint256(x) - 1);
+        (,, uint256 fee) = ace.tryExtend(loanId, 0, "", borrower);
+        usdc.mint(borrower, fee);
+        vm.startPrank(borrower);
+        usdc.approve(address(ace), fee);
+        ace.extend(loanId, 0, "");
+        vm.stopPrank();
 
-        assertTrue(ace.isClosed(loanId), "the expired loan resolved");
-        assertEq(read.loanCount(), before + 1, "and the continuation opened the successor");
+        assertTrue(_extended(read, loanId, x), "the loan extended in place");
+        assertEq(read.loanCount(), before, "and no successor opened");
     }
 }

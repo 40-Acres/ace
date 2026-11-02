@@ -16,7 +16,7 @@ import {AceFixtures} from "../utils/AceFixtures.sol";
 /// @dev Every other suite caps out at five loans, so `take` never approaches 256.
 /// @dev Deleting the clamp leaves all of them green; this file exists to make that deletion fail.
 /// @dev The clamp is the OOG brake on an immutable hub's read surface: no second chance to add it.
-/// @dev Loans here are minDebt-sized: the ceiling is about list length, not loan size.
+/// @dev Loans here are minPrincipal-sized: the ceiling is about list length, not loan size.
 contract AceLoansPageClampTest is Test {
     /// @dev Mirrors `Lender.MAX_PAGE`, restated so a silent change to the constant fails here.
     uint256 internal constant MAX_PAGE = 256;
@@ -36,7 +36,7 @@ contract AceLoansPageClampTest is Test {
     address internal borrower = address(0xB0B);
 
     uint256 constant COLL = 200e18;
-    uint256 constant PRINCIPAL = 10e6; // the fixture's minDebt
+    uint256 constant PRINCIPAL = 10e6; // the fixture's minPrincipal
 
     uint256 internal T2; // ticks above this pair's par; assigned in setUp, since par is not a compile-time value
     uint256 internal T3; // the rung above T2

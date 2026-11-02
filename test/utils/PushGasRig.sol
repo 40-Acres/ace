@@ -40,7 +40,7 @@ library PushGasRig {
     function tryHub(address treasury, uint256 pushGas) internal returns (address hub, bytes memory err) {
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
         PositionManager pm = new PositionManager(predicted);
-        try new Ace(treasury, address(pm), pushGas) returns (Ace a) {
+        try new Ace(treasury, address(pm), pushGas, AceFixtures.POLICY_GAS) returns (Ace a) {
             hub = address(a);
         } catch (bytes memory e) {
             err = e;

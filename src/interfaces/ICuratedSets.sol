@@ -58,7 +58,7 @@ struct LendTerms {
     uint256 baseBps;
     uint64 minTenor;
     uint64 maxTenor;
-    uint256 minDebt;
+    uint256 minPrincipal;
     uint256 settleBountyBps;
     uint64 restUntil;
 }
@@ -129,6 +129,7 @@ interface ISetLenderHub {
     function isLiveLoan(uint256 id) external view returns (bool);
     function marketLoansLength(bytes32 id) external view returns (uint256);
     function marketLoans(bytes32 id, uint256 offset, uint256 limit) external view returns (uint256[] memory);
+    function setRollPolicy(address policy) external;
 }
 
 /// @title ICuratedSets

@@ -6,6 +6,7 @@ import {Ace} from "../../src/ace/hub/Ace.sol";
 import {MarketParams, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {InsufficientCash} from "../../src/ace/hub/Borrower.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
+import {RefinanceMath} from "../utils/RefinanceMath.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
@@ -161,7 +162,7 @@ contract AceDeletedChannelFenceTest is Test {
 
         MarketParams memory p = ace.idToMarketParams(id);
         /// @dev The smallest successor that clears `DrawBelowDebt`, so the only refusal left is the cash one.
-        uint256 np = LoanMath.principalForOwed(read.debtOf(loanId) - read.feeEscrowOf(loanId), p.minTenor, p.baseBps, p.minTenor);
+        uint256 np = RefinanceMath.principalForOwed(read.debtOf(loanId) - read.feeEscrowOf(loanId), p.minTenor, p.baseBps, p.minTenor);
         MigrateArgs memory m = MigrateArgs({
             id: loanId, dst: id, newPrincipal: np, newTenor: p.minTenor, bnd: OpenBounds(0, 0, 0), withdrawUnits: COLL / 10, withdrawTo: borrower
         });

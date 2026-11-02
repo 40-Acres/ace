@@ -34,7 +34,7 @@ contract AceMarketCashCapTest is Test {
     uint256 internal constant HALF = uint256(1) << 127; // two of these are the smallest pair that accumulates past the width
     uint256 internal constant WALL = uint256(type(uint128).max);
     uint256 internal constant ORDINARY = 10e36; // ten tokens of a 36-decimal quote: the control amount
-    uint256 internal constant FLOOR = 10e6; // the fixture's `minDebt`, which is the deposit floor at both doors
+    uint256 internal constant FLOOR = 10e6; // the fixture's `minPrincipal`, which is the deposit floor at both doors
 
     function setUp() public {
         vm.warp(1_000_000);
@@ -50,7 +50,7 @@ contract AceMarketCashCapTest is Test {
         p.record = address(0);
         p.baseBps = 1;
         p.settleBountyBps = 0;
-        p.minDebt = FLOOR;
+        p.minPrincipal = FLOOR;
     }
 
     /// @dev `maxTenor` named, everything else the baseline, so the genesis rows differ in exactly one field.
@@ -119,7 +119,7 @@ contract AceMarketCashCapTest is Test {
         _deposit(FLOOR);
         assertEq(ace.restingOf(mid), WALL, "landing exactly ON the width is admitted");
 
-        /// @dev WAS ONE WEI. The deposit floor is `minDebt` ITSELF now -- it was `ceil(minDebt / maxClaimTicks)`
+        /// @dev WAS ONE WEI. The deposit floor is `minPrincipal` ITSELF now -- it was `ceil(minPrincipal / maxClaimTicks)`
         /// @dev and derived far below it -- so a one-wei leg is refused `BelowMinLot` before the cap is reached
         /// @dev and the row would pass for the wrong reason. The SMALLEST ADMISSIBLE deposit is the floor, and
         /// @dev on a market sitting exactly on the wall every admissible deposit is one past it.
@@ -142,7 +142,7 @@ contract AceMarketCashCapTest is Test {
         ace.deposit(mid, HALF);
 
         MarketParams memory p = _params();
-        p.minDebt = FLOOR + 1; // one field apart, so this is a DIFFERENT id and therefore a different market
+        p.minPrincipal = FLOOR + 1; // one field apart, so this is a DIFFERENT id and therefore a different market
         bytes32 other = ace.createMarket(p);
 
         _fund(alice, HALF);

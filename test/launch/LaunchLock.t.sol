@@ -5,7 +5,7 @@ import {stdError} from "forge-std/StdError.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {LaunchFixture} from "./LaunchFixture.sol";
-import {IValidationHook} from "../../src/interfaces/ILaunchAuction.sol";
+import {IValidationHook, LAUNCH_DEAD} from "../../src/interfaces/ILaunchAuction.sol";
 import {LaunchLock, Leg} from "../../src/entities/launch/LaunchLock.sol";
 import {LockAccount} from "../../src/entities/launch/LockAccount.sol";
 import {ScheduleLock} from "../../src/entities/vesting/ScheduleLock.sol";
@@ -120,6 +120,14 @@ contract LaunchLockTest is LaunchFixture {
         assertFalse(lock.beneficiaryRefused(carol), "the view refuses a plain wallet");
         assertEq(lock.POSITION_MANAGER(), address(pm), "the custodian is the lock's own immutable");
         assertEq(lock.POSITION_TITLE(), ace.POSITION_TITLE(), "and the title collection");
+    }
+
+    /// @notice DEAD is refused as a beneficiary: its account would lock tokens no key ever releases, while they stay in the supply.
+    function test_DeadRefusedAsBeneficiary() public {
+        assertTrue(lock.beneficiaryRefused(LAUNCH_DEAD), "the view admits DEAD");
+        vm.expectRevert(ScheduleLock.BadBeneficiary.selector);
+        lock.account(LAUNCH_DEAD, 0);
+        assertFalse(lock.isAccount(lock.predict(LAUNCH_DEAD, 0)), "an account for DEAD was created");
     }
 
     /// @notice The account implementation is refused as a beneficiary: a release into it would sit in code no clone reaches.

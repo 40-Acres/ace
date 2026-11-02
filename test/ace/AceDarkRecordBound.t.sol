@@ -4,7 +4,6 @@ pragma solidity 0.8.36;
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
 import {NotSettleable} from "../../src/ace/hub/Settlement.sol";
 import {NoRecordPrice} from "../../src/ace/hub/Borrower.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
@@ -22,7 +21,7 @@ import {AceReader} from "../utils/AceReader.sol";
 /// @dev subject is what the recordless class does, and its record-backed control holds a LIVE record throughout.
 /// @dev The gap between them is the market this suite drives -- wired at genesis, dark by the time it settles.
 /// @dev WHY THE CLASS AND NOT THE LIVENESS: darkness is transient, arrives on its own in a thin market, and the
-/// @dev moment of exercise belongs to whoever calls the permissionless backstop; a value transfer may not turn on it.
+/// @dev moment of exercise belongs to whoever calls the permissionless `forceClose`; a value transfer may not turn on it.
 /// @dev The lender's compensation for having no seizure is priced when they rest, off a class genesis fixed.
 /// @dev DARKNESS IS NOT ONE STATE, AND THE TWO SHIPPED CLASSES DIVERGE ON IT -- which is why the mock's
 /// @dev below-answers are settable apart from `minPrice` rather than derived from it.
@@ -39,7 +38,7 @@ contract AceDarkRecordBoundTest is WarpClock {
     address internal keeper = address(0xCA11E5);
 
     uint256 internal constant DEPOSIT = 20_000_000; // the whole resting balance; one tenant, one lot
-    uint256 internal constant PRINCIPAL = 11_000_000; // over the fixture's 10e6 minDebt
+    uint256 internal constant PRINCIPAL = 11_000_000; // over the fixture's 10e6 minPrincipal
     uint256 internal constant COLL = 10_000e18; // far enough above the line that the two rules differ
     uint64 internal constant TEN7 = 7 days;
 
@@ -63,35 +62,21 @@ contract AceDarkRecordBoundTest is WarpClock {
 
     /* ================================ the ruled behaviour ================================ */
 
-    /// @notice A WIRED RECORD THAT WENT DARK KEEPS THE NARROW BOUND: the borrower is credited everything above need.
-    /// @dev The issue's own repro: live at open, `setMinPrice(0)` thereafter, settled past the backstop's clock.
+    /// @notice A WIRED RECORD THAT WENT DARK KEEPS THE NARROW BOUND: the borrower is credited everything above need, net of the sliver.
+    /// @dev The issue's own repro: live at open, `setMinPrice(0)` thereafter, settled by `forceClose` at expiry.
     /// @dev RED under a liveness test, which would take the coverage line here and credit the wedge to the pot.
-    function test_DarkRecord_SettleExpired_ReturnsTheResidual() public {
+    /// @dev The sliver is taken before the bound is priced, so the borrower's credit is the lot less sliver less need.
+    function test_DarkRecord_ForceClose_ReturnsTheResidual() public {
         Rig memory w = _wired();
         uint256 loanId = _open(w);
         (uint256 units, uint256 need,) = _unitsNeedLine(w, loanId); // the helper asserts the precondition for every row
 
         _darken(w);
-        _settleUnpaid(w, loanId);
+        _settle(w, loanId);
 
-        assertEq(w.read.unitsOwedOf(loanId, borrower), units - need, "a darkened record must not widen the bound");
-    }
-
-    /// @notice The PAID door rules the same way, net of the keeper's sliver off the top.
-    /// @dev The sliver is taken before the bound is priced, so the borrower's credit is the lot less sliver less need.
-    function test_DarkRecord_ForceClose_ReturnsTheResidual() public {
-        Rig memory w = _wired();
-        uint256 loanId = _open(w);
-        (uint256 units, uint256 need,) = _unitsNeedLine(w, loanId);
-
-        _darken(w);
-        _warpTo(w.read.loan(loanId).expiry);
-        vm.prank(keeper);
-        w.ace.forceClose(loanId);
-
-        uint256 sliver = w.read.unitsOwedOf(loanId, keeper);
-        assertGt(sliver, 0, "fixture: the paid door must actually credit a sliver, or this is the unpaid row again");
-        assertEq(w.read.unitsOwedOf(loanId, borrower), units - sliver - need, "the paid door must rule on class too");
+        uint256 sliver = _sliver(w, loanId);
+        assertGt(sliver, 0, "fixture: forceClose must actually credit a sliver");
+        assertEq(w.read.unitsOwedOf(loanId, borrower), units - sliver - need, "a darkened record must not widen the bound");
     }
 
     /// @notice THE TWO CLASSES, SIDE BY SIDE: the same loan, the same numbers, differing by exactly the coverage wedge.
@@ -110,19 +95,20 @@ contract AceDarkRecordBoundTest is WarpClock {
         assertEq(l2, line, "fixture: the twin's line must match");
 
         _darken(w);
-        _settleUnpaid(w, darkLoan);
-        _settleUnpaid(n, noneLoan);
+        _settle(w, darkLoan);
+        _settle(n, noneLoan);
 
         uint256 keptDark = w.read.unitsOwedOf(darkLoan, borrower);
         uint256 keptNone = n.read.unitsOwedOf(noneLoan, borrower);
-        assertEq(keptDark, units - need, "the dark wired market returns the residual at need");
-        assertEq(keptNone, units - line, "the recordless market forfeits up to the coverage line");
+        assertEq(_sliver(w, darkLoan), _sliver(n, noneLoan), "fixture: the twins pay the same sliver, so it cancels in the difference");
+        assertEq(keptDark, units - _sliver(w, darkLoan) - need, "the dark wired market returns the residual at need");
+        assertEq(keptNone, units - _sliver(n, noneLoan) - line, "the recordless market forfeits up to the coverage line");
         assertEq(keptDark - keptNone, line - need, "the classes must differ by exactly the wedge, and by nothing else");
     }
 
     /* ======================= settlement survives a record that is worse ======================= */
 
-    /// @notice A record that REVERTS settles anyway: the backstop consults nothing, so it cannot be bricked.
+    /// @notice A record that REVERTS settles anyway: `forceClose` consults nothing, so it cannot be bricked.
     /// @dev THE ROW THAT GOES RED IF ANYONE IMPLEMENTS THE LIVENESS TEST WITH A REVERTING READ.
     /// @dev A sick record is a different state from a dark one: that answers zero, this refuses to answer.
     function test_SickRecord_SettlesAnyway() public {
@@ -131,9 +117,9 @@ contract AceDarkRecordBoundTest is WarpClock {
         (uint256 units, uint256 need,) = _unitsNeedLine(w, loanId);
 
         w.rec.setSick(true);
-        _settleUnpaid(w, loanId);
+        _settle(w, loanId);
 
-        assertEq(w.read.unitsOwedOf(loanId, borrower), units - need, "a sick record neither blocks the door nor widens it");
+        assertEq(w.read.unitsOwedOf(loanId, borrower), units - _sliver(w, loanId) - need, "a sick record neither blocks the door nor widens it");
     }
 
     /// @notice A record that returns ZERO BYTES settles anyway: the call succeeds and the decode is what would fail.
@@ -144,14 +130,14 @@ contract AceDarkRecordBoundTest is WarpClock {
         (uint256 units, uint256 need,) = _unitsNeedLine(w, loanId);
 
         w.rec.setShortAnswer(true);
-        _settleUnpaid(w, loanId);
+        _settle(w, loanId);
 
-        assertEq(w.read.unitsOwedOf(loanId, borrower), units - need, "a short answer neither blocks the door nor widens it");
+        assertEq(w.read.unitsOwedOf(loanId, borrower), units - _sliver(w, loanId) - need, "a short answer neither blocks the door nor widens it");
     }
 
     /* ============================== the ruling's own premise ============================== */
 
-    /// @notice DARKNESS CLOSES DOORS: no new draw, no seizure, and an armed loan folds to a settle rather than a roll.
+    /// @notice DARKNESS CLOSES DOORS: no new draw, no seizure, and no extension, so the loan settles at tenor.
     /// @notice The ruling rests on this, so it is pinned rather than argued: a change that reopens a door reopens the ruling.
     /// @dev Three doors in one row on purpose -- they are one fact, and a reader checking the ruling wants them together.
     function test_DarkRecord_ClosesTheOtherDoors() public {
@@ -171,15 +157,15 @@ contract AceDarkRecordBoundTest is WarpClock {
         vm.expectRevert(NotSettleable.selector);
         w.ace.finalize(loanId);
 
-        vm.prank(borrower);
-        w.ace.setAutoRefinance(loanId, TEN7, 0, 0);
+        _warpTo(uint256(w.read.loan(loanId).expiry) - 1);
+        (bool ok, bytes4 why,) = w.ace.tryExtend(loanId, 0, "", borrower);
+        assertFalse(ok, "a dark record refuses the borrower's extension");
+        assertEq(why, NoRecordPrice.selector, "by name, before the lender's policy is asked");
         _warpTo(w.read.loan(loanId).expiry);
         vm.prank(keeper);
         w.ace.forceClose(loanId);
-        /// @dev `closedAt` CANNOT tell the branches apart -- a roll closes the source loan too, by the fold's own rule.
-        /// @dev The borrower's credit can: a settle credits the residual, and a roll carries the units to the successor.
-        assertTrue(w.read.loan(loanId).closedAt != 0, "the fold must have ended this loan one way or the other");
-        assertGt(w.read.unitsOwedOf(loanId, borrower), 0, "an armed loan under a dark record must SETTLE, never roll");
+        assertTrue(w.read.loan(loanId).closedAt != 0, "so forceClose ends the loan");
+        assertGt(w.read.unitsOwedOf(loanId, borrower), 0, "and it SETTLES, crediting the borrower its residual");
     }
 
     /// @notice THE VENUE SHAPE: the price channel goes dark while below-ness survives the silence, and title still moves.
@@ -206,7 +192,7 @@ contract AceDarkRecordBoundTest is WarpClock {
         (uint256 units,,) = _unitsNeedLine(w, loanId);
 
         _darken(w);
-        _settleUnpaid(w, loanId);
+        _settle(w, loanId);
 
         uint256 owned = w.read.unitsOwedOf(loanId, borrower) + w.read.unitsOwedOf(loanId, keeper) + w.read.invPotOf(w.id, loanId);
         assertEq(owned, units, "units left custody that no ledger entry names");
@@ -279,9 +265,14 @@ contract AceDarkRecordBoundTest is WarpClock {
         assertGt(line, need, "fixture: coverage must exceed need, or every row here proves nothing");
     }
 
-    function _settleUnpaid(Rig memory r, uint256 loanId) internal {
-        _warpTo(r.read.loan(loanId).expiry + MarketInit.autoRefinanceWindow(r.read.loan(loanId).tenor));
+    /// @dev `forceClose` at expiry by the keeper, whose sliver comes off the lot before the bound.
+    function _settle(Rig memory r, uint256 loanId) internal {
+        _warpAtLeastTo(r.read.loan(loanId).expiry);
         vm.prank(keeper);
-        r.ace.settleExpired(loanId);
+        r.ace.forceClose(loanId);
+    }
+
+    function _sliver(Rig memory r, uint256 loanId) internal view returns (uint256) {
+        return r.read.unitsOwedOf(loanId, keeper);
     }
 }

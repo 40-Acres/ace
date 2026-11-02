@@ -67,7 +67,7 @@ contract LockAccountHandler is WarpClock {
                     lender: alt,
                     price: AceFixtures.px(0.1e18, address(usdc), address(token)),
                     baseBps: 40,
-                    minDebt: PRINCIPAL,
+                    minPrincipal: PRINCIPAL,
                     minCoverageWad: 1.4e18
                 })
             )
@@ -142,23 +142,17 @@ contract LockAccountHandler is WarpClock {
         vm.stopPrank();
     }
 
-    /// @notice The lender lets a live pledged loan run out, ends it, and takes the pot in kind; the unpaid backstop half the time.
-    function defaultLoan(uint256 idxSeed, bool backstop) external {
+    /// @notice The lender lets a live pledged loan run out, force-closes it, and takes the pot in kind; two hours late when `late`.
+    function defaultLoan(uint256 idxSeed, bool late) external {
         (bool found, uint256 loanId) = _pick(idxSeed, true);
         if (!found) return;
         uint256 at = read.loan(loanId).expiry;
-        if (backstop) at += 2 hours + 1; // past any roll window a 30-day tenor carries
+        if (late) at += 2 hours + 1; // a close well past expiry, not only at it
         _warpAtLeastTo(at);
         vm.startPrank(alt);
-        if (backstop) {
-            try ace.settleExpired(loanId) {
-                hits["settleExpired"]++;
-            } catch {}
-        } else {
-            try ace.forceClose(loanId) {
-                hits["forceClose"]++;
-            } catch {}
-        }
+        try ace.forceClose(loanId) {
+            hits["forceClose"]++;
+        } catch {}
         try ace.redeemInKind(loanId, alt) {} catch {}
         vm.stopPrank();
     }

@@ -4,7 +4,7 @@ pragma solidity 0.8.36;
 import {Vm} from "forge-std/Test.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
+import {BelowDebtFloor} from "../../src/ace/hub/Borrower.sol";
 import {MarketParams, MigrateArgs, OpenBounds, Order} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {IPersistenceRecord} from "../../src/interfaces/IPersistenceRecord.sol";
@@ -106,6 +106,7 @@ contract AceDebtOfTest is WarpClock, DeleverageCrank {
     uint64 internal constant TEN7 = 7 days;
     uint64 internal constant TEN30 = 30 days;
     bytes32 internal constant REFINANCED = keccak256("Refinanced(uint256,uint256,uint256,uint64,uint256,address)");
+    bytes32 internal constant EXTENDED = keccak256("Extended(uint256,uint64,uint64,uint256,address)");
     bytes32 internal constant DELEVERAGED = keccak256("Deleveraged(uint256,uint256,uint256,uint256,address)");
 
     uint256 internal probeLoan; // the loan the deleverage callback reads; zero skips the reads
@@ -190,7 +191,7 @@ contract AceDebtOfTest is WarpClock, DeleverageCrank {
     }
 
     /// @dev THE PROPERTY: across every id the hub has issued, and the first unissued one, a nonzero answer means a live loan.
-    /// @dev It holds because a repay to zero closes the loan and `minDebt` is railed above zero, so a live loan never owes nothing.
+    /// @dev It holds because a repay to zero closes the loan and `minPrincipal` is railed above zero, so a live loan never owes nothing.
     function _assertNonzeroExactlyWhenLive() internal view {
         uint256 n = read.loanCount() + 1;
         for (uint256 i; i <= n; i++) {
@@ -230,13 +231,15 @@ contract AceDebtOfTest is WarpClock, DeleverageCrank {
 
     /// @notice THE CONSUMER'S EQUATION: a home refinance takes from the market's cash exactly the new principal less `debtOf(old)`.
     /// @dev The oracle is the hub's own cash ledger, never the word, so a view that under-reports the recycle is caught here.
+    /// @dev The home re-term recycles the claim only on the lender's roll policy's yes, so the lender names one first.
     function test_DebtOf_AHomeRefinanceDrawsExactlyTheNewPrincipalLessIt() public {
+        AceFixtures.installYesPolicy(ace, alice);
         uint256 oldId = _openOn(id, BIG, P, 0);
         uint256 d = ace.debtOf(oldId);
         uint256 r0 = ace.restingOf(id);
         uint256 n = P + 3_000e6;
         vm.prank(borrower);
-        uint256 newId = ace.refinance(oldId, n, 0, OpenBounds(0, 0, 0));
+        uint256 newId = ace.refinanceTo(MigrateArgs(oldId, id, n, 0, OpenBounds(0, 0, 0), 0, address(0)));
 
         assertEq(r0 - ace.restingOf(id), n - d, "the draw took the new principal less the old debt, to the wei");
         assertEq(ace.debtOf(newId), n, "the successor owes its principal");
@@ -246,12 +249,14 @@ contract AceDebtOfTest is WarpClock, DeleverageCrank {
 
     /// @notice A zero-fresh re-term, the new principal equal to the old debt, takes nothing from the market's cash.
     /// @dev Opened at the longest term and re-termed at once to the shortest, so the unearned escrow covers the new fee.
+    /// @dev The claim recycles only on the lender's roll policy's yes, so the lender names one first.
     function test_DebtOf_AZeroFreshRetermDrawsNothing() public {
+        AceFixtures.installYesPolicy(ace, alice);
         uint256 oldId = _openOn(id, BIG, P, TEN30);
         uint256 d = ace.debtOf(oldId);
         uint256 r0 = ace.restingOf(id);
         vm.prank(borrower);
-        uint256 newId = ace.refinance(oldId, d, TEN7, OpenBounds(0, 0, 0));
+        uint256 newId = ace.refinanceTo(MigrateArgs(oldId, id, d, TEN7, OpenBounds(0, 0, 0), 0, address(0)));
 
         assertEq(ace.restingOf(id), r0, "a re-term at the old debt draws nothing fresh");
         assertEq(ace.debtOf(newId), d, "the successor owes the old debt");
@@ -321,7 +326,7 @@ contract AceDebtOfTest is WarpClock, DeleverageCrank {
         _assertNonzeroExactlyWhenLive();
     }
 
-    /// @notice `forceClose`'s settle branch leaves the stored word unpaid, and the view reads zero.
+    /// @notice `forceClose` leaves the stored word unpaid, and the view reads zero.
     function test_DebtOf_AForceClosedLoanReadsZero() public {
         uint256 loanId = _open(COLL, 0);
         _warpTo(uint256(read.loan(loanId).expiry) + 1);
@@ -334,51 +339,46 @@ contract AceDebtOfTest is WarpClock, DeleverageCrank {
         _assertNonzeroExactlyWhenLive();
     }
 
-    /// @notice `settleExpired` leaves the stored word unpaid, and the view reads zero.
-    function test_DebtOf_ASettledExpiredLoanReadsZero() public {
-        uint256 loanId = _open(COLL, 0);
-        _warpTo(uint256(read.loan(loanId).expiry) + MarketInit.autoRefinanceWindow(read.loan(loanId).tenor));
-        vm.prank(keeper);
-        ace.settleExpired(loanId);
+    // the `settleExpired` row went with the verb; `test_DebtOf_AForceClosedLoanReadsZero` is its twin
 
-        assertTrue(ace.isClosed(loanId), "premise: settleExpired settled the loan");
-        assertEq(read.debtOf(loanId), P, "premise: the stored word still holds the unpaid debt");
-        assertEq(ace.debtOf(loanId), 0, "a settled loan owes nothing");
-        _assertNonzeroExactlyWhenLive();
-    }
-
-    /// @notice `forceClose`'s ROLL branch retires the old loan and the successor owes the principal the roll logged.
-    /// @dev The successor's figure comes from the `Refinanced` log, not from storage.
-    function test_DebtOf_AForceCloseRollMovesTheDebtToTheSuccessor() public {
-        uint256 oldId = _open(COLL, TEN7);
-        vm.prank(borrower);
-        ace.setAutoRefinance(oldId, TEN7, 0, 0);
-        _warpTo(uint256(read.loan(oldId).expiry) + 1);
+    /// @notice A cash extension keeps the loan live and leaves `debtOf` unchanged, though it charged a real fee.
+    /// @dev The fee comes from the `Extended` log, not from storage; there is no `Refinanced`, because there is no successor.
+    function test_DebtOf_ACashExtensionLeavesTheDebtUnchanged() public {
+        AceFixtures.installYesPolicy(ace, alice);
+        uint256 loanId = _open(COLL, TEN7);
+        uint256 before = ace.debtOf(loanId);
+        _warpBy(1 days);
 
         vm.recordLogs();
-        vm.prank(keeper);
-        ace.forceClose(oldId);
-        (uint256 newId, uint256 logged) = _refinancedFrom(vm.getRecordedLogs(), oldId);
+        vm.prank(borrower);
+        ace.extend(loanId, 0, "");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        uint256 fee = _extendedFee(logs, loanId);
 
-        assertTrue(ace.isClosed(oldId), "premise: the roll closed the old loan");
-        assertTrue(ace.isLiveLoan(newId), "premise: the roll opened a live successor");
-        assertGt(logged, P, "premise: the roll drew past the old debt, so the successor's figure is its own");
-        assertEq(ace.debtOf(oldId), 0, "the rolled loan owes nothing");
-        assertEq(ace.debtOf(newId), logged, "the successor owes the principal the roll logged");
+        assertTrue(ace.isLiveLoan(loanId), "premise: the extension kept the loan live");
+        assertEq(_count(logs, REFINANCED), 0, "and opened no successor");
+        assertGt(fee, 0, "premise: the extension charged a real fee");
+        assertEq(ace.debtOf(loanId), before, "the loan owes exactly its old debt: the fee was paid in cash");
         _assertNonzeroExactlyWhenLive();
     }
 
-    /// @dev The one `Refinanced` the hub logged for `oldId`: the successor's id and its logged principal.
-    function _refinancedFrom(Vm.Log[] memory logs, uint256 oldId) internal view returns (uint256 newId, uint256 principal) {
+    /// @dev The one `Extended` the hub logged for `id`: its fee.
+    function _extendedFee(Vm.Log[] memory logs, uint256 id) internal view returns (uint256 fee) {
         uint256 hits;
         for (uint256 i; i < logs.length; i++) {
-            if (logs[i].emitter != address(ace) || logs[i].topics[0] != REFINANCED) continue;
-            if (uint256(logs[i].topics[1]) != oldId) continue;
-            newId = uint256(logs[i].topics[2]);
-            (principal,,) = abi.decode(logs[i].data, (uint256, uint64, uint256));
+            if (logs[i].emitter != address(ace) || logs[i].topics[0] != EXTENDED) continue;
+            if (uint256(logs[i].topics[1]) != id) continue;
+            (,, fee) = abi.decode(logs[i].data, (uint64, uint64, uint256));
             hits++;
         }
-        assertEq(hits, 1, "fixture: exactly one Refinanced for the rolled loan");
+        assertEq(hits, 1, "fixture: exactly one Extended for the extended loan");
+    }
+
+    /// @dev How many logs the hub emitted under `sig`.
+    function _count(Vm.Log[] memory logs, bytes32 sig) internal view returns (uint256 n) {
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].emitter == address(ace) && logs[i].topics[0] == sig) n++;
+        }
     }
 
     // ---- ids that are not live loans ----
@@ -441,8 +441,8 @@ contract AceDebtOfTest is WarpClock, DeleverageCrank {
     }
 
     /// @dev THE UNDER-REPORT PROPERTY, per live loan: a repay of exactly `debtOf` pulls exactly that and closes it.
-    /// @dev And one atom less leaves the loan live owing one atom, so the answer is the sharp threshold, neither under nor over.
-    /// @dev Each leg runs from a snapshot and is reverted; the payer is the loan's holder, the one party who may leave dust.
+    /// @dev And one atom less is refused `BelowDebtFloor`, as it would leave one atom: an over-report would close the loan there instead.
+    /// @dev So the answer is the sharp threshold, neither under nor over. Each leg runs from a snapshot and is reverted.
     function _assertPayingItClosesEveryLiveLoan() internal {
         uint256 n = read.loanCount();
         for (uint256 i = 1; i <= n; i++) {
@@ -462,9 +462,10 @@ contract AceDebtOfTest is WarpClock, DeleverageCrank {
             vm.revertToState(snap);
 
             vm.prank(b);
+            vm.expectRevert(BelowDebtFloor.selector);
             ace.repay(i, d - 1);
             assertTrue(ace.isLiveLoan(i), string.concat("a repay one atom under debtOf closed the loan at id ", vm.toString(i)));
-            assertEq(ace.debtOf(i), 1, string.concat("one atom under debtOf did not leave one atom owed at id ", vm.toString(i)));
+            assertEq(ace.debtOf(i), d, string.concat("a refused repay one atom under debtOf moved the debt at id ", vm.toString(i)));
             vm.revertToState(snap);
         }
     }
@@ -479,7 +480,7 @@ contract AceDebtOfTest is WarpClock, DeleverageCrank {
         vm.startPrank(borrower);
         ace.repay(repaid, type(uint256).max);
         ace.repay(partly, P / 3);
-        uint256 succ = ace.refinance(rolled, P + 1_000e6, 0, OpenBounds(0, 0, 0));
+        uint256 succ = ace.refinanceTo(MigrateArgs(rolled, id, P + 1_000e6, 0, OpenBounds(0, 0, 0), 0, address(0)));
         vm.stopPrank();
         record.setBelow(true);
         vm.prank(keeper);
@@ -499,6 +500,8 @@ contract AceDebtOfTest is WarpClock, DeleverageCrank {
     /// @dev What it took is the borrower's balance delta, never the hub's own figure.
     function testFuzz_DebtOf_ARepayLowersItByExactlyWhatItTook(uint256 r) public {
         r = bound(r, 0, 2 * P);
+        uint256 floor = ace.idToMarketParams(id).minPrincipal / 2;
+        if (r < P && P - r < floor) r = P - floor; // a partial repay leaves at least the live floor, half of minPrincipal
         uint256 loanId = _open(COLL, 0);
         uint256 bal = usdc.balanceOf(borrower);
         vm.prank(borrower);
@@ -512,11 +515,16 @@ contract AceDebtOfTest is WarpClock, DeleverageCrank {
         _assertNonzeroExactlyWhenLive();
     }
 
-    /// @notice THE UNDER-REPORT PROPERTY over any principal and any prior partial repay: paying exactly `debtOf` closes the loan.
+    /// @notice The saved counterexample, pinned: `9e10` bounds to `P - 7`, a partial that would leave dust, so the clamp leaves the floor.
+    function test_DebtOf_ARepayLowersIt_TheDustCounterexample() public {
+        testFuzz_DebtOf_ARepayLowersItByExactlyWhatItTook(9e10);
+    }
+
+    /// @notice THE UNDER-REPORT PROPERTY over any principal and any legal prior partial repay: paying exactly `debtOf` closes the loan.
     function testFuzz_DebtOf_PayingExactlyItClosesTheLoan(uint256 principal, uint256 r) public {
-        principal = bound(principal, 10e6, 7_000e6); // minDebt up to what COLL carries at the market's price
+        principal = bound(principal, 10e6, 7_000e6); // minPrincipal up to what COLL carries at the market's price
         uint256 loanId = _openOn(id, COLL, principal, 0);
-        r = bound(r, 0, principal - 1);
+        r = bound(r, 0, principal - ace.idToMarketParams(id).minPrincipal); // a partial leaves at least minPrincipal
         vm.prank(borrower);
         ace.repay(loanId, r);
 
@@ -570,14 +578,6 @@ contract AceDebtOfTest is WarpClock, DeleverageCrank {
         _deposit(mid, 60_000e6);
     }
 
-    /// @dev Opens a one-term loan, arms it, and lands past the incumbent's hold inside its roll window.
-    function _armedInWindow(uint16 buf, uint16 feeCap) internal returns (uint256 loanId) {
-        loanId = _open(COLL, TEN7);
-        vm.prank(borrower);
-        ace.setAutoRefinance(loanId, TEN7, buf, feeCap);
-        _warpTo(uint256(read.loan(loanId).expiry) - MarketInit.homeRollHold(TEN7) / 2);
-    }
-
     /// @notice `refinanceTo` another market: the old id reads zero and the successor its principal.
     /// @notice A routed draw recycles nothing, so the destination pays the WHOLE principal though `debtOf(old)` was live.
     /// @dev Which is why a consumer's `P - debtOf(old)` holds for a home refinance only, and gates on the loan's market.
@@ -595,74 +595,6 @@ contract AceDebtOfTest is WarpClock, DeleverageCrank {
         assertEq(ace.restingOf(id), rs, "and the source's resting cash is unmoved");
         assertEq(ace.debtOf(oldId), 0, "the retired loan owes nothing");
         assertEq(ace.debtOf(newId), n, "the successor owes its principal");
-        _assertTheLedgerAgrees();
-        _assertPayingItClosesEveryLiveLoan();
-        _assertNonzeroExactlyWhenLive();
-    }
-
-    /// @notice `refinanceByPolicy`: the successor owes exactly what `tryContinue` quoted, and the old id reads zero.
-    /// @notice The home roll draws that quote less `debtOf(old)`: the consumer's equation holds on the keeper's door too.
-    function test_DebtOf_APolicyRollOwesWhatTryContinueQuoted() public {
-        uint256 oldId = _armedInWindow(0, 0);
-        uint256 d = ace.debtOf(oldId);
-        (bool ok,, uint256 quoted) = ace.tryContinue(oldId);
-        assertTrue(ok, "premise: the roll is admissible");
-        assertGt(quoted, d, "premise: the roll draws past the old debt, so the successor's figure is its own");
-        uint256 r0 = ace.restingOf(id);
-        vm.prank(keeper);
-        uint256 newId = ace.refinanceByPolicy(oldId);
-
-        assertEq(ace.debtOf(newId), quoted, "the successor owes what tryContinue quoted");
-        assertEq(ace.debtOf(oldId), 0, "the rolled loan owes nothing");
-        assertEq(r0 - ace.restingOf(id), quoted - d, "the home roll drew its quote less debtOf(old), to the wei");
-        (ok,, quoted) = ace.tryContinue(oldId);
-        assertFalse(ok, "the closed loan quotes no continuation");
-        assertEq(quoted, 0, "and no successor debt, agreeing with its zero");
-        _assertTheLedgerAgrees();
-        _assertPayingItClosesEveryLiveLoan();
-        _assertNonzeroExactlyWhenLive();
-    }
-
-    /// @notice `refinanceByPolicyTo` a sibling: the successor owes what `tryContinueTo` quoted, and draws all of it there.
-    function test_DebtOf_ARoutedPolicyRollOwesWhatTryContinueToQuoted() public {
-        bytes32 dst = _sibling(30);
-        uint256 oldId = _armedInWindow(500, 200);
-        (bool ok, bytes4 why, uint256 quoted) = ace.tryContinueTo(oldId, dst);
-        assertTrue(ok, string.concat("premise: the routed roll is admissible; refused with ", vm.toString(bytes32(why))));
-        uint256 rd = ace.restingOf(dst);
-        vm.prank(keeper);
-        uint256 newId = ace.refinanceByPolicyTo(oldId, dst);
-
-        assertEq(ace.loanMarket(newId), dst, "premise: the successor sits in the destination");
-        assertEq(ace.debtOf(newId), quoted, "the successor owes what tryContinueTo quoted");
-        assertEq(ace.debtOf(oldId), 0, "the rolled loan owes nothing");
-        assertEq(rd - ace.restingOf(dst), quoted, "a routed roll drew its whole quote in the destination");
-        _assertTheLedgerAgrees();
-        _assertPayingItClosesEveryLiveLoan();
-        _assertNonzeroExactlyWhenLive();
-    }
-
-    /// @notice `refinanceByPolicies` over two armed loans, passed in reverse: each successor owes its own loan's quote, in input order.
-    function test_DebtOf_ABatchedPolicyRollOwesEachQuote() public {
-        uint256 a = _open(COLL, TEN7);
-        uint256 b = _openOn(id, BIG, P + 2_000e6, TEN7);
-        vm.startPrank(borrower);
-        ace.setAutoRefinance(a, TEN7, 0, 0);
-        ace.setAutoRefinance(b, TEN7, 0, 0);
-        vm.stopPrank();
-        _warpTo(uint256(read.loan(a).expiry) - MarketInit.homeRollHold(TEN7) / 2);
-        (,, uint256 qa) = ace.tryContinue(a);
-        (,, uint256 qb) = ace.tryContinue(b);
-        assertTrue(qa != qb && qa != 0 && qb != 0, "premise: two distinct live quotes, so a swapped pairing would show");
-
-        uint256[] memory ids = new uint256[](2);
-        (ids[0], ids[1]) = (b, a);
-        vm.prank(keeper);
-        uint256[] memory newIds = ace.refinanceByPolicies(ids);
-
-        assertEq(ace.debtOf(newIds[0]), qb, "the first successor owes the first input's quote");
-        assertEq(ace.debtOf(newIds[1]), qa, "the second successor owes the second input's quote");
-        assertEq(ace.debtOf(a) + ace.debtOf(b), 0, "both rolled loans owe nothing");
         _assertTheLedgerAgrees();
         _assertPayingItClosesEveryLiveLoan();
         _assertNonzeroExactlyWhenLive();

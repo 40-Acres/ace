@@ -47,13 +47,14 @@ contract AceDifferentialTest is StdInvariant, Test {
         (midLender, midQuote) = (p.lender, p.quote);
         claimants = [handler.lenders(0), handler.borrowers(0), handler.borrowers(1), handler.keeper(), address(handler)];
 
-        /// @dev The verbs `AceInvariants` drives, minus `transferTitle`, `migrate` and the batch roll.
-        /// @dev `armPolicy` and `refinanceByPolicy` run in BOTH suites now, so neither owns them exclusively.
-        /// @dev Here they drive the view-vs-verb straddle; next door, the roll branch of `forceClose`.
+        /// @dev The verbs `AceInvariants` drives, minus `transferTitle`, `migrate`, `setRate`, `createMarket`, `exitTo` and `postOrder`.
+        /// @dev `extend` and `setRollPolicy` run in BOTH suites, so neither owns them exclusively.
+        /// @dev Here they drive the `tryExtend`-vs-`extend` straddle, the policy kinds feeding its refusals; next door, the in-place laws.
         /// @dev `collect` REPLACES the three receipt verbs this suite used to drive, and is the only credit door.
         /// @dev `materialize`, `claimUnits` and `transferUnits` went with the ERC-6909 ledger and have no successor.
         /// @dev `setRearm` and `compound` drove beside it until the rearm policy was deleted; they have none either.
-        bytes4[] memory sel = new bytes4[](21);
+        /// @dev `setAutoExtend` and `foldAtExpiry` went with manual renewal: no loan arms, and expiry only settles.
+        bytes4[] memory sel = new bytes4[](22);
         sel[0] = AceHandler.deposit.selector;
         sel[1] = AceHandler.withdraw.selector;
         sel[2] = AceHandler.collect.selector;
@@ -72,10 +73,12 @@ contract AceDifferentialTest is StdInvariant, Test {
         sel[15] = AceHandler.sweepRevenue.selector;
         sel[16] = AceHandler.finalize.selector;
         sel[17] = AceHandler.claimOwed.selector;
-        sel[18] = AceHandler.armPolicy.selector;
-        sel[19] = AceHandler.refinanceByPolicy.selector;
-        /// @dev Draws on and around the coverage line: the one place `previewOpen`, `open` and the roll predicate can split.
-        sel[20] = AceHandler.openNearLine.selector;
+        sel[18] = AceHandler.extend.selector;
+        /// @dev Draws on and around the coverage line: the one place `previewOpen`, `open` and the extension predicate can split.
+        sel[19] = AceHandler.openNearLine.selector;
+        sel[20] = AceHandler.setRollPolicy.selector;
+        /// @dev The market lender's cash extension: the operator's view against its verb.
+        sel[21] = AceHandler.lenderExtend.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: sel}));
         targetContract(address(handler));
     }
@@ -85,7 +88,7 @@ contract AceDifferentialTest is StdInvariant, Test {
     /// @dev THE COST: the first failure aborts the rest, so a red run names ONE break, not all of them.
     function invariant_all() public {
         _invariant_previewOpenAgreesWithOpen();
-        _invariant_tryContinueAgreesWithTheVerb();
+        _invariant_tryExtendAgreesWithTheVerb();
         _invariant_claimableIsWhatTheCollectPays();
         _invariant_settleableAgreesWithFinalize();
         _invariant_lensLoanViewsMirrorTheHub();
@@ -118,23 +121,23 @@ contract AceDifferentialTest is StdInvariant, Test {
         assertEq(handler.previewCode(), 0, "QUOTE: previewOpen and open disagreed about the same draw");
     }
 
-    /// @notice `Ace.tryContinue` is the filter for an ALL-OR-NOTHING batch, so it must answer for the verb.
-    /// @notice A view that admits a roll `refinanceByPolicy` refuses is a filter that kills the batch it filtered.
-    /// @dev NOT tautological though the verb now refuses through the same predicate: `migrate` and `open` still
-    /// @dev decide independently, so what this pins is the predicate's MODEL of the draw against the draw.
-    /// @dev It pins the view against the VERB and NEVER against the expiry fold. The fold judges
-    /// @dev `units - sliver`; these two judge the whole lot, so the fold may disagree and be RIGHT.
-    function _invariant_tryContinueAgreesWithTheVerb() public {
-        if (handler.continueCode() != 0) {
-            emit log_named_uint("code         ", handler.continueCode());
-            emit log_named_uint("loan         ", handler.continueLoanId());
-            emit log_named_bytes32("view error   ", bytes32(handler.continueSelector()));
-            emit log_named_bytes32("verb error   ", bytes32(handler.verbSelector()));
-            emit log_named_uint("view said    ", handler.continueExpected());
-            emit log_named_uint("hub wrote    ", handler.continueActual());
+    /// @notice `Ace.tryExtend`, asked for the caller it names, must answer for the `extend` that caller then sends: the same yes, fee and no.
+    /// @notice The callers are the holder, and the market lender holding the holder's grant, both in cash.
+    /// @dev Both run one predicate, so this pins what the view can still get wrong apart from it: the caller it names and the fee it reports.
+    /// @dev A policy may answer a preview and a verb apart; none this campaign names does, so any split here is the hub's.
+    function _invariant_tryExtendAgreesWithTheVerb() public {
+        if (handler.extendCode() != 0) {
+            emit log_named_uint("code         ", handler.extendCode());
+            emit log_named_uint("loan         ", handler.extendCodeLoanId());
+            emit log_named_bytes32("view error   ", bytes32(handler.extendViewSelector()));
+            emit log_named_bytes32("verb error   ", bytes32(handler.extendVerbSelector()));
+            emit log_named_uint("view fee     ", handler.extendViewFee());
+            emit log_named_uint("verb fee     ", handler.extendVerbFee());
         }
-        assertEq(handler.continueCode(), 0, "FILTER: tryContinue and refinanceByPolicy disagreed about the same roll");
+        assertEq(handler.extendCode(), 0, "FILTER: tryExtend and extend disagreed about the same extension");
     }
+
+    /// @dev DELETED with manual renewal: `_invariant_theFoldPreviewAgreesWithTheFold`; the fold extends nothing, so it has no preview.
 
     /// @notice `AceLens.claimable` previews the PULL, so what it promises is what `collect` settles.
     /// @dev An equality, not a bound: the lens re-decodes the lender's pool and must not drift from the verb.
@@ -320,34 +323,54 @@ contract AceDifferentialTest is StdInvariant, Test {
         assertGt(handler.previewBothAdmit(), 0, "no draw was both quoted and funded, so the number legs are vacuous");
     }
 
-    /// @notice #263, mechanically: the filter's answer and the verb's outcome, on the same roll in the same block.
-    /// @notice BOTH branches are reached here, so neither the selector leg nor the principal leg is vacuous.
+    /// @notice The holder's view and the holder's verb, on the same extension in the same block: BOTH branches are reached.
+    /// @notice The admitted branch compares the fee; the refused branch, with both driven lenders naming the no, compares the selector.
     /// @dev WHAT THIS CANNOT CATCH, stated because the obvious assumption is wrong: a leg deleted from the
     /// @dev SHARED body does not show up as a disagreement. Both doors read one predicate, so they go
-    /// @dev permissive together and AGREE while being wrong. Deleting the window leg reddens this witness
-    /// @dev only indirectly, as collapsed coverage -- the refusal branch stops being reachable at all.
-    /// @dev The leg-specific guard is `AceContinuePredicate`, which asserts the SELECTOR and not agreement.
-    /// @dev What this DOES catch is the drift unification cannot rule out: the predicate's model of the draw
-    /// @dev against `migrate` and `open`, which still decide independently of it.
-    function test_Coverage_ContinueStraddleReachesBothBranches() public {
-        handler.warp(type(uint256).max); // 45 days: past every fixture tenor, so the window stands open
-        handler.armPolicy(0, 0);
-        assertGt(handler.policiesArmed(), 0, "no policy was armed, so the roll verb has nothing to reach");
-        handler.refinanceByPolicy(0);
-        assertGt(handler.policyRollsDone(), 0, "no roll ever landed, so the principal leg is vacuous");
-        assertGt(handler.continueBothAdmit(), 0, "no roll was both admitted and made");
-
-        /// @dev A FRESH loan is far from its own expiry, so the window leg refuses it at both doors.
-        uint256 refusedBefore = handler.continueBothRefuse();
+    /// @dev permissive together and AGREE while being wrong.
+    /// @dev The leg-specific guards are the hub's own extension suites, which assert each leg's SELECTOR and not agreement.
+    function test_Coverage_ExtendStraddleReachesBothBranches() public {
         uint256 nBefore = handler.loanIds().length;
         handler.open(0, 0, 4_000e6);
         assertEq(handler.loanIds().length, nBefore + 1, "PREMISE: the open landed, so the last id is the loan it opened");
-        uint256 fresh = nBefore;
-        handler.armPolicy(fresh, 0);
-        handler.refinanceByPolicy(fresh);
-        assertGt(handler.continueBothRefuse(), refusedBefore, "the refusal branch never ran");
+        uint256 admitted = handler.extendBothAdmit();
+        handler.extend(nBefore, 0);
+        assertGt(handler.extendBothAdmit(), admitted, "no extension was both admitted and made, so the fee leg is vacuous");
 
-        assertEq(handler.continueCode(), 0, "tryContinue and refinanceByPolicy disagreed");
+        /// @dev Both driven lenders name the no, so every live loan's extension refuses `PolicyRefused` at both doors.
+        handler.setRollPolicy(0, 5);
+        handler.setRollPolicy(1, 5);
+        uint256 refusedBefore = handler.extendBothRefuse();
+        handler.extend(nBefore, 0);
+        assertGt(handler.extendBothRefuse(), refusedBefore, "the refusal branch never ran");
+
+        assertEq(handler.extendCode(), 0, "tryExtend and extend disagreed");
+    }
+
+    /// @dev DELETED with manual renewal: `test_Coverage_FoldPreviewStraddleReachesBothBranches`; the fold it straddled extends nothing now.
+
+    /// @notice O33 PER POLICY KIND: each policy the campaign installs answers a preview and its verb alike, for both callers.
+    /// @notice The callers are the holder in cash and the market lender in cash on the grant.
+    /// @notice The yes runs first and is the control: the same loan and asks land, so each refusal after it is the policy's answer.
+    /// @dev The no answers zero, the gas burner fails out of gas inside the cap, and none asks nothing; all read no context, so none can split.
+    function test_Coverage_EveryInstalledPolicyAnswersAPreviewAndItsVerbAlike() public {
+        uint256[4] memory kindSeed = [uint256(0), 5, 6, 7]; // yes, no, gas burner, none
+        for (uint256 k; k < 4; k++) {
+            handler.setRollPolicy(0, kindSeed[k]);
+            handler.setRollPolicy(1, kindSeed[k]);
+            uint256 n = handler.loanIds().length;
+            handler.open(0, 0, 1_000e6);
+            assertEq(handler.loanIds().length, n + 1, "PREMISE: the open landed");
+            uint256[2] memory admit = [handler.modeBothAdmit(0), handler.modeBothAdmit(1)];
+            uint256[2] memory refuse = [handler.modeBothRefuse(0), handler.modeBothRefuse(1)];
+            handler.extend(n, 0);
+            handler.lenderExtend(n, 1);
+            for (uint256 m; m < 2; m++) {
+                if (k == 0) assertEq(handler.modeBothAdmit(m), admit[m] + 1, "the yes: the view and the verb both admitted, for this caller");
+                else assertGt(handler.modeBothRefuse(m), refuse[m], "a refusing kind: the view and the verb both refused, for this caller");
+            }
+            assertEq(handler.extendCode(), 0, "tryExtend and extend disagreed under this policy");
+        }
     }
 
     /// @dev A repay the handler's seed-0 pick is GUARANTEED to leave partial: half of that loan's live debt.
@@ -459,6 +482,11 @@ contract AceDifferentialTest is StdInvariant, Test {
         console2.log("  both refused        ", handler.previewBothRefuse());
         console2.log("collect straddles     ", handler.claimableChecks());
         console2.log("  of which paid       ", handler.claimablePaidChecks());
+        console2.log("extend straddles      ", handler.extendTries());
+        console2.log("  both admitted       ", handler.extendBothAdmit());
+        console2.log("  both refused        ", handler.extendBothRefuse());
+        console2.log("  admit holder/lender ", handler.modeBothAdmit(0), handler.modeBothAdmit(1));
+        console2.log("  refuse holder/lender", handler.modeBothRefuse(0), handler.modeBothRefuse(1));
         console2.log("finalize straddles    ", handler.settleableChecks());
         console2.log("  settleable admits   ", handler.settleableAdmits());
         console2.log("  agreed refusals     ", handler.settleableRefusals());

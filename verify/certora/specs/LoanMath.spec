@@ -15,7 +15,6 @@ methods {
     function lenderCut(uint256) external returns (uint256) envfree;
     function escrowCut(uint256) external returns (uint256) envfree;
     function tickCut(uint256) external returns (uint256) envfree;
-    function principalForOwed(uint256, uint64, uint256, uint64) external returns (uint256) envfree;
     function feeFundable(uint256, uint64, uint64) external returns (bool) envfree;
 }
 
@@ -72,43 +71,4 @@ rule theFeeIsMonotoneInTenor(uint256 principal, uint64 t1, uint64 t2, uint256 ba
     require minTenor > 0 && t1 <= t2;
     assert originationFee(principal, t1, baseBps, minTenor) <= originationFee(principal, t2, baseBps, minTenor),
         "a longer term priced cheaper";
-}
-
-// ---- the inverse ----
-
-// "EXACT against originationFee: the derived draw's payout IS owed, never a wei over."
-rule theInverseIsExact(uint256 owed, uint64 tenor, uint256 baseBps, uint64 minTenor) {
-    require minTenor > 0;
-    require feeFundable(baseBps, tenor, minTenor);
-    uint256 p = principalForOwed(owed, tenor, baseBps, minTenor);
-    assert p - originationFee(p, tenor, baseBps, minTenor) == to_mathint(owed), "the derived draw's payout is not exactly owed";
-}
-
-// "The smallest draw whose payout still clears owed": one less and the payout falls short
-rule theInverseIsTheSmallestDraw(uint256 owed, uint64 tenor, uint256 baseBps, uint64 minTenor) {
-    require minTenor > 0 && owed > 0;
-    require feeFundable(baseBps, tenor, minTenor);
-    uint256 p = principalForOwed(owed, tenor, baseBps, minTenor);
-    require p > 0;
-    assert (p - 1) - originationFee(require_uint256(p - 1), tenor, baseBps, minTenor) < to_mathint(owed),
-        "a smaller draw would also have cleared owed";
-}
-
-// "It implies d - n > 0" -- asserted on the arithmetic itself, because the ceilMulDiv summary PRUNES a zero divisor,
-// so the no-revert rule below cannot see the one revert this claim exists to rule out
-rule fundableMeansTheInverseDenominatorIsPositive(uint256 baseBps, uint64 tenor, uint64 minTenor) {
-    require minTenor > 0;
-    require feeFundable(baseBps, tenor, minTenor);
-    mathint d = 10000 * 10000 * minTenor;
-    mathint n = baseBps * tenor * (10000 + SHARE());
-    assert d - n > 0, "a fundable term left the inverse a zero or negative denominator";
-}
-
-// and the subtraction itself never underflows on a fundable term (the divisor's positivity is the rule above)
-rule fundableMeansTheInverseNeverUnderflows(uint256 owed, uint64 tenor, uint256 baseBps, uint64 minTenor) {
-    require minTenor > 0;
-    require owed < 2^200; // the quotient owed*d/(d-n) stays far inside 256 bits
-    require feeFundable(baseBps, tenor, minTenor);
-    principalForOwed@withrevert(owed, tenor, baseBps, minTenor);
-    assert !lastReverted, "a fundable term still reverted the inverse";
 }

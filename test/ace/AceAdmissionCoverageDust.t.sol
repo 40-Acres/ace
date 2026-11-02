@@ -72,19 +72,19 @@ contract AceAdmissionCoverageDustTest is Test {
     /// @dev A market at the caller's decimals, coverage multiple and dust floor; nothing is seeded yet.
     /// @dev `settleBountyBps` is ZEROED so the measurement isolates the ceiling gap from the keeper sliver.
     /// @dev The sliver is railed separately at `b <= k - 1`, which is the same margin this file is about.
-    function _deploy(uint8 collDec, uint8 quoteDec, uint256 minDebt, uint256 k) internal returns (Fx memory f) {
-        return _deploy(collDec, quoteDec, minDebt, k, SPACING, 0);
+    function _deploy(uint8 collDec, uint8 quoteDec, uint256 minPrincipal, uint256 k) internal returns (Fx memory f) {
+        return _deploy(collDec, quoteDec, minPrincipal, k, SPACING, 0);
     }
 
     /// @dev The same, on a caller-chosen tick grid: the span of the funded band moves the coverage margin.
     /// @dev A tighter grid pushes every funded tick toward the floor, which is what drives `R` toward one.
-    function _deploy(uint8 collDec, uint8 quoteDec, uint256 minDebt, uint256 k, int24 gridSpacing) internal returns (Fx memory f) {
-        return _deploy(collDec, quoteDec, minDebt, k, gridSpacing, 0);
+    function _deploy(uint8 collDec, uint8 quoteDec, uint256 minPrincipal, uint256 k, int24 gridSpacing) internal returns (Fx memory f) {
+        return _deploy(collDec, quoteDec, minPrincipal, k, gridSpacing, 0);
     }
 
-    /// @dev The same, with a LIVE keeper sliver: the expiry fold spends it before judging the successor.
-    /// @dev Only the roll test wants one; every coverage measurement zeroes it so the ceiling stands alone.
-    function _deploy(uint8 collDec, uint8 quoteDec, uint256 minDebt, uint256 k, int24 gridSpacing, uint16 bountyBps) internal returns (Fx memory f) {
+    /// @dev The same, with a LIVE keeper sliver: `forceClose` pays it to its caller out of the lot.
+    /// @dev Only the extension row wants one; every coverage measurement zeroes it so the ceiling stands alone.
+    function _deploy(uint8 collDec, uint8 quoteDec, uint256 minPrincipal, uint256 k, int24 gridSpacing, uint16 bountyBps) internal returns (Fx memory f) {
         spacing = gridSpacing;
         f.quote = new MockERC20("Quote", "Q", quoteDec);
         f.coll = new MockERC20("Collateral", "C", collDec);
@@ -95,7 +95,7 @@ contract AceAdmissionCoverageDustTest is Test {
         MarketParams memory p = AceFixtures.marketParams(address(f.quote), address(f.coll));
         p.record = address(record);
         p.price = topTick; // the market bids where the row asked, and every claim funds there
-        p.minDebt = minDebt;
+        p.minPrincipal = minPrincipal;
         p.minCoverageWad = k;
         p.settleBountyBps = bountyBps;
 
@@ -103,7 +103,7 @@ contract AceAdmissionCoverageDustTest is Test {
         (f.ace, f.pm, f.read, f.id) = (d.ace, d.positionManager, d.read, d.id);
         f.lens = new AceLens(address(d.ace)); // the shipped views are the oracle; the test keeps no mirror
         f.unitScale = f.read.marketState(f.id).unitScale;
-        f.minLot = minDebt; // the deposit floor IS `minDebt` now: one price, so there is no claim cap to divide by
+        f.minLot = minPrincipal; // the deposit floor IS `minPrincipal` now: one price, so there is no claim cap to divide by
     }
 
     /// @dev Rest `perTick * TICKS` in the market: what the uniform 32-tick seed held in total.
@@ -126,7 +126,7 @@ contract AceAdmissionCoverageDustTest is Test {
     /// @dev number. There is no adversarial arrangement left, which is why this and `_seedUniform` now agree.
     /// @dev IT TOOK THE FLOOR LOT and derived the total as `minLot * 31 + floorLot`. It takes the TOTAL now:
     /// @dev the split was the shape, the shape is gone, and the derivation UNDERFLOWED once `minLot` stopped
-    /// @dev being `ceil(minDebt / maxClaimTicks)` and became `minDebt` itself.
+    /// @dev being `ceil(minPrincipal / maxClaimTicks)` and became `minPrincipal` itself.
     function _seedDustThenFloor(Fx memory f, uint256 total) internal {
         f.quote.mint(alice, total);
         vm.startPrank(alice);
@@ -236,7 +236,7 @@ contract AceAdmissionCoverageDustTest is Test {
 
         vm.warp(f.read.loan(loanId).expiry + 1);
         f.ace.forceClose(loanId);
-        assertTrue(f.read.loan(loanId).closedAt != 0, "fixture: the expiry fold must actually settle the loan");
+        assertTrue(f.read.loan(loanId).closedAt != 0, "fixture: forceClose must actually settle the loan");
 
         (uint256 short, uint256 quoteAtBook) = f.read.shortfallOf(loanId);
         emit log_named_uint("shortfall units", short);
@@ -261,9 +261,9 @@ contract AceAdmissionCoverageDustTest is Test {
 
     /* ============================ the control ============================ */
 
-    /// @notice THE CONTROL, and it must PASS: the identical shape on the suite's baseline `minDebt`.
+    /// @notice THE CONTROL, and it must PASS: the identical shape on the suite's baseline `minPrincipal`.
     /// @dev Its job is to show the failures above are the DUST FLOOR and not the fixture's plumbing.
-    /// @dev At `minDebt` 10e6 on an 18-dec quote the position is ~1.2e7 collateral units, so 32 ceilings vanish.
+    /// @dev At `minPrincipal` 10e6 on an 18-dec quote the position is ~1.2e7 collateral units, so 32 ceilings vanish.
     function test_Control_OnTheBaselineMinDebt_StaysCoveredAtTheGatesOwnLine() public {
         Fx memory f = _deploy(18, 18, 10e6, Constants.MIN_COVERAGE_WAD);
         _seedUniform(f, f.minLot);
@@ -274,19 +274,19 @@ contract AceAdmissionCoverageDustTest is Test {
 
     /* ========== the corner with NO dust floor at all: coarse collateral ========== */
 
-    /// @notice THE REACHABILITY CASE, now closed: the gate asks 33 whole units where settlement needs 32.
-    /// @notice It needed no dust floor: this is the SHIPPED `minDebt` and the SHIPPED `k`.
-    /// @notice W is `minDebt / omega`, and `omega` is the quote that ONE collateral WEI buys.
+    /// @notice THE REACHABILITY CASE, now closed: the gate asks 46 whole units where settlement needs 33 (W is 32).
+    /// @notice It needed no dust floor: this is the SHIPPED `minPrincipal` and the SHIPPED `k`.
+    /// @notice W is `minPrincipal / omega`, and `omega` is the quote that ONE collateral WEI buys.
     /// @notice A whole-unit collateral at a few thousand dollars puts W under one, not under 640.
-    /// @dev So the corner does not need an absurd `minDebt`: it needs collateral COARSE beside the loan.
+    /// @dev So the corner does not need an absurd `minPrincipal`: it needs collateral COARSE beside the loan.
     /// @dev Tokenized whole units -- shares, bars, wrapped singles -- are exactly that shape, and legal.
     /// @dev Each funded tick then ceils its own claim to a WHOLE unit, so 32 ticks ask 32 units of a 1-unit lot.
     /// @dev The band sits near tick 92100, where one whole unit is worth about 10,000 of a 6-dec quote.
     /// @dev This is issue #305 inverted: it asserted a 1-unit line against a need of 32 while the defect stood.
-    /// @dev THE PRICE OF THE FIX IS VISIBLE HERE: a 5,000-quote loan now demands 33 whole units, not one.
+    /// @dev The draw is `32 * minPrincipal`, so the figures scale with the shipped `minPrincipal`: W is the draw over one unit's price.
     function test_CoarseCollateral_TheAdmittedLoanCoversSettlement() public {
         priceOffset = 92_100; // ~1e4 above par: one whole unit is ~10,000 quote tokens. SET BEFORE the deploy
-        Fx memory f = _deploy(0, 6, PocDeployConfig.MIN_DEBT, PocDeployConfig.MIN_COVERAGE_WAD);
+        Fx memory f = _deploy(0, 6, PocDeployConfig.MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD);
         f.record.setMinPrice(PriceFrame.px(1e23, address(f.quote), address(f.coll))); // ten times the band, so the cap never gates
         _seedUniform(f, f.minLot);
 
@@ -299,8 +299,8 @@ contract AceAdmissionCoverageDustTest is Test {
         emit log_named_uint("units at the gate's line", units);
         emit log_named_uint("_collateralNeeded", _need(f, loanId));
 
-        assertEq(units, 24, "the gate's line on a whole-unit collateral: requiredAt 1 plus the 32-tick cap");
-        assertEq(_need(f, loanId), 17, "what settlement asks: ONE ceiling over the whole debt, not one per rung"); // WAS TICKS
+        assertEq(units, 46, "the gate's line on a whole-unit collateral at the shipped minPrincipal");
+        assertEq(_need(f, loanId), 33, "what settlement asks: ONE ceiling over the whole debt, not one per rung"); // W + 1; WAS TICKS + W
         assertLe(_need(f, loanId), units, "a coarse-collateral market covers settlement at the gate's line");
     }
 
@@ -310,7 +310,7 @@ contract AceAdmissionCoverageDustTest is Test {
     /// @dev This is issue #305 inverted: it asserted 4,843.75 quote of bad debt while the defect stood.
     function test_CoarseCollateral_ForceCloseLeavesTheLendersWhole() public {
         priceOffset = 92_100; // SET BEFORE the deploy: the price is a creation param, not a rung a seed picks
-        Fx memory f = _deploy(0, 6, PocDeployConfig.MIN_DEBT, PocDeployConfig.MIN_COVERAGE_WAD);
+        Fx memory f = _deploy(0, 6, PocDeployConfig.MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD);
         f.record.setMinPrice(PriceFrame.px(1e23, address(f.quote), address(f.coll)));
         _seedUniform(f, f.minLot);
         (uint256 loanId, uint256 units) = _openAtTheLine(f, f.minLot * TICKS);
@@ -330,43 +330,40 @@ contract AceAdmissionCoverageDustTest is Test {
         assertEq(quoteAtBook, 0, "so nothing is booked against an overcollateralized loan");
     }
 
-    /* ============ the line leaves no headroom for the next roll ============ */
+    /* ============ the line is headroom enough for a cash extension ============ */
 
-    /// @notice A loan opened EXACTLY at the line cannot roll: the expiry fold force-closes it instead.
-    /// @notice Two things take from it and nothing gives back, so the successor is judged short by construction.
-    /// @dev The fold credits the keeper sliver FIRST and judges `units - sliver` against the successor's line.
-    /// @dev `derivedPrincipal` floors at `minDebt` and must also cover the new fee, so the successor cannot shrink.
-    /// @dev Force-close is the SAFE branch, so this is headroom the borrower has to leave, not a hole.
-    /// @dev A borrower who wants the roll posts above the line; nothing in `src` obliges them to discover that.
-    function test_OpenedAtTheLine_TheExpiryFoldForceClosesRatherThanRolling() public {
+    /// @notice A loan opened EXACTLY at the line can still extend: the fee is paid in cash and no sliver leaves the lot, so nothing takes from it.
+    /// @notice The extended loan is judged as a new one on the same debt and the same lot at the same price, which is the line it opened on.
+    /// @dev The other leg: `forceClose` at the line pays its live sliver and still leaves every claim covered.
+    function test_OpenedAtTheLine_ACashExtensionStillAdmits() public {
         Fx memory f = _deploy(18, 18, DUST_MIN_DEBT, Constants.MIN_COVERAGE_WAD, SPACING, 50);
-        /// @dev Deep enough that the TOP TICK alone funds the draw, so a drained ladder cannot refuse the
-        /// @dev successor `InsufficientCash` and mask the leg under test.
-        /// @dev The dust scale is what puts the gap INSIDE the band: the successor's fee costs one unit,
-        /// @dev not thousands, so the trigger leg still clears and only the coverage line can refuse.
+        AceFixtures.installYesPolicy(f.ace, f.ace.idToMarketParams(f.id).lender); // a missing policy must not be what answers
         uint256 principal = DUST_MIN_DEBT;
         _seedUniform(f, 2 * principal);
         (uint256 loanId, uint256 units) = _openAtTheLine(f, principal);
         assertEq(f.read.fundingFloor(f.id, loanId), topTick, "fixture: the draw floored at the market price");
+        uint64 x = f.read.loan(loanId).expiry;
+        vm.warp(x - 1);
 
-        uint64 tenor = f.ace.idToMarketParams(f.id).minTenor;
-        vm.prank(borrower);
-        f.ace.setAutoRefinance(loanId, tenor, 0, 0);
-        vm.warp(f.read.loan(loanId).expiry + 1);
+        (bool ok, bytes4 reason, uint256 fee) = f.ace.tryExtend(loanId, 0, "", borrower);
+        assertTrue(ok, string.concat("a position sitting on the line still admits its extension; reason ", vm.toString(bytes32(reason))));
+        uint256 snap = vm.snapshotState();
+        f.quote.mint(borrower, fee);
+        vm.startPrank(borrower);
+        f.quote.approve(address(f.ace), fee);
+        f.ace.extend(loanId, 0, "");
+        vm.stopPrank();
+        assertGt(f.read.loan(loanId).expiry, x, "and the extension lands in place");
+        assertEq(f.read.loan(loanId).collateralUnits, units, "on the lot it opened with");
+        vm.revertToState(snap);
 
-        (bool ok, bytes4 reason,) = f.ace.tryContinue(loanId);
-        assertFalse(ok, "the successor cannot be admitted off a position sitting on the line");
-        assertEq(reason, BelowCoverageLine.selector, "and the coverage line is what refuses it, by name");
-
-        uint256 countBefore = f.read.loanCount();
+        vm.warp(x);
         f.ace.forceClose(loanId);
-        assertEq(f.read.loanCount(), countBefore, "the fold opened no successor");
-        assertTrue(f.read.loan(loanId).closedAt != 0, "it took the settle branch instead");
-
+        assertTrue(f.read.loan(loanId).closedAt != 0, "forceClose settles the same loan instead");
         (uint256 short,) = f.read.shortfallOf(loanId);
         emit log_named_uint("units at the line", units);
         emit log_named_uint("shortfall units", short);
-        assertEq(short, 0, "and the settle branch is safe: the line still covers every claim");
+        assertEq(short, 0, "and settlement is safe: the line still covers every claim after the sliver");
     }
 
     /* ============= the window the coverage line closes, swept ============= */

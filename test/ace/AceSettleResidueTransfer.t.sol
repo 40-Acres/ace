@@ -58,7 +58,7 @@ contract AceSettleResidueTransferTest is Test {
     /// @dev A sentinel minimum leaves the draw cap, the withdrawal clamp and the ask floor where no record left them.
     /// @dev Rows still settle by `forceClose` at expiry: the mock reports no persisted distress, so `finalize` stays shut.
     /// @dev `price` of zero means `T_HI`, which is the price every row but the remainder control wants.
-    function _market(uint8 collDecimals, uint256 minDebt, uint256 price) internal {
+    function _market(uint8 collDecimals, uint256 minPrincipal, uint256 price) internal {
         usdc = new MockERC20("USD Coin", "USDC", 6);
         coll = new MockERC20("Collateral", "COLL", collDecimals);
         T_HI = AceFixtures.priceAt(address(usdc), address(coll), HI_OFFSET);
@@ -66,7 +66,7 @@ contract AceSettleResidueTransferTest is Test {
         rec.setMinPrice(type(uint256).max);
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(coll));
         p.record = address(rec);
-        p.minDebt = minDebt;
+        p.minPrincipal = minPrincipal;
         p.price = price == 0 ? T_HI : price;
         /// @dev NO KEEPER SLIVER: settlement takes it off the top, and every row here measures the CEILING's
         /// @dev residue alone. It is a second, unrelated subtraction from the same borrower balance.
@@ -93,12 +93,10 @@ contract AceSettleResidueTransferTest is Test {
         assertLe(read.triggerPrice(loanId), read.fundingFloor(id, loanId), "fixture: admitted at the gate");
     }
 
-    /// @dev Settle a HEALTHY loan at tenor: `forceClose` with no armed policy, which reads no price at all.
-    /// @dev Health is stated as UNSETTLEABLE plus UNARMED, which is what makes expiry the only exit.
+    /// @dev Settle a HEALTHY loan at tenor: `forceClose`, which reads no price at all.
+    /// @dev Health is stated as UNSETTLEABLE, which is what makes expiry the only exit.
     function _forceCloseAtTenor(uint256 loanId) internal {
         assertFalse(read.settleable(loanId), "fixture: the loan must not be liquidatable, so this is not a default");
-        (uint64 policyTenor,,) = read.autoPolicyOf(loanId);
-        assertEq(policyTenor, 0, "fixture: no armed policy, so the expiry fold settles rather than rolls");
         vm.warp(uint256(read.loan(loanId).expiry) + 1);
         vm.prank(keeper);
         ace.forceClose(loanId);
@@ -142,7 +140,7 @@ contract AceSettleResidueTransferTest is Test {
     /// @dev Both halves are asserted: the loan's `invPot` and the borrower's `unitsOwed`.
     /// @dev WAS a two-tick loan carrying its own remainder control on a second leg; that control is the row below.
     function test_SubAtomicClaimAtAHighPrice_TakesAWholeAtomFromTheBorrower() public {
-        _market(0, SUB_ATOMIC, 0); // the floor IS `minDebt` now, so the draw and the deposit floor are one number
+        _market(0, SUB_ATOMIC, 0); // the floor IS `minPrincipal` now, so the draw and the deposit floor are one number
         _deposit(SUB_ATOMIC);
         uint256 loanId = _open(HELD, SUB_ATOMIC);
 
@@ -207,7 +205,7 @@ contract AceSettleResidueTransferTest is Test {
     /// @dev WAS three rows sweeping the claim cap at 10 and at 32, plus a second atom size. The cap is gone, so
     /// @dev the sweep has one point left; the second atom size survives as the row below, which is the variable.
     function test_TheTransferIsBoundedByOneAtom() public {
-        uint256 gain = _measureTransfer(500e6, 500e6, HI_OFFSET); // WAS 32x the lot: the floor was `minDebt / maxClaimTicks`
+        uint256 gain = _measureTransfer(500e6, 500e6, HI_OFFSET); // WAS 32x the lot: the floor was `minPrincipal / maxClaimTicks`
         emit log_named_uint("borrower-to-lender transfer at a ~2166 quote atom", gain);
         assertGt(gain, 0, "a coarse collateral at a high price still moves real quote");
     }
@@ -222,11 +220,11 @@ contract AceSettleResidueTransferTest is Test {
 
     /// @dev A market bidding above the price where a `lot` claim stops buying a whole atom, settled at tenor.
     /// @dev `anchorOffset` is steps OVER PAR, resolved after the market exists: par is a property of the pair.
-    function _measureTransfer(uint256 minDebt, uint256 lot, int24 anchorOffset) internal returns (uint256 gain) {
+    function _measureTransfer(uint256 minPrincipal, uint256 lot, int24 anchorOffset) internal returns (uint256 gain) {
         usdc = new MockERC20("USD Coin", "USDC", 6);
         coll = new MockERC20("Collateral", "COLL", 0);
         uint256 price = AceFixtures.priceAt(address(usdc), address(coll), anchorOffset);
-        _market(0, minDebt, price);
+        _market(0, minPrincipal, price);
 
         _deposit(lot);
         uint256 loanId = _open(4, lot);

@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
-import {Vm} from "forge-std/Vm.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
-import {GateRefused} from "../../src/ace/hub/Borrower.sol";
 import {ExitToCustodian, ExitToHub} from "../../src/ace/hub/libraries/Recipients.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
@@ -17,8 +15,7 @@ import {AceReader} from "../utils/AceReader.sol";
 
 /// @title AceRetitleRails
 /// @notice Run 251533 Y-12. Leg B: a title never moves to the hub, the positionManager, the title collection or the treasury.
-/// @notice Leg A: in a market that names its borrower, any title move disarms a live armed loan; an open market keeps the policy.
-/// @dev A disarm releases the share and logs `AutoPolicySet(id, 0, 0, 0)`; a closed loan's stale policy entry is left alone.
+/// @notice Leg A, a title move disarming an armed loan in a named market, went with arming; AceExtend pins the named market's gate.
 contract AceRetitleRailsTest is WarpClock {
     Ace internal ace;
     AceReader internal read;
@@ -40,9 +37,6 @@ contract AceRetitleRailsTest is WarpClock {
     uint256 internal constant UNITS = 100_000e18;
 
     bytes4 internal constant RETITLE_TO_COLLECTION = bytes4(keccak256("RetitleToCollection()"));
-    bytes32 internal constant AUTO_POLICY_SET = keccak256("AutoPolicySet(uint256,uint64,uint16,uint16)");
-
-    event AutoPolicySet(uint256 indexed id, uint64 tenor, uint16 minBufferBps, uint16 maxFeeBps);
 
     function setUp() public {
         _warpTo(1_000_000);
@@ -71,27 +65,17 @@ contract AceRetitleRailsTest is WarpClock {
         vm.stopPrank();
     }
 
-    function _openArmed(bytes32 m) internal returns (uint256 loanId) {
+    function _openIn(bytes32 m) internal returns (uint256 loanId) {
         coll.mint(holder, UNITS);
         vm.startPrank(holder);
         coll.approve(address(pm), UNITS);
         loanId = ace.open(m, UNITS, P, TEN7, holder, OpenBounds(0, 0, 0));
-        ace.setAutoRefinance(loanId, TEN7, 500, 0);
         vm.stopPrank();
-    }
-
-    function _move(address from, address to, uint256 loanId) internal {
-        vm.prank(from);
-        title.transferFrom(from, to, loanId);
-    }
-
-    function _tenor(uint256 loanId) internal view returns (uint64 t) {
-        (t,,) = read.autoPolicyOf(loanId);
     }
 
     /// @notice Leg B: a title sent to the hub is refused, `ExitToHub`, as every exit refuses it.
     function test_ATitleCannotBeSentToTheHub() public {
-        uint256 loanId = _openArmed(open);
+        uint256 loanId = _openIn(open);
         vm.prank(holder);
         vm.expectRevert(ExitToHub.selector);
         title.transferFrom(holder, address(ace), loanId);
@@ -99,7 +83,7 @@ contract AceRetitleRailsTest is WarpClock {
 
     /// @notice Leg B: a title sent to the positionManager is refused, `ExitToCustodian`.
     function test_ATitleCannotBeSentToThePositionManager() public {
-        uint256 loanId = _openArmed(open);
+        uint256 loanId = _openIn(open);
         vm.prank(holder);
         vm.expectRevert(ExitToCustodian.selector);
         title.transferFrom(holder, address(pm), loanId);
@@ -107,112 +91,13 @@ contract AceRetitleRailsTest is WarpClock {
 
     /// @notice Leg B: a title sent to the title collection itself is refused: it could neither move the token nor claim for it.
     function test_ATitleCannotBeSentToTheTitleCollection() public {
-        uint256 loanId = _openArmed(open);
+        uint256 loanId = _openIn(open);
         vm.prank(holder);
         vm.expectRevert(RETITLE_TO_COLLECTION);
         title.transferFrom(holder, address(title), loanId);
     }
 
-    /// @notice Leg A's scope: an OPEN market's armed loan keeps its policy and its share across a sale.
-    function test_AnOpenMarketKeepsThePolicyAcrossATitleMove() public {
-        uint256 loanId = _openArmed(open);
-        uint256 held = read.rollReserve(open);
-        _move(holder, buyer, loanId);
-        assertEq(_tenor(loanId), TEN7, "the policy travels with the position");
-        assertEq(read.rollReserve(open), held, "and so does its reservation");
-    }
-
-    /// @notice Leg A: in a named market ANY title move disarms, a sale into an escrowing marketplace included.
-    function test_ANamedMarketDisarmsOnAnyTitleMove() public {
-        uint256 loanId = _openArmed(named);
-        assertGt(read.rollReserve(named), 0, "PREMISE: armed and reserved");
-        vm.expectEmit(true, false, false, true, address(ace));
-        emit AutoPolicySet(loanId, 0, 0, 0);
-        _move(holder, market, loanId);
-        assertEq(_tenor(loanId), 0, "the move into the marketplace disarmed the loan");
-        assertEq(read.rollReserve(named), 0, "and released its reservation");
-        assertEq(ace.borrowerOf(loanId), market, "while the title moved as asked");
-    }
-
-    /// @notice Leg A: the named borrower may re-arm once the title is back in its hands.
-    function test_TheNamedBorrowerReArmsWhenTheTitleComesBack() public {
-        uint256 loanId = _openArmed(named);
-        _move(holder, buyer, loanId);
-        _move(buyer, holder, loanId);
-        assertEq(_tenor(loanId), 0, "still disarmed: the round trip restored nothing");
-        vm.prank(holder);
-        ace.setAutoRefinance(loanId, TEN7, 500, 0);
-        assertEq(_tenor(loanId), TEN7, "the named holder arms again");
-    }
-
-    /// @notice An UNARMED loan's title move in a named market logs no disarm and keeps what its entry stored.
-    /// @dev A tenor-zero arm still stores its buffer; a disarm that skipped the tenor test would delete it and log zeros.
-    function test_AnUnarmedLoansTitleMoveLogsNoDisarmAndKeepsItsEntry() public {
-        uint256 loanId = _openArmed(named);
-        vm.prank(holder);
-        ace.setAutoRefinance(loanId, 0, 500, 0); // a disarm that keeps a buffer on file
-        (uint64 t0, uint16 b0,) = read.autoPolicyOf(loanId);
-        assertEq(uint256(t0), 0, "PREMISE: disarmed");
-        assertEq(uint256(b0), 500, "PREMISE: with its buffer stored");
-        vm.recordLogs();
-        _move(holder, buyer, loanId);
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        for (uint256 i; i < logs.length; i++) {
-            if (logs[i].emitter == address(ace) && logs[i].topics.length > 0) {
-                assertTrue(logs[i].topics[0] != AUTO_POLICY_SET, "an unarmed loan's title move logged a disarm");
-            }
-        }
-        (uint64 t1, uint16 b1,) = read.autoPolicyOf(loanId);
-        assertEq(uint256(t1), 0, "still disarmed");
-        assertEq(uint256(b1), 500, "and its stored buffer is untouched");
-    }
-
-    /// @notice A title-move disarm releases THAT loan's share and no other: the market keeps every other armed loan's hold.
-    function test_ADisarmReleasesOnlyTheMovedLoansShare() public {
-        uint256 a = _openArmed(named);
-        uint256 b = _openArmed(named);
-        uint256 shareB = read.reservedOf(b);
-        assertGt(read.reservedOf(a), 0, "PREMISE: a is reserved");
-        assertEq(read.rollReserve(named), read.reservedOf(a) + shareB, "PREMISE: the reserve is the two shares");
-        _move(holder, buyer, a);
-        assertEq(read.reservedOf(a), 0, "the moved loan's share is released");
-        assertEq(read.rollReserve(named), shareB, "and the reserve is exactly the other loan's share");
-        assertEq(_tenor(b), TEN7, "the loan that stayed with the named holder keeps its policy");
-    }
-
-    /// @notice A gate refusal is PERMANENT for that holder, so `arm` reports it ahead of every policy rail the holder could fix.
-    /// @dev Each attempt below breaks one policy rail too: routing with no buffer, a full buffer, and a tenor past the grid.
-    function test_AGateRefusalOutranksEveryPolicyRail() public {
-        uint256 loanId = _openArmed(named);
-        _move(holder, buyer, loanId);
-        vm.startPrank(buyer);
-        vm.expectRevert(GateRefused.selector);
-        ace.setAutoRefinance(loanId, TEN7, 0, 100); // also RoutingNeedsBuffer
-        vm.expectRevert(GateRefused.selector);
-        ace.setAutoRefinance(loanId, TEN7, 10_000, 0); // also BufferOutOfRange
-        vm.expectRevert(GateRefused.selector);
-        ace.setAutoRefinance(loanId, 2 * TEN7, 500, 0); // also TenorOutOfRange
-        vm.stopPrank();
-    }
-
-    /// @notice A closed loan's stale policy entry is left alone: moving its title logs no disarm and writes nothing to it.
-    function test_AClosedLoansPolicyEntryIsNotTouchedByATitleMove() public {
-        uint256 loanId = _openArmed(named);
-        _warpTo(read.loan(loanId).expiry);
-        vm.prank(keeper);
-        ace.forceClose(loanId);
-        assertTrue(ace.isClosed(loanId), "PREMISE: the fold rolled the loan, closing it");
-        assertEq(_tenor(loanId), TEN7, "PREMISE: the closed loan's entry stays behind its close stamp");
-        vm.recordLogs();
-        _move(holder, buyer, loanId);
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        for (uint256 i; i < logs.length; i++) {
-            if (logs[i].emitter == address(ace) && logs[i].topics.length > 0) {
-                assertTrue(logs[i].topics[0] != AUTO_POLICY_SET, "a closed loan's title move logged a disarm");
-            }
-        }
-        assertEq(_tenor(loanId), TEN7, "and wrote nothing to its entry");
-    }
+    // Leg A's seven disarm-on-retitle rows went with arming: a title move now writes only the holder
 }
 
 /// @title AceRetitleRailsTreasury

@@ -217,8 +217,8 @@ contract AceGenesisDriveHandler is WarpClock {
     /// @notice Seeding is part of genesis on purpose: an unfunded market is a config that never reaches a draw.
     /// @dev A refusal is a RESULT, not a failure -- the rails are a frontier and finding it is half the point.
     /// @dev The dials left fixed are the ones whose variation only produces refusals: the tenor grid and the band.
-    /// @dev `minCoverageWad`, `baseBps`, `minDebt`, the price, the bounty and the deleverage cut all vary.
-    /// @dev `minDebt` reaches ONE ATOM and the price reaches both ends of the menu: the degenerate NEIGHBOURHOODS.
+    /// @dev `minCoverageWad`, `baseBps`, `minPrincipal`, the price, the bounty and the deleverage cut all vary.
+    /// @dev `minPrincipal` reaches ONE ATOM and the price reaches both ends of the menu: the degenerate NEIGHBOURHOODS.
     function createMarket(uint256 seed) external {
         _bump("createMarket");
         _createFrom(seed);
@@ -259,7 +259,7 @@ contract AceGenesisDriveHandler is WarpClock {
     }
 
     /// @dev The fixture baseline with the dials the issue named swept across their rails and past them.
-    /// @dev `minDebt` sweeps from ONE ATOM so the sweep reaches the fee-ceiling floor and is refused there.
+    /// @dev `minPrincipal` sweeps from ONE ATOM so the sweep reaches the fee-ceiling floor and is refused there.
     /// @dev Scale comes from the HELD decimals, so a 2-dec market is not a thousandth of an 18-dec one.
     /// @dev THE PRICE IS A DIAL NOW, taking the place of the spacing the grid used to fuzz.
     /// @dev The lender is a dial too, and it is in the id preimage, so two markets differing only by it fork.
@@ -272,7 +272,7 @@ contract AceGenesisDriveHandler is WarpClock {
         p.price = PriceFrame.priceAt(address(quoteTokens[qi]), address(collTokens[ci]), PRICE_OFFSETS[(seed >> 16) % 6]);
         p.minCoverageWad = bound(seed >> 24, 1.05e18, 20e18);
         p.baseBps = bound(seed >> 32, 1, Constants.MAX_FEE_SHARE_BPS);
-        p.minDebt = bound(seed >> 40, 1, 50 * quoteUnit(qi));
+        p.minPrincipal = bound(seed >> 40, 1, 50 * quoteUnit(qi));
         p.settleBountyBps = bound(seed >> 72, 0, 200);
         p.deleverageFloorEpsBps = ProtocolPolicy.DELEVERAGE_FLOOR_EPS_BPS;
         p.deleverageBandBps = BAND_BPS;

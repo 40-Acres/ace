@@ -10,11 +10,11 @@ import {Borrower, NoRecordPrice} from "../hub/Borrower.sol";
 import {FillBelowMin, FillOverCollateralized, FillOverOrder, FillUnderCollateralized, OrderClosed, RemainderBelowMin} from "../hub/Orders.sol";
 import {Probe} from "../hub/libraries/Probe.sol";
 import {MarketInit} from "../hub/MarketInit.sol";
+import {HubLoanTerm} from "../../interfaces/HubLoanTerm.sol";
 import {IPersistenceRecord} from "../../interfaces/IPersistenceRecord.sol";
 import {Mul512} from "../../utils/Mul512.sol";
 
 error ZeroLimit(); // limit 0 is ambiguous: an empty page to the hub, a full one to this side; refuse, never guess
-error RowUnevaluable(); // a batch row threw with no selector to report: the row is refused, the batch is not
 error NoMarket(); // no market at this id; deliberately the selector the hub throws, so one catch covers both
 error TornRead(); // an ON-CHAIN CALLABLE view was called mid-hub-body, where the aggregates it reads are half-updated
 
@@ -28,7 +28,7 @@ interface IAceHub {
     function notEntered() external view returns (bool);
     function marketLoansLength(bytes32 id) external view returns (uint256);
     function marketLoans(bytes32 id, uint256 offset, uint256 limit) external view returns (uint256[] memory);
-    function tryContinue(uint256 loanId) external view returns (bool ok, bytes4 reason, uint256 principal);
+    function tryExtend(uint256 id, uint256 minBufferWad, bytes calldata data, address caller) external view returns (bool ok, bytes4 reason, uint256 fee);
     function orderOf(uint256 id) external view returns (Order memory);
     function previewOpen(bytes32 id, uint256 collateralUnits, uint256 principal, uint64 tenor, address borrower, OpenBounds calldata bnd)
         external
@@ -74,14 +74,13 @@ contract AceLens {
     uint256 private constant M_MAP = uint256(Storage.MARKETS);
     uint256 private constant B_BASE = uint256(Storage.BOOK);
     uint256 private constant B_COUNT = B_BASE;
-    uint256 private constant B_LOANS = B_BASE + 1;
+    uint256 private constant B_LOANS = HubLoanTerm.LOANS; // base + 1, spelled once where the term word's readers take it
     uint256 private constant B_PRINCIPAL = B_BASE + 2;
     uint256 private constant B_CREDIT_OPERATOR = B_BASE + 3;
     uint256 private constant B_FEE_ESCROW = B_BASE + 5; // +4 is creditOperatorNonce, not a gap
-    uint256 private constant B_AUTO_POLICY = B_BASE + 6;
-    uint256 private constant B_UNITS_OWED = B_BASE + 7;
-    uint256 private constant B_QUOTE_OWED = B_BASE + 8;
-    uint256 private constant B_SHORTFALL = B_BASE + 9;
+    uint256 private constant B_UNITS_OWED = B_BASE + 6;
+    uint256 private constant B_QUOTE_OWED = B_BASE + 7;
+    uint256 private constant B_SHORTFALL = B_BASE + 8; // +9 is `orders`, read through the hub's getter
 
     /// @dev Member offsets inside one `Market`: params occupy 0..16, state 17..25, mappings after.
     /// @dev A wrong index reads a plausible number and reverts nothing, so never edit this by hand.
@@ -96,6 +95,7 @@ contract AceLens {
     uint256 private constant M_INV_POT = 28; // +27 is the openedLoans array, not a gap
 
     uint256 private constant L_POOLS = uint256(Storage.LENDERS); // `pools`, member 0 of the `lenders` root: an entry is _entry(quote, _entry(lender, root))
+    uint256 private constant L_ROLL_POLICY = uint256(Storage.LENDERS) + 3; // `rollPolicyOf`, member 3 of the `lenders` root
     uint256 private constant UNIT_SCALE = 1 << 96; // the one price frame genesis writes into every market; a record declaring another is refused
 
     constructor(address ace) {
@@ -138,29 +138,11 @@ contract AceLens {
         }
     }
 
-    /// @notice Whether `refinanceByPolicy` would continue this loan right now; the hub's own answer, forwarded.
-    function tryContinue(uint256 loanId) external view returns (bool ok, bytes4 reason, uint256 principal) {
-        return ACE.tryContinue(loanId);
-    }
-
-    /// @notice THE BATCH FILTER for `refinanceByPolicies`, which is all-or-nothing: one bad id reverts it.
-    /// @notice Rows are positional, so a keeper drops the refused ids and submits the rest unchanged.
-    /// @notice BLOCK-SCOPED like the singular: an answer read in one block does not bind the next.
-    /// @dev A hostile market record can make its own row expensive; the cost is bounded by the caller's own gas.
-    /// @dev PER ROW, so one id that throws refuses its own row instead of the batch: a filter that reverts filters nothing.
-    /// @dev A thrown row reports the thrower's own selector where it gave one, and `RowUnevaluable` where it gave none.
-    /// @dev It cannot catch an out-of-gas row: a callee that burns the whole allowance leaves nothing to catch with.
-    function tryContinueMany(uint256[] calldata loanIds) external view returns (bool[] memory oks, bytes4[] memory reasons, uint256[] memory principals) {
-        oks = new bool[](loanIds.length);
-        reasons = new bytes4[](loanIds.length);
-        principals = new uint256[](loanIds.length);
-        for (uint256 i; i < loanIds.length; i++) {
-            try ACE.tryContinue(loanIds[i]) returns (bool ok, bytes4 reason, uint256 principal) {
-                (oks[i], reasons[i], principals[i]) = (ok, reason, principal);
-            } catch (bytes memory err) {
-                reasons[i] = err.length >= 4 ? bytes4(err) : RowUnevaluable.selector;
-            }
-        }
+    /// @notice Whether `extend` with these arguments would land if `caller` sent it now, and its fee; the hub's own answer, forwarded.
+    /// @notice The caller is an argument, so a borrower's preview through here answers for the borrower and never for this lens.
+    /// @notice An extension always runs the loan's own tenor from now, so no tenor is asked.
+    function tryExtend(uint256 loanId, uint256 minBufferWad, bytes calldata data, address caller) external view returns (bool ok, bytes4 reason, uint256 fee) {
+        return ACE.tryExtend(loanId, minBufferWad, data, caller);
     }
 
     /// @notice Whether `fillOrder` would take this fill right now, and the first fact that refuses it.
@@ -234,33 +216,22 @@ contract AceLens {
 
     // ---- market state ----
 
-    /// @notice This market's posted rate, annualized, and what an armed roll at `maxTenor` does to a loan's face.
+    /// @notice This market's posted rate, annualized.
     /// @notice `baseBps` IS PER THE MARKET'S OWN `minTenor`; the raw number never compares across markets and the APR legs do.
     /// @notice BOTH APR LEGS ARE HELD-TO-TERM: half the lender cut is refundable, so an early close realizes less on each.
     /// @notice THE ALL-IN LEG IS A RATE ON FACE: the fee is prepaid out of the draw, so the cost on the cash received is higher.
-    /// @notice THE ROLL LEG IS TAKEN AT `maxTenor`; a borrower's own shorter roll inflates the face by less.
-    /// @notice It is the worst roll only for a debt of at least `minDebt` divided by this multiplier: a smaller one floors at `minDebt`, a larger multiple.
-    /// @notice It is FACE GROWTH alone: a keeper-run roll also takes `settleBountyBps` of the debt in collateral.
-    /// @notice A RECORDLESS market reports a zero roll leg: it cannot arm, so no loan there ever takes that roll.
+    /// @notice An extension is paid in cash at the same rate, so no extension moves a loan's face.
     /// @dev PER YEAR IN BPS, multiply-before-divide, and SIMPLE: the fee is prepaid at the draw, so nothing compounds.
-    /// @dev `maxTenor` is also the term the fee-share rail is checked at, so this number and that rail share one corner.
     /// @dev Truncating, so a `minTenor` over a year at the floor rate reads zero; the error is under one bps of APR always.
     /// @dev Zeros for a market that does not exist, which is what the neighbouring views answer rather than reverting.
     /// @param id The market.
     /// @return lenderAprBps What the lender earns, annualized.
     /// @return allInAprBps The borrower's fee per unit of face, annualized, protocol share included.
-    /// @return worstRollFaceMulWad The face multiplier an armed same-market roll applies at `maxTenor`, in WAD; zero where no loan can arm.
-    function rateBps(bytes32 id) external view returns (uint256 lenderAprBps, uint256 allInAprBps, uint256 worstRollFaceMulWad) {
+    function rateBps(bytes32 id) external view returns (uint256 lenderAprBps, uint256 allInAprBps) {
         MarketParams memory p = ACE.idToMarketParams(id);
-        if (p.minTenor == 0) return (0, 0, 0);
-        uint256 gross = 10000 + Constants.PROTOCOL_SHARE_BPS;
+        if (p.minTenor == 0) return (0, 0);
         lenderAprBps = p.baseBps * 365 days / p.minTenor;
-        allInAprBps = p.baseBps * gross * 365 days / (10000 * p.minTenor);
-        if (p.record == address(0)) return (lenderAprBps, allInAprBps, 0); // recordless: `ArmNeedsRecord`, so there is no roll
-        uint256 d = 10000 * 10000 * uint256(p.minTenor);
-        uint256 n = p.baseBps * uint256(p.maxTenor) * gross;
-        /// @dev `d > n` is the fee-share rail restated, so genesis holds it for every creatable market.
-        worstRollFaceMulWad = d > n ? FullMath.mulDiv(1e18, d, d - n) : 0;
+        allInAprBps = p.baseBps * (10000 + Constants.PROTOCOL_SHARE_BPS) * 365 days / (10000 * p.minTenor);
     }
 
     /// @notice The market's scalar state: the O(1) aggregate mirrors plus the derived scales.
@@ -268,7 +239,6 @@ contract AceLens {
         bytes32[] memory w = _words(_marketBase(id) + M_STATE, M_STATE_WORDS);
         s.cash = uint256(w[0]);
         s.drawCount = uint64(uint256(w[1]));
-        s.rollReserve = uint128(uint256(w[1]) >> 64); // packed beside drawCount, at byte offset 8
         s.cumulativeBackedBurns = uint256(w[2]);
         s.netSyntheticOutflow = uint256(w[3]);
         s.protocolRevenue = uint256(w[4]);
@@ -308,58 +278,10 @@ contract AceLens {
         return uint64(_word(_marketBase(id) + M_STATE + 1));
     }
 
-    /// @notice The cash resting in this market, which under sole tenancy IS its lender's balance here.
-    /// @notice NOT what a fresh draw may take: `drawableOf` nets out what armed loans reserved for their rolls.
+    /// @notice The cash resting in this market, which under sole tenancy IS its lender's balance here, and all of it a fresh draw may take.
     /// @dev PER MARKET, unlike `lenderPools`, whose `resting` spans that lender's markets in this quote.
     function restingOf(bytes32 id) public view returns (uint256) {
         return _word(_marketBase(id) + M_STATE);
-    }
-
-    /// @notice The part of this market's resting cash its armed loans hold for their expiry rolls.
-    /// @notice ON-CHAIN CALLABLE: it refuses mid-body, where a roll has moved the reserve and not yet the cash.
-    /// @dev It may exceed `restingOf`: the lender's own withdraw is not held to it, by the lender's consent.
-    function rollReserve(bytes32 id) public view returns (uint256) {
-        if (!ACE.notEntered()) revert TornRead();
-        return uint128(_word(_marketBase(id) + M_STATE + 1) >> 64);
-    }
-
-    /// @notice What a fresh draw may take from this market now: resting cash less the roll reserve, floored at zero.
-    /// @notice A QUOTE SIZES AGAINST THIS, never `restingOf`: reserved cash is refused to every draw but its own loan's roll.
-    /// @notice ON-CHAIN CALLABLE: it refuses mid-body, at `rollReserve`'s guard.
-    function drawableOf(bytes32 id) external view returns (uint256) {
-        uint256 cash = restingOf(id);
-        uint256 rr = rollReserve(id);
-        return Math.saturatingSub(cash, rr);
-    }
-
-    /// @notice One armed loan's share of its market's roll reserve; zero once disarmed, rolled or closed.
-    function reservedOf(uint256 loanId) public view returns (uint256) {
-        return uint128(_word(_entry(loanId, B_AUTO_POLICY)) >> 96);
-    }
-
-    /// @notice Whether arming this loan at `tenor` would find its roll backed right now, and the cash it would reserve.
-    /// @notice BLOCK-SCOPED: any draw or withdraw moves the answer, so a borrower arms in the open's own transaction.
-    /// @notice It answers the record class, the borrower rule, the CASH question and the tenor grid; the other rails are the caller's inputs.
-    /// @notice A RECORDLESS market answers `(false, 0)`: no loan there can arm, at any cash level.
-    /// @notice ON-CHAIN CALLABLE: past its closed-loan and off-grid refusals it refuses mid-body, at `rollReserve`'s guard.
-    /// @dev It re-spells `Borrower.arm`'s cash test, which reads hub storage a lens cannot reach, so the two must agree.
-    /// @dev A need within the loan's current reservation lands in any cash state; a larger one must fit with that reservation counted as its own.
-    /// @dev For a live loan on the grid the record check runs AFTER the guarded read, so a mid-body call refuses `TornRead` in a recordless market too.
-    /// @param loanId The loan to arm.
-    /// @param tenor The continuation term; outside the market's grid answers false.
-    /// @return ok Whether `setAutoRefinance` would reserve rather than revert `ArmNeedsRecord`, `GateRefused` or `RollUnbacked`.
-    /// @return reserve The fresh cash its expiry roll would draw, held back by arming; zero closed, off the grid, recordless or gate-refused.
-    function armable(uint256 loanId, uint64 tenor) external view returns (bool ok, uint256 reserve) {
-        Loan memory l = loan(loanId);
-        if (l.market == bytes32(0) || l.closedAt != 0) return (false, 0);
-        Cfg memory c = _gateCfg(l.market);
-        if (tenor < c.p.minTenor || tenor > c.p.maxTenor) return (false, 0);
-        reserve = Borrower.rollNeed(c, l.debt, tenor);
-        uint256 own = reservedOf(loanId);
-        uint256 held = rollReserve(l.market); // read before the short-circuit: it carries the torn-read guard
-        if (c.p.record == address(0)) return (false, 0); // explicit: the need computed above must not leak out as a quote
-        if (!Borrower.gateAdmits(c.p.borrower, l.borrower)) return (false, 0); // the hub's `GateRefused`, through the hub's one spelling
-        ok = reserve <= own || reserve + held <= restingOf(l.market) + own;
     }
 
     /// @notice The collateral a settled loan left its lender.
@@ -429,7 +351,7 @@ contract AceLens {
     /// @dev Closed loans self-filter: a melt or a settlement zeroes the claim, so the predicate skips them.
     /// @dev COST is one staticcall per scanned member; the hub clamps `limit` to 256. An eth_call view only.
     /// @dev `limit == 0` REVERTS `ZeroLimit`: the hub reads it as an empty page, this side read it as full.
-    /// @param offset Start near the tail -- ids are monotone and loans are tenor-bounded.
+    /// @param offset Where to start; ids are monotone, but an extension keeps its id, so a live loan can sit anywhere in the list.
     /// @param limit Members to examine; must be non-zero. The hub clamps the ceiling.
     /// @return loanIds The matches inside the scanned window.
     /// @return scanned Members examined; 0 means the window ran past the end.
@@ -465,11 +387,9 @@ contract AceLens {
         l.borrower = address(uint160(uint256(w[1])));
         l.collateralUnits = uint256(w[2]);
         l.debt = uint256(w[3]);
-        uint256 p = uint256(w[4]);
-        l.openTime = uint64(p);
-        l.tenor = uint64(p >> 64);
-        l.expiry = uint64(p >> 128);
-        l.closedAt = uint64(p >> 192);
+        bytes32 p = w[HubLoanTerm.TERM_WORD];
+        (l.openTime, l.tenor, l.expiry) = HubLoanTerm.decode(p);
+        l.closedAt = HubLoanTerm.closedAt(p);
         l.lastFee = uint256(w[5]);
     }
 
@@ -480,16 +400,6 @@ contract AceLens {
     /// @notice The refundable half of this loan's lender fee, still unearned.
     function feeEscrowOf(uint256 loanId) external view returns (uint256) {
         return _word(_entry(loanId, B_FEE_ESCROW));
-    }
-
-    /// @notice This loan's armed automatic continuation; `tenor == 0` is disarmed, and a CLOSED loan still reads the policy it closed with.
-    /// @dev A sponsor enumerates the armed set from here among LIVE loans; the hub itself pays no crank caller.
-    /// @dev `maxFeeBps` carries a CONSENT and not just a number: nonzero admits a keeper-named venue.
-    function autoPolicyOf(uint256 loanId) external view returns (uint64 tenor, uint16 minBufferBps, uint16 maxFeeBps) {
-        uint256 p = _word(_entry(loanId, B_AUTO_POLICY));
-        tenor = uint64(p);
-        minBufferBps = uint16(p >> 64);
-        maxFeeBps = uint16(p >> 80);
     }
 
     function creditOperator(address borrower, address operator) external view returns (bool) {
@@ -508,6 +418,16 @@ contract AceLens {
     /// @dev Sole tenancy puts `lender` in the id preimage, so this can never change under a reader.
     function lenderOf(bytes32 id) external view returns (address) {
         return ACE.idToMarketParams(id).lender;
+    }
+
+    /// @notice A market's live debt floor, half its `minPrincipal`: the least a partial repay may leave on a live loan.
+    function debtFloor(bytes32 id) external view returns (uint256) {
+        return LoanMath.debtFloor(ACE.idToMarketParams(id).minPrincipal);
+    }
+
+    /// @notice The roll policy every extension of this lender's loans asks; zero consents to none.
+    function rollPolicyOf(address lender) external view returns (address) {
+        return address(uint160(_word(_entry(lender, L_ROLL_POLICY))));
     }
 
     /// @notice One lender's whole position in one quote: resting cash, drawn at par, and uncollected credit.
@@ -537,7 +457,7 @@ contract AceLens {
         return LoanMath.triggerPrice(l.debt, l.collateralUnits, p.minCoverageWad, marketState(l.market).unitScale);
     }
 
-    /// @notice Collateral this loan must deliver to fill its live claim at the price it was funded at.
+    /// @notice Collateral this loan must deliver to fill its live claim, at its funding price.
     /// @notice What the coverage line has to keep covered at both doors, which is why that line derives off this.
     /// @notice NOT what a RECORDLESS settlement takes: that class forfeits the whole coverage line to its lender.
     /// @dev ONE CEIL, matching settlement, which is what lets the line's own epsilon be a single atom.
@@ -555,7 +475,7 @@ contract AceLens {
     /// @notice Zero when the loan sits on the line or under it, so a caller never reads a negative as a large number.
     /// @notice Zero on a closed loan and from the expiry second, where the verb refuses `LoanClosed` and `LoanMatured`.
     /// @notice Always leaves at least one unit, as the verb's `ZeroCollateral` requires: a live loan carries debt, and its ceiled line is never zero.
-    /// @notice THIS loan only: a refinance redraws at today's price, so its successor's line can free more than zero.
+    /// @notice THIS loan only: before expiry a refinance redraws at today's price, so its successor can free more; from expiry it refuses too.
     /// @dev Reproduces `withdrawCollateral`'s gate rather than restating it: same price fold, same line, same library.
     /// @dev The price is the LOWER of the funding floor and the live persisted price, so a fallen record tightens this.
     /// @param id The market.
@@ -584,7 +504,7 @@ contract AceLens {
     /// @notice False again for free the moment the record prints a recovery.
     /// @notice False on a closed loan, without asking the record: `finalize` refuses `LoanClosed` before it reads one.
     /// @notice False with no record: finalize is unreachable there, and the hub answers `NoRecord`.
-    /// @notice That is the DISTRESS channel only: a record-less loan, which cannot arm, still settles at tenor via `forceClose`.
+    /// @notice That is the DISTRESS channel only: a record-less loan still settles at tenor via `forceClose`.
     function settleable(uint256 loanId) external view returns (bool) {
         (MarketParams memory p, uint256 trig, bool closed) = _riskView(loanId);
         if (closed || p.record == address(0)) return false;
@@ -722,9 +642,8 @@ contract AceLens {
     }
 
     /// @notice Whether a deleverage crank would pass the channel's entry gates right now.
-    /// @dev Gate mirror: band on, open, unexpired, over `minDebt`, not distressed, persistently in the band, above the stop.
-    /// @dev It mirrors the `minDebt` cap with the crank's own fused mulDiv: false when the head buys no whole unit at the record price.
-    /// @dev True means admitted, not profitable or even selling: at/above target, on a dust restore, or with the reserve holding the whole sale it sells 0.
+    /// @dev Gate mirror: band on, open, unexpired, not distressed, persistently in the band, above the stop.
+    /// @dev True means admitted, not selling: at or above target, on a dust restore, or with the reserve holding the whole sale, it sells 0.
     /// @dev The record reads below are RAW, deliberately: a live band implies a non-zero record at genesis.
     /// @dev The `no record -> max` sentinel would read as ELIGIBLE with no price source: fail-OPEN, so never apply it.
     function deleverageEligible(uint256 loanId) external view returns (bool) {
@@ -732,16 +651,11 @@ contract AceLens {
         MarketParams memory p = ACE.idToMarketParams(l.market);
         if (p.deleverageBandBps == 0 || l.closedAt != 0) return false;
         if (block.timestamp >= l.expiry) return false;
-        if (l.debt <= p.minDebt) return false;
         if (inDistress(loanId)) return false;
         if (!IPersistenceRecord(p.record).persistedBelowDistress(p.quote, p.collateral, deleverageBandLevel(loanId))) return false;
         /// @dev mirror the crank's stop gate: below the stop floor the trade channel refuses
         uint256 ps = IPersistenceRecord(p.record).minPrice(p.quote, p.collateral);
-        if (ps <= deleverageStopLevel(loanId)) return false;
-        uint256 epsC = 10000 - p.deleverageFloorEpsBps;
-        /// @dev Past this the crank's own sizing sells nothing, since `ps / 1e4` already clears any uint128-debt trigger.
-        if (ps > type(uint256).max / epsC) return false;
-        return FullMath.mulDiv(l.debt - p.minDebt, 10000 * marketState(l.market).unitScale, ps * epsC) != 0;
+        return ps > deleverageStopLevel(loanId);
     }
 
     // ---- venue-side helpers ----
@@ -752,7 +666,7 @@ contract AceLens {
         return s.cumulativeBackedBurns - s.netSyntheticOutflow;
     }
 
-    /// @notice Whether this market has any resting cash at all; reserved cash counts, so `drawableOf` says what a draw may take.
+    /// @notice Whether this market has any resting cash at all, every atom of which a fresh draw may take.
     function isActive(bytes32 id) external view returns (bool) {
         return restingOf(id) != 0;
     }

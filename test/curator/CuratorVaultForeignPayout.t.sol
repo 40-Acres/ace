@@ -17,7 +17,7 @@ contract CuratorVaultForeignPayoutTest is CuratorVaultBase {
     uint256 internal constant EACH = 10_000e6; // the LP's stake, so the vault has a share price to defend
     uint256 internal constant GIFT = 1_000e6; // what the donor rests in its own market before paying it out
     uint256 internal constant P = 100e6; // a draw against the donor's market
-    uint256 internal constant R = 40e6; // a partial repay, leaving the debt above the market's `minDebt`
+    uint256 internal constant R = 40e6; // a partial repay, leaving the debt above the market's `minPrincipal`
 
     address internal donor = address(0xD0D0);
 

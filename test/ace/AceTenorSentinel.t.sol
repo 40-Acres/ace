@@ -13,7 +13,7 @@ import {AceReader} from "../utils/AceReader.sol";
 
 /// @title AceTenorSentinel
 /// @notice #738 I-2: a zero tenor means the market's `minTenor` on EVERY door that takes a term, through one helper.
-/// @notice `open`, `previewOpen`, `refinance`, `refinanceTo` and `postOrder` resolve it; `setAutoRefinance` keeps zero as disarm.
+/// @notice `open`, `previewOpen`, `refinanceTo` and `postOrder` resolve it.
 /// @dev `Refinanced` and `OrderPosted` log the RESOLVED term, so an indexer never sees a zero that no loan carries.
 contract AceTenorSentinelTest is WarpClock {
     Ace internal ace;
@@ -88,12 +88,12 @@ contract AceTenorSentinelTest is WarpClock {
         revert("the event was not emitted");
     }
 
-    /// @notice `refinance` with a zero tenor lands a `minTenor` loan, and `Refinanced` logs that term.
+    /// @notice A home `refinanceTo` with a zero tenor lands a `minTenor` loan, and `Refinanced` logs that term.
     function test_ARefinanceWithAZeroTenorLandsAMinTenorLoan() public {
         uint256 loanId = _open(TEN28);
         vm.recordLogs();
         vm.prank(borrower);
-        uint256 newId = ace.refinance(loanId, P, 0, OpenBounds(0, 0, 0));
+        uint256 newId = ace.refinanceTo(MigrateArgs(loanId, id, P, 0, OpenBounds(0, 0, 0), 0, address(0)));
         assertEq(read.loan(newId).tenor, TEN7, "the successor carries the market's minTenor");
         assertEq(_loggedTenor(REFINANCED, 1), TEN7, "and Refinanced logs it, not the zero");
     }
@@ -114,7 +114,7 @@ contract AceTenorSentinelTest is WarpClock {
         uint256 loanId = _open(TEN28);
         assertEq(read.loan(loanId).tenor, TEN28, "open keeps a stated term");
         vm.prank(borrower);
-        uint256 newId = ace.refinance(loanId, P + 2_000e6, TEN14, OpenBounds(0, 0, 0));
+        uint256 newId = ace.refinanceTo(MigrateArgs(loanId, id, P + 2_000e6, TEN14, OpenBounds(0, 0, 0), 0, address(0)));
         assertEq(read.loan(newId).tenor, TEN14, "refinance keeps a stated term");
         uint256 other = _open(TEN7);
         vm.prank(borrower);
@@ -140,14 +140,5 @@ contract AceTenorSentinelTest is WarpClock {
         assertEq(read.loan(loanId).tenor, TEN7, "the fill opens a minTenor loan");
     }
 
-    /// @notice CONTROL: `setAutoRefinance` keeps zero as DISARM; the sentinel never reaches it.
-    function test_SetAutoRefinanceKeepsZeroAsDisarm() public {
-        uint256 loanId = _open(TEN7);
-        vm.startPrank(borrower);
-        ace.setAutoRefinance(loanId, TEN7, 0, 0);
-        ace.setAutoRefinance(loanId, 0, 0, 0);
-        vm.stopPrank();
-        (uint64 tenor,,) = read.autoPolicyOf(loanId);
-        assertEq(tenor, 0, "a zero tenor disarmed rather than arming at minTenor");
-    }
+    // the extend rows left this suite: an extension runs the loan's own tenor from now and resolves no sentinel (AceExtendFromNow)
 }

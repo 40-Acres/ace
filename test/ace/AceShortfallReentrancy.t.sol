@@ -52,7 +52,7 @@ contract AceShortfallReentrancyTest is Test {
 
         address predictedHub = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
         manager = new RetireProbeManager(predictedHub);
-        ace = new Ace(AceFixtures.TREASURY, address(manager), AceFixtures.PUSH_GAS);
+        ace = new Ace(AceFixtures.TREASURY, address(manager), AceFixtures.PUSH_GAS, AceFixtures.POLICY_GAS);
 
         MockPersistenceRecord rec = new MockPersistenceRecord(address(usdc), address(coll));
         rec.setMinPrice(type(uint256).max); // inert: the record is here for the settlement rule, not for a price

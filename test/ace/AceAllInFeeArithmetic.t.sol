@@ -76,7 +76,7 @@ contract AceAllInFeeArithmeticTest is Test {
     }
 
     /// @notice Raising the draw above the derived principal can never lower the payout below the debt.
-    /// @dev Monotonicity is what lets `derivedPrincipal` floor at `minDebt` without re-checking the inequality.
+    /// @dev Monotonicity is what lets `derivedPrincipal` floor at `minPrincipal` without re-checking the inequality.
     function testFuzz_T3_ThePayoutIsMonotoneAboveTheDerivedPrincipal(uint256 owedSeed, uint256 liftSeed) public pure {
         uint64 minTenor = 7 days;
         uint64 tenor = 30 days;

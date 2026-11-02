@@ -4,9 +4,10 @@ pragma solidity 0.8.36;
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {InsufficientCash} from "../../src/ace/hub/Borrower.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
+import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
+import {RefinanceMath} from "../utils/RefinanceMath.sol";
 import {ExitToHub} from "../../src/ace/hub/libraries/Recipients.sol";
-import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
+import {MarketParams, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
@@ -15,7 +16,7 @@ import {AceReader} from "../utils/AceReader.sol";
 
 /// @title AceS4OwnRefinanceStaleBidTest
 /// @notice Audit run 2026-10-03-251533, phase 4, F1: a borrower's OWN home refinance still asks the draw cap.
-/// @notice The policy roll of the same loan is judged at `min(price, record)` (R-g); the borrower's door refuses at `price > record`.
+/// @notice An extension of the same loan is judged at `min(price, record)`; the borrower's re-term door refused at `price > record`.
 /// @notice So under a record below the lender's price the borrower could not re-term, even when the refinance drew no fresh cash.
 /// @notice FIXED (Y-9 leg B) for the zero-fresh case only; a re-term drawing fresh cash keeps the draw cap.
 /// @dev Record-backed market at par; the loan's trigger sits at 0.7 of the price, so a 0.9 record leaves it healthy.
@@ -36,7 +37,6 @@ contract AceS4OwnRefinanceStaleBidTest is WarpClock {
     uint64 internal constant TEN28 = 28 days;
     uint256 internal constant P = 50_000e6;
     uint256 internal constant UNITS = 100_000e18; // trigger at 0.7 of the price
-    uint16 internal constant BUF = 1000;
 
     function setUp() public {
         _warpTo(1_000_000);
@@ -54,6 +54,7 @@ contract AceS4OwnRefinanceStaleBidTest is WarpClock {
         p.minCoverageWad = 1.4e18;
         AceFixtures.Deployment memory d = AceFixtures.deploy(p);
         (ace, pm, read, id) = (d.ace, d.positionManager, d.read, d.id);
+        AceFixtures.installYesPolicy(ace, alice); // a same-market re-term reuses the claim only on the lender's yes: these rows' premise
     }
 
     function _px(uint256 human) internal view returns (uint256) {
@@ -76,7 +77,7 @@ contract AceS4OwnRefinanceStaleBidTest is WarpClock {
         vm.stopPrank();
     }
 
-    /// @dev A fully lent market and an unarmed 28-day loan, one hour in: a 7-day re-term at the same principal draws nothing fresh.
+    /// @dev A fully lent market and a 28-day loan, one hour in: a 7-day re-term at the same principal draws nothing fresh.
     function _zeroFreshBook() internal returns (uint256 loanId) {
         _deposit(P);
         loanId = _open(TEN28);
@@ -88,18 +89,18 @@ contract AceS4OwnRefinanceStaleBidTest is WarpClock {
     function test_Control_ARecordOverThePriceAdmitsTheZeroFreshReterm() public {
         uint256 loanId = _zeroFreshBook();
         vm.prank(borrower);
-        uint256 newId = ace.refinance(loanId, P, TEN7, OpenBounds(0, 0, 0));
+        uint256 newId = ace.refinanceTo(MigrateArgs(loanId, id, P, TEN7, OpenBounds(0, 0, 0), 0, address(0)));
         assertEq(read.debtOf(newId), P, "the successor carries the old debt");
         assertEq(ace.restingOf(id), 0, "and drew nothing fresh");
     }
 
     /// @notice A record under the price but far over the trigger does not refuse a re-term that lends nothing fresh.
-    /// @dev Was the run's RED row: a zero-fresh draw is now judged at `min(price, record)`, as the home roll is.
+    /// @dev Was the run's RED row: a zero-fresh draw is now judged at `min(price, record)`, as an extension is.
     function test_ARecordUnderThePriceDoesNotRefuseAZeroFreshReterm() public {
         uint256 loanId = _zeroFreshBook();
         rec.setMinPrice(_px(0.9e18));
         vm.prank(borrower);
-        try ace.refinance(loanId, P, TEN7, OpenBounds(0, 0, 0)) returns (uint256 newId) {
+        try ace.refinanceTo(MigrateArgs(loanId, id, P, TEN7, OpenBounds(0, 0, 0), 0, address(0))) returns (uint256 newId) {
             assertEq(read.debtOf(newId), P, "the successor carries the old debt");
             assertEq(ace.restingOf(id), 0, "and drew nothing fresh");
         } catch (bytes memory err) {
@@ -108,48 +109,24 @@ contract AceS4OwnRefinanceStaleBidTest is WarpClock {
         }
     }
 
-    /// @dev An armed 7-day loan with cash for its roll, warped into the pre-expiry window; returns the derived principal.
-    function _armedInWindow() internal returns (uint256 loanId, uint256 principal) {
+    /// @dev A 7-day loan with cash beside it, an hour before expiry, under a 0.9 record; returns a principal that capitalises its fee.
+    function _loanNearExpiry() internal returns (uint256 loanId, uint256 principal) {
         _deposit(2 * P);
         loanId = _open(TEN7);
-        vm.prank(borrower);
-        ace.setAutoRefinance(loanId, TEN7, BUF, 0);
         _warpTo(uint256(read.loan(loanId).expiry) - 1 hours);
         rec.setMinPrice(_px(0.9e18));
-        bool ok;
-        (ok,, principal) = ace.tryContinue(loanId);
-        assertTrue(ok, "PREMISE: the home policy roll is admitted under the 0.9 record");
-        assertGt(principal, P, "PREMISE: the roll capitalises its fee, so it draws a small fresh remainder");
+        principal = RefinanceMath.principalForOwed(P, TEN7, 40, TEN7);
+        assertGt(principal, P, "PREMISE: the re-term capitalises its fee, so it draws a small fresh remainder");
     }
 
-    /// @notice MEASURE: the same loan, the same block, the same principal and tenor: the policy door rolls, the borrower's door refuses.
-    /// @dev STAYS REFUSED after leg B: this roll capitalises its fee, so it draws fresh cash, and a fresh draw keeps the draw cap.
-    /// @dev The armed borrower's route to that roll is `refinanceByPolicy`, which anyone may crank inside the window.
-    function test_Measure_ThePolicyDoorRollsWhatTheBorrowersOwnDoorRefuses() public {
-        (uint256 loanId, uint256 principal) = _armedInWindow();
-        uint256 snap = vm.snapshotState();
-        vm.prank(borrower);
-        vm.expectRevert(InsufficientCash.selector);
-        ace.refinance(loanId, principal, TEN7, OpenBounds(0, 0, 0));
-        vm.revertToState(snap);
-        vm.prank(keeper);
-        uint256 newId = ace.refinanceByPolicy(loanId);
-        assertEq(read.debtOf(newId), principal, "the policy door wrote the principal the borrower asked for");
-    }
-
-    /// @notice CONTROL: over the price, the borrower's door takes that same roll, so the record is the only difference.
-    function test_Control_AtARecordOverThePrice_TheBorrowersDoorTakesTheSameRoll() public {
-        (uint256 loanId, uint256 principal) = _armedInWindow();
+    /// @notice CONTROL: over the price, the borrower's door takes the re-term that capitalises its fee: a fresh draw meets the cap.
+    /// @dev The principal is the one whose payout retires the debt; no keeper door remains to compare it against.
+    function test_Control_AtARecordOverThePrice_TheBorrowersDoorTakesTheReTerm() public {
+        (uint256 loanId, uint256 principal) = _loanNearExpiry();
         rec.setMinPrice(_px(1.1e18));
         vm.prank(borrower);
-        uint256 newId = ace.refinance(loanId, principal, TEN7, OpenBounds(0, 0, 0));
-        assertEq(read.debtOf(newId), principal, "the borrower's own door rolls once the record clears the price");
-    }
-
-    /// @notice CONTROL: the window helper is where the measure row says it is.
-    function test_Premise_TheWindowIsOpen() public {
-        (uint256 loanId,) = _armedInWindow();
-        assertLe(read.loan(loanId).expiry - _now(), MarketInit.autoRefinanceWindow(TEN7), "inside the window");
+        uint256 newId = ace.refinanceTo(MigrateArgs(loanId, id, principal, TEN7, OpenBounds(0, 0, 0), 0, address(0)));
+        assertEq(read.debtOf(newId), principal, "the borrower's own door re-terms once the record clears the price");
     }
 }
 

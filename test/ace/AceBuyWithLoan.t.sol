@@ -5,7 +5,6 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {Borrower} from "../../src/ace/hub/Borrower.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
 import {Loan, MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
@@ -299,14 +298,14 @@ contract AceBuyWithLoanTest is WarpClock {
         seller.setPrice(0.1e6); // the item falls 90%; the lender still cannot act before expiry
 
         Loan memory l = read.loan(loanId);
-        _warpTo(l.expiry + MarketInit.autoRefinanceWindow(l.tenor));
+        _warpTo(l.expiry);
         vm.prank(keeper);
-        ace.settleExpired(loanId);
+        ace.forceClose(loanId);
 
         uint256 kept = read.unitsOwedOf(loanId, buyer);
         uint256 pot = read.invPotOf(mid, loanId);
         assertTrue(ace.isClosed(loanId), "the loan is over and the buyer owes nothing");
-        assertEq(kept + pot, UNITS, "every unit went either to the lender's pot or back to the buyer");
+        assertEq(kept + pot + read.unitsOwedOf(loanId, keeper), UNITS, "every unit went to the lender's pot, the keeper's sliver or back to the buyer");
         assertGt(kept, 0, "a loan drawn under the line leaves the buyer the units above it");
 
         vm.prank(buyer);

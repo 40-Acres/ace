@@ -91,13 +91,13 @@ contract CuratorVaultV11ManufacturedReserveTest is CuratorVaultBase {
         vm.startPrank(alice);
         collateral.approve(address(v), COLL);
         vm.expectRevert(AceVaultFlows.OverLendable.selector);
-        v.borrow(_request(address(collateral), COLL, RIG_MIN_DEBT), "", "");
+        v.borrow(_request(address(collateral), COLL, RIG_MIN_PRINCIPAL), "", "");
         vm.stopPrank();
         vm.revertToState(snap);
 
         _ask(alice, 1, 4);
         uint256 room = v.lendable();
-        assertGt(room, RIG_MIN_DEBT, "PREMISE: a partial request leaves room to lend");
+        assertGt(room, RIG_MIN_PRINCIPAL, "PREMISE: a partial request leaves room to lend");
         uint256 snap2 = vm.snapshotState();
         uint256 plain = _claimAll(alice);
         vm.revertToState(snap2);

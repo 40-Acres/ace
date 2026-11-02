@@ -3,12 +3,11 @@ pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
 import {CuratorVault} from "../../src/curator/CuratorVault.sol";
-import {BorrowRequest} from "../../src/curator/AceVaultFlows.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 
 /// @notice The rig's loan rails, exposed so the handler can drive a door draw and its repayment.
 interface IHoldRig {
-    function lendExternal(uint256 amt, bool arm) external returns (uint256 loanId);
+    function lendExternal(uint256 amt) external returns (uint256 loanId);
     function repayExternal(uint256 loanId, uint256 amt) external;
 }
 
@@ -17,9 +16,8 @@ interface IHoldRig {
 contract HoldHandler {
     CuratorVaultBase private immutable RIG;
     CuratorVault public immutable VAULT;
-    uint256 private constant MIN_DRAW = 100e6; // over the rig's minDebt, so half a repayment leaves a live loan
+    uint256 private constant MIN_DRAW = 100e6; // over the rig's minPrincipal, so half a repayment leaves a live loan
     uint256 private constant MAX_DRAW = 15_000e6; // what one loan on the rig's collateral can draw
-    uint256 private constant ARM_BELOW = 1_000e6; // a draw under this is armed, so a roll hold reaches the campaign without freezing it
 
     uint256 public deposited; // every wei the CAMPAIGN put in; the coverage guard reads this, so setUp must not touch it
     uint256 public withdrawn; // every wei ever taken back out
@@ -75,16 +73,13 @@ contract HoldHandler {
     }
 
     /// @dev A door loan of what `lendable` admits, half its cash repaid at once and cranked home: the inflow a standing request HOLDS.
-    /// @dev A small draw is armed, so the roll hold stands beside the request's hold in some runs.
     /// @return held How much of the collected repayment the holds kept back from lending: the shortfall of `lendable`'s rise against it.
     function lendAndRepay(uint256 amt) public returns (uint256 held) {
         uint256 free = VAULT.lendable();
         if (free < MIN_DRAW) return 0;
         amt = _bound(amt, MIN_DRAW, free < MAX_DRAW ? free : MAX_DRAW);
-        bool arm = amt < ARM_BELOW;
-        if (arm && amt * 4 > free) return 0; // an armed draw must leave room for its roll hold to grow
         uint256 idle0 = VAULT.idle();
-        uint256 loanId = IHoldRig(address(RIG)).lendExternal(amt, arm);
+        uint256 loanId = IHoldRig(address(RIG)).lendExternal(amt);
         uint256 lendable0 = VAULT.lendable();
         uint256 idle1 = VAULT.idle();
         IHoldRig(address(RIG)).repayExternal(loanId, (idle0 - idle1) / 2);
@@ -111,7 +106,7 @@ contract HoldHandler {
         VAULT.withdraw(out, address(this), address(this));
         withdrawn += out;
         uint256 idle0 = VAULT.idle();
-        uint256 loanId = IHoldRig(address(RIG)).lendExternal((VAULT.lendable() * 2) / 3, false);
+        uint256 loanId = IHoldRig(address(RIG)).lendExternal((VAULT.lendable() * 2) / 3);
         VAULT.requestExit(VAULT.balanceOf(address(this)) / 2);
         require(VAULT.lendable() == 0, "SEED: the request is worth more than idle, so it holds all of exitable");
         uint256 idle1 = VAULT.idle();
@@ -146,14 +141,12 @@ contract CuratorVaultHoldInvariantsTest is CuratorVaultBase {
         targetContract(address(handler));
     }
 
-    /// @dev The handler's loan rail: the rig's borrower draws `amt` through the vault's door, armed when asked.
-    function lendExternal(uint256 amt, bool arm) external returns (uint256 loanId) {
+    /// @dev The handler's loan rail: the rig's borrower draws `amt` through the vault's door.
+    function lendExternal(uint256 amt) external returns (uint256 loanId) {
         collateral.mint(borrower, COLL);
         vm.startPrank(borrower);
         collateral.approve(address(v), COLL);
-        BorrowRequest memory r = _request(address(collateral), COLL, amt);
-        r.arm = arm;
-        loanId = v.borrow(r, "", "");
+        loanId = v.borrow(_request(address(collateral), COLL, amt), "", "");
         vm.stopPrank();
     }
 
@@ -162,13 +155,12 @@ contract CuratorVaultHoldInvariantsTest is CuratorVaultBase {
         _repay(loanId, amt);
     }
 
-    /// @dev The holds PARTITION idle: the roll hold comes off first, the requests' hold out of what is left, and lending takes the rest.
+    /// @dev The holds PARTITION idle: the requests' hold comes out of exitable, which is all of idle, and lending takes the rest.
     /// @dev A hold is part of idle, never additional to it, so no cash is promised twice; while draining nothing is lendable.
     function invariant_theHoldsPartitionIdle() public view {
         (uint256 exitable, uint256 heldReq) = v.holds();
         uint256 idle = v.idle();
-        uint256 roll = v.rollHoldNow();
-        assertEq(exitable, idle > roll ? idle - roll : 0, "exitable is idle less the roll hold, floored at zero");
+        assertEq(exitable, idle, "exitable is all of idle");
         assertLe(v.lendable(), exitable, "more is lendable than is exitable");
         assertLe(exitable, idle, "more is exitable than the vault holds");
         if (v.draining()) {

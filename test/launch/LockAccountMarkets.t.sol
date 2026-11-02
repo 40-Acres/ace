@@ -5,7 +5,7 @@ import {LaunchFixture, LaunchMarketParams} from "./LaunchFixture.sol";
 import {MarketParams} from "../../src/ace/hub/Types.sol";
 import {NoInventoryAsk} from "../../src/ace/hub/Ace.sol";
 import {DeleverageDisabled} from "../../src/ace/hub/Deleverage.sol";
-import {NoRecord, NotExpired, RollWindowOpen} from "../../src/ace/hub/Settlement.sol";
+import {NoRecord, NotExpired} from "../../src/ace/hub/Settlement.sol";
 import {LockAccount} from "../../src/entities/launch/LockAccount.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
@@ -96,8 +96,6 @@ contract LockAccountMarketsTest is LaunchFixture {
         ace.finalize(loanId);
         vm.expectRevert(NotExpired.selector);
         ace.forceClose(loanId);
-        vm.expectRevert(RollWindowOpen.selector);
-        ace.settleExpired(loanId);
         vm.expectRevert(DeleverageDisabled.selector);
         ace.deleverage(loanId, 0, "");
         vm.expectRevert(NoInventoryAsk.selector);

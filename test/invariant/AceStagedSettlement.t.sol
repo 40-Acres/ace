@@ -34,27 +34,25 @@ contract AceStagedSettlementTest is StdInvariant, Test {
         (ace, read, lens, pm) = (handler.ace(), handler.read(), handler.lens(), handler.pm());
         (usdc, vault) = (handler.usdc(), handler.vault());
 
-        bytes4[] memory sel = new bytes4[](20);
+        bytes4[] memory sel = new bytes4[](18);
         sel[0] = AceStagedSettlementHandler.deposit.selector;
         sel[1] = AceStagedSettlementHandler.withdraw.selector;
         sel[2] = AceStagedSettlementHandler.collect.selector;
         sel[3] = AceStagedSettlementHandler.open.selector;
         sel[4] = AceStagedSettlementHandler.repay.selector;
-        sel[5] = AceStagedSettlementHandler.armPolicy.selector;
-        sel[6] = AceStagedSettlementHandler.claimOwed.selector;
-        sel[7] = AceStagedSettlementHandler.redeemInKind.selector;
-        sel[8] = AceStagedSettlementHandler.buyInventory.selector;
-        sel[9] = AceStagedSettlementHandler.warp.selector;
-        sel[10] = AceStagedSettlementHandler.stageShortEscrow.selector;
-        sel[11] = AceStagedSettlementHandler.crash.selector;
-        sel[12] = AceStagedSettlementHandler.heal.selector;
-        sel[13] = AceStagedSettlementHandler.finalize.selector;
-        sel[14] = AceStagedSettlementHandler.forceClose.selector;
-        sel[15] = AceStagedSettlementHandler.settleExpired.selector;
-        sel[16] = AceStagedSettlementHandler.stageShortEscrow.selector; // twice: the staging is the subject, so it draws double
-        sel[17] = AceStagedSettlementHandler.open.selector; // twice: every settle door needs a live loan to land on
-        sel[18] = AceStagedSettlementHandler.stageThenSettle.selector;
-        sel[19] = AceStagedSettlementHandler.stageThenSettle.selector; // twice: at one draw in 19, a sequence missed it 1 time in 3
+        sel[5] = AceStagedSettlementHandler.claimOwed.selector;
+        sel[6] = AceStagedSettlementHandler.redeemInKind.selector;
+        sel[7] = AceStagedSettlementHandler.buyInventory.selector;
+        sel[8] = AceStagedSettlementHandler.warp.selector;
+        sel[9] = AceStagedSettlementHandler.stageShortEscrow.selector;
+        sel[10] = AceStagedSettlementHandler.crash.selector;
+        sel[11] = AceStagedSettlementHandler.heal.selector;
+        sel[12] = AceStagedSettlementHandler.finalize.selector;
+        sel[13] = AceStagedSettlementHandler.forceClose.selector;
+        sel[14] = AceStagedSettlementHandler.stageShortEscrow.selector; // twice: the staging is the subject, so it draws double
+        sel[15] = AceStagedSettlementHandler.open.selector; // twice: every settle door needs a live loan to land on
+        sel[16] = AceStagedSettlementHandler.stageThenSettle.selector;
+        sel[17] = AceStagedSettlementHandler.stageThenSettle.selector; // twice: at one draw in 19, a sequence missed it 1 time in 3
         targetSelector(FuzzSelector({addr: address(handler), selectors: sel}));
         targetContract(address(handler));
     }
@@ -94,7 +92,7 @@ contract AceStagedSettlementTest is StdInvariant, Test {
     // ---- the settle-time laws, latched by the handler around every settle ----
 
     /// @notice A settle conserves the lot, retires the claim, and records exactly what the claim did not get.
-    /// @dev Codes are the handler's: 1 units, 2 claim, 3 lent, 4 record, 5 loss total, 6 defaulted borrower paid, 7-8 backstop, 9 arming.
+    /// @dev Codes are the handler's: 1 units, 2 claim, 3 lent, 4 record, 5 loss total, 6 defaulted borrower paid, 7 forceClose failed to settle.
     function _invariant_settleChecksHold() public view {
         if (handler.settleCode() != 0) {
             console2.log("settle code", handler.settleCode());
@@ -164,14 +162,14 @@ contract AceStagedSettlementTest is StdInvariant, Test {
         }
     }
 
-    /// @notice An open loan's claim is its debt; a closed loan carries none, however short its settle came up.
+    /// @notice O10: an open loan's claim is its debt; a closed loan carries none, however short its settle came up.
     function _invariant_claimIsDebt() public view {
         uint256 n = read.loanCount();
         for (uint256 id = 1; id <= n; id++) {
             Loan memory l = read.loan(id);
             uint256 claim = read.claimOf(l.market, id);
             if (l.closedAt != 0) assertEq(claim, 0, "claim: a closed loan still carries one");
-            else assertEq(claim, l.debt, "claim: an open loan's claim is not its debt");
+            else assertEq(claim, l.debt, "O10: an open loan's claim is not its debt");
         }
     }
 
@@ -224,8 +222,7 @@ contract AceStagedSettlementTest is StdInvariant, Test {
     /// @notice The baseline left a short record on the recorded market and a forfeit on the recordless one.
     function test_Coverage_TheBaselineLandedEveryBranch() public view {
         assertGt(handler.settlesShort(0), 0, "no short finalize");
-        assertGt(handler.settlesShort(1), 0, "no short expiry fold");
-        assertGt(handler.settlesShort(2), 0, "no short settleExpired");
+        assertGt(handler.settlesShort(1), 1, "no short forceClose on each side of the sliver");
         assertGt(handler.forfeits(), 0, "no recordless forfeit");
         assertGt(read.marketState(handler.recId()).realizedLossAtBook, 0, "the short settles recorded no loss at book");
         assertGt(handler.stagedOneAtom(), 0, "no staging landed on the quantization edge");
@@ -249,7 +246,7 @@ contract AceStagedSettlementTest is StdInvariant, Test {
 
     /// @dev The compound action lands a short settle through each door it names, on a loan it has just staged.
     function test_Coverage_StageThenSettleLandsShortThroughEveryDoor() public {
-        for (uint256 door; door < 3; door++) {
+        for (uint256 door; door < 2; door++) {
             handler.open(1, door, 3_000e6, 15_000);
             uint256[] memory ids = handler.loanIds();
             uint256 id = ids[ids.length - 1];
@@ -266,13 +263,12 @@ contract AceStagedSettlementTest is StdInvariant, Test {
 
     function afterInvariant() public view {
         console2.log("=== AceStagedSettlementHandler verb hits (LAST sequence only) ===");
-        string[17] memory tags = [
+        string[15] memory tags = [
             "deposit",
             "withdraw",
             "collect",
             "open",
             "repay",
-            "armPolicy",
             "claimOwed",
             "redeemInKind",
             "buyInventory",
@@ -282,7 +278,6 @@ contract AceStagedSettlementTest is StdInvariant, Test {
             "heal",
             "finalize",
             "forceClose",
-            "settleExpired",
             "stageThenSettle"
         ];
         for (uint256 i; i < tags.length; i++) {
@@ -290,14 +285,12 @@ contract AceStagedSettlementTest is StdInvariant, Test {
         }
         console2.log("staged short          ", handler.stagedShort());
         console2.log("  on the atom edge    ", handler.stagedOneAtom());
-        console2.log("short  fin/fold/unpaid", handler.settlesShort(0), handler.settlesShort(1), handler.settlesShort(2));
-        uint256 shortAll = handler.settlesShort(0) + handler.settlesShort(1) + handler.settlesShort(2);
+        console2.log("short  fin/forceClose ", handler.settlesShort(0), handler.settlesShort(1));
+        uint256 shortAll = handler.settlesShort(0) + handler.settlesShort(1);
         console2.log("  of which the fuzzer's", shortAll - handler.baselineShort());
-        console2.log("covered fin/fold/unpaid", handler.settlesCovered(0), handler.settlesCovered(1), handler.settlesCovered(2));
+        console2.log("covered fin/forceClose", handler.settlesCovered(0), handler.settlesCovered(1));
         console2.log("recordless forfeits   ", handler.forfeits());
-        console2.log("fold rolls            ", handler.foldRolls());
-        console2.log("early backstops refused", handler.earlyRefused());
         /// @dev STRUCTURAL, satisfied in setUp and re-checked here: a red is a broken baseline, never a starved seed.
-        assertGt(handler.settlesShort(0) + handler.settlesShort(1) + handler.settlesShort(2), 0, "STRUCTURAL: no short settle survived setUp");
+        assertGt(shortAll, 0, "STRUCTURAL: no short settle survived setUp");
     }
 }

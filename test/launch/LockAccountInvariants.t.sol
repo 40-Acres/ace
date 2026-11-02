@@ -120,7 +120,6 @@ abstract contract LockAccountInvariantsBase is StdInvariant, LockAccountChecks {
         console2.log("release           ", handler.hits("release"));
         console2.log("repay             ", handler.hits("repay"));
         console2.log("forceClose        ", handler.hits("forceClose"));
-        console2.log("settleExpired     ", handler.hits("settleExpired"));
         console2.log("reclaim           ", handler.hits("reclaim"));
         console2.log("donate            ", handler.hits("donate"));
     }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
-import {BelowMinDebt, Borrower, CollateralOutOfRange, TenorOutOfRange} from "./Borrower.sol";
+import {BelowMinPrincipal, Borrower, CollateralOutOfRange, TenorOutOfRange} from "./Borrower.sol";
 import {LoanMath} from "./libraries/LoanMath.sol";
 import {Recipients} from "./libraries/Recipients.sol";
 import {Cfg, LoanBook, Market, OpenBounds, Order} from "./Types.sol";
@@ -9,7 +9,7 @@ import {IPositionManager} from "../../interfaces/IPositionManager.sol";
 import {Mul512} from "../../utils/Mul512.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-error MinFillOutOfRange(); // the maker's fill floor sits outside [minDebt, principal]
+error MinFillOutOfRange(); // the maker's fill floor sits outside [minPrincipal, principal]
 error NotMaker(); // only the order's own maker may retire it
 error OrderClosed(); // the maker has retired the order and taken the escrow back
 error FillOverOrder(); // this fill asks for more principal or more collateral than is left
@@ -62,12 +62,12 @@ library Orders {
     /// @return id The new order id.
     function post(LoanBook storage B, Market storage M, Cfg memory c, PostArgs memory a) public returns (uint256 id) {
         a.tenor = Borrower.tenorOrMin(a.tenor, c.p.minTenor); // resolved HERE, so the order, its fills and its log carry the term
-        if (a.principal < c.p.minDebt) revert BelowMinDebt();
+        if (a.principal < c.p.minPrincipal) revert BelowMinPrincipal();
         if (a.tenor < c.p.minTenor || a.tenor > c.p.maxTenor) revert TenorOutOfRange();
         /// @dev Rejected here rather than at the derivation, which answers a zero price with a max-units sentinel.
         if (a.liqLow == 0 || a.liqHigh < a.liqLow) revert BadLiquidationBand();
-        uint256 minFill = a.minFillPrincipal == 0 ? c.p.minDebt : a.minFillPrincipal;
-        if (minFill < c.p.minDebt || minFill > a.principal) revert MinFillOutOfRange();
+        uint256 minFill = a.minFillPrincipal == 0 ? c.p.minPrincipal : a.minFillPrincipal;
+        if (minFill < c.p.minPrincipal || minFill > a.principal) revert MinFillOutOfRange();
         /// @dev Sized at the LOW end, so the escrow covers the fattest fill the band admits.
         uint256 units = collateralFor(c, a.principal, a.liqLow, minFill);
         id = ++B.count;

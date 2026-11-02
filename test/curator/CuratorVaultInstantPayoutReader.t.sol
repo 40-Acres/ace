@@ -93,7 +93,7 @@ contract CuratorVaultInstantPayoutReaderTest is CuratorVaultBase {
     function _hooked() internal returns (CuratorVault vv, ReaderPayHookToken t2, ReaderPayObserver obs) {
         t2 = new ReaderPayHookToken();
         VaultConfig memory cfg = VaultConfig({ace: address(ace), asset: address(t2), curator: curator, guardian: address(0), perfFeeBps: 0, vestWindow: 1 days});
-        vv = new CuratorVault(cfg, RIG_MIN_DEBT, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, new Listing[](0), "Curator", "cVLT");
+        vv = new CuratorVault(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, new Listing[](0), "Curator", "cVLT");
         t2.mint(alice, 1_000e6);
         vm.startPrank(alice);
         t2.approve(address(vv), 1_000e6);

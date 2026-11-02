@@ -37,10 +37,10 @@ contract CuratorVaultHooksTest is CuratorVaultBase {
             p.collateral = own[i];
             p.lender = address(h);
             p.settleBountyBps = 0;
-            h.setTerms(p, Terms({units: 1e6, principal: 100e6, tenor: 0, arm: false, minBufferWad: 0}));
+            h.setTerms(p, Terms({units: 1e6, principal: 100e6, tenor: 0, minBufferWad: 0}));
             vm.prank(borrower);
             vm.expectRevert(why[i]);
-            h.borrow(BorrowRequest(own[i], 1e6, 100e6, 0, false, 0, 0, 0), "", "");
+            h.borrow(BorrowRequest(own[i], 1e6, 100e6, 0, 0, 0, 0), "", "");
             assertEq(ace.idToMarketParams(keccak256(abi.encode(p))).lender, address(0), "no market was created");
         }
     }
@@ -54,7 +54,7 @@ contract CuratorVaultHooksTest is CuratorVaultBase {
         for (uint256 i; i < 2; ++i) {
             vm.prank(borrower);
             vm.expectRevert(CuratorVault.NotListed.selector);
-            v.borrow(BorrowRequest(own[i], 1e6, 100e6, 0, false, 0, 0, 0), "", "");
+            v.borrow(BorrowRequest(own[i], 1e6, 100e6, 0, 0, 0, 0), "", "");
             Row memory row = _row(address(collateral));
             vm.prank(curator);
             vm.expectRevert(CuratorVault.BadRow.selector);

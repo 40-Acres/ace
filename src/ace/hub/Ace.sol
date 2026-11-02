@@ -19,9 +19,9 @@ import {MarketInit} from "./MarketInit.sol";
 import {BelowCallerFloor, Lender} from "./Lender.sol";
 import {Settlement} from "./Settlement.sol";
 import {Deleverage} from "./Deleverage.sol";
-import {Borrower, WithdrawalExceedsCollateral} from "./Borrower.sol";
+import {Borrower, LoanMatured, WithdrawalExceedsCollateral} from "./Borrower.sol";
 import {Orders} from "./Orders.sol";
-import {AutoPolicy, Cfg, LenderPools, Loan, LoanBook, Market, MarketParams, MigrateArgs, Order, RecordState, OpenBounds, RollFrames} from "./Types.sol";
+import {Cfg, LenderPools, Loan, LoanBook, Market, MarketParams, MigrateArgs, Order, RecordState, OpenBounds} from "./Types.sol";
 import {IPositionManager} from "../../interfaces/IPositionManager.sol";
 
 error NoMarket(); // no market at this id: the param hash was never created
@@ -36,10 +36,9 @@ error SigExpired(); // the operator signature's own deadline passed
 error BadNonce(); // the operator signature replays a nonce already spent
 error BadSig(); // the borrower neither signed this digest nor validated it; a wallet that reverts lands here too
 error LoanClosed(); // the loan is retired: nothing may touch it
-error NotBorrower(); // only the loan's own borrower may set its policies
+error NotBorrower(); // only the loan's title holder may withdraw its collateral, and a title moves only from its holder
 error ZeroCollateral(); // the withdrawal would strip the loan bare: an unsecured loan never settles
 error ZeroWithdrawal(); // a zero-unit request; nothing to take, and the loan is untouched
-error LoanMatured(); // collateral cannot leave a loan whose tenor has run out
 error BelowWithdrawLine(); // a withdrawal leg falling under the coverage line: the settlement slack refuses it, not the trigger
 error NotPositionTitle(); // retitle answers to the hub's own PositionTitleNFT collection, nothing else
 error RetitleToZero(); // title must always resolve; a live loan held by zero would strand what its close credits its holder
@@ -47,13 +46,14 @@ error RetitleToCollection(); // the title collection can neither move its own to
 error RetitleToTreasury(); // the treasury, in production a revenue router, can neither claim a holder's credit nor move the title on
 error PushGasShort(); // the caller's limit leaves a push less than its fixed budget plus the tail: resend with more gas
 error PushGasOutOfRange(); // the constructor's push budget sits outside the rail
+error PolicyGasOutOfRange(); // the constructor's roll-policy budget sits outside the rail
 
 /* ========================================================================= */
 /*  TABLE OF CONTENTS                                                        */
 /*  1. MARKET      genesis, the open quote, the params a market was made at  */
-/*  2. BORROWER    open, repay, collateral, credit delegation                */
+/*  2. BORROWER    open, repay, extend, collateral, credit delegation        */
 /*  3. LENDER      depth in, depth out, and what a funded loan pays back     */
-/*  4. KEEPER      deleverage, the refinance doors, settlement               */
+/*  4. KEEPER      deleverage, the refinance door, settlement                */
 /*  5. REVENUE     the protocol sweep, and the inventory bid                 */
 /*  6. INTERFACES  the one ERC-165 answer; the lending position is no token  */
 /*  7. POSITIONS   the hooks the positionManager and the title drive         */
@@ -70,13 +70,13 @@ error PushGasOutOfRange(); // the constructor's push budget sits outside the rai
 /// @dev LIVENESS: quote, collateral and record are all the CREATOR'S choice.
 /// @dev What follows is therefore that market's trust statement, never the hub's.
 /// @dev The named borrower and lender are ADDRESS compares, never calls: `GateRefused` means a wrong party, never a sick dependency.
-/// @dev The borrower rule refuses NEW credit alone, a roll included; it never blocks an exit or a settlement.
+/// @dev The borrower rule refuses NEW credit alone, an extension included; it never blocks an exit or a settlement.
 /// @dev `collect` checks neither, and pays the caller's own pool unconditionally.
 /// @dev A RECORD that cannot answer refuses six verbs by name with `RecordUnreadable`.
 /// @dev Draw, deposit, collateral withdrawal, deleverage, finalize and the inventory ask, and those six exactly.
-/// @dev The armed-roll doors read it through the TRY twin instead, so they settle or re-raise and never say unreadable.
+/// @dev The extension predicate reads it through the TRY twin instead, so `extend` refuses by its selector.
 /// @dev So a record CAN close a borrower's exit; the lender's exit reads no record and stays open.
-/// @dev It can NEVER stop settlement at tenor: `settleExpired` CALLS no record once the roll window passes.
+/// @dev It can NEVER stop settlement at tenor: `forceClose` CALLS no record.
 /// @dev Whether a record is WIRED is still read at every settle, and it sets how much of the lot the lenders take.
 /// @dev A QUOTE that reverts on transfer refuses `open` and a borrower's cash-out refinance, which pay their caller in the call.
 /// @dev It refuses `withdraw`, `collect`, `claimOwed`, the revenue sweep and the lender push at a terminal close.
@@ -96,6 +96,8 @@ contract Ace is ReentrancyGuardTransient {
     event BuyInventory(uint256 indexed loanId, address indexed payer, address indexed unitsTo, uint256 unitsOut, uint256 stableFilled);
     event RevenueSwept(bytes32 indexed market, address indexed to, uint256 amount, uint64 at);
     event RevenueSweepFailed(bytes32 indexed market, address indexed to, uint256 amount, uint64 at);
+    /// @notice A lender named the contract its loans' extensions ask; zero consents to none.
+    event RollPolicySet(address indexed lender, address indexed policy);
 
     address internal immutable TREASURY; // revenue destination, fixed at deploy; zero ships an inert sweep
     address public immutable POSITION_MANAGER; // the ONE custodian for every market's loans; never per market
@@ -103,6 +105,7 @@ contract Ace is ReentrancyGuardTransient {
     uint256 public immutable PUSH_GAS; // the gas each swallowed push hands its callee, fixed per deploy inside the rail
     uint256 public immutable PUSH_FLOOR; // the gas a lender push demands at its read: the budget past EIP-150's 1/64, plus its tail
     uint256 public immutable SWEEP_FLOOR; // the same for the keeper piggyback's sweep, whose tail also carries its stamp and counter writes
+    uint256 public immutable POLICY_GAS; // the gas a roll-policy ask hands its callee, fixed per deploy inside the rail
 
     bytes32 private immutable CACHED_SEPARATOR; // the domain built at construction, valid for as long as the chain id holds
     uint256 private immutable CACHED_CHAIN_ID; // the chain constructed on; a change re-derives rather than replays
@@ -121,13 +124,15 @@ contract Ace is ReentrancyGuardTransient {
     /// @param treasury Where swept revenue lands; zero ships an inert sweep.
     /// @param positionManager The one positionManager, deployed FIRST at this hub's predicted address.
     /// @param pushGas The fixed gas each swallowed push hands its callee, chosen per chain from that chain's measured transfer cost.
+    /// @param policyGas The fixed gas each roll-policy ask hands its callee, chosen per chain from the heaviest shipped policy's measured cost.
     /// @dev THE BINDING RAIL, and it is why the deploy order is positionManager-then-hub.
     /// @dev At this point the positionManager already has code, so the hub verifies the binding itself.
     /// @dev A wrong prediction fails closed HERE, with no operator trust and no genesis rail.
-    /// @dev The push budget is railed first; both floors derive from it, and the tails reserve what runs after the call.
+    /// @dev Both budgets are railed first; the push floors derive from the one, the tails reserve what runs after the call.
     /// @dev Constructor code is not runtime code, so this costs zero EIP-170 budget.
-    constructor(address treasury, address positionManager, uint256 pushGas) {
+    constructor(address treasury, address positionManager, uint256 pushGas, uint256 policyGas) {
         if (pushGas < Constants.MIN_PUSH_GAS || pushGas > Constants.MAX_PUSH_GAS) revert PushGasOutOfRange();
+        if (policyGas < Constants.MIN_POLICY_GAS || policyGas > Constants.MAX_POLICY_GAS) revert PolicyGasOutOfRange();
         TREASURY = treasury;
         require(IPositionManager(positionManager).LOAN_MANAGER() == address(this), "manager not bound here");
         POSITION_MANAGER = positionManager;
@@ -138,6 +143,7 @@ contract Ace is ReentrancyGuardTransient {
         uint256 whole = (pushGas * 64 + 62) / 63; // floor(64p/63) already makes EIP-150 forward exactly p; the ceil adds one gas of margin
         PUSH_FLOOR = whole + Constants.PUSH_TAIL;
         SWEEP_FLOOR = whole + Constants.SWEEP_TAIL;
+        POLICY_GAS = policyGas;
     }
 
     /// @notice The EIP-712 domain this hub verifies credit-delegation signatures against.
@@ -156,7 +162,7 @@ contract Ace is ReentrancyGuardTransient {
 
     /// @notice Create a market. `id` is the hash of its params: wrong params address a different market.
     /// @notice In a RECORDLESS market only `MAX_PRICE` caps the price: a price far over the collateral's worth lends against atoms.
-    /// @notice No hub rail tells that from a real 0-decimal item worth more than `minDebt` a unit; the creator, and any allocator, is the check.
+    /// @notice No hub rail tells that from a real 0-decimal item worth more than `minPrincipal` a unit; the creator, and any allocator, is the check.
     /// @dev There is no allocator.
     /// @dev DEPLOYS NOTHING: custody is one pot per collateral on the custodian, reached by ledger, not by address.
     /// @dev A duplicate id reverts atomically inside `init`, leaving no state behind.
@@ -190,43 +196,9 @@ contract Ace is ReentrancyGuardTransient {
         return _market()[id].p;
     }
 
-    /// @notice Whether `refinanceByPolicy` would continue this loan right now, and the debt it would write.
-    /// @notice The filter for `refinanceByPolicies`, which is ALL-OR-NOTHING: one bad id takes the batch.
-    /// @notice BLOCK-SCOPED, not a guarantee: the cash leg moves with every deposit, withdraw and draw.
-    /// @notice Blind to token-side failure, exactly as `previewOpen` is: those turn on balances, not loan state.
-    /// @dev The verb refuses through this same body, so the filter and the batch cannot answer differently.
-    /// @dev `try` and not `preview`: the reverting sibling is `refinanceByPolicy`, matching `tryQuoteOpen`.
-    /// @dev `nonReentrantView`: the answer reads market aggregates a mid-call sees torn.
-    /// @param id The loan whose armed continuation is in question.
-    /// @return ok Whether the roll is admissible on loan state alone.
-    /// @return reason The first failing leg's selector; zero when `ok`.
-    /// @return principal The successor's debt; zero when refused.
-    function tryContinue(uint256 id) external view nonReentrantView returns (bool ok, bytes4 reason, uint256 principal) {
-        bytes32 mid = _book().loans[id].market;
-        Cfg memory c = _cache(mid);
-        return Borrower.tryContinue(_book(), _market(), RollFrames(c, c, mid), id);
-    }
-
-    /// @notice The same question about a NAMED destination market, for the lender who would win the roll.
-    /// @notice Refuses `HomeRollExclusive` until the incumbent's leading share of the window has run out.
-    /// @dev A keeper simulates against THIS before spending gas on a destination that cannot take the loan.
-    /// @dev `nonReentrantView`: the answer reads market aggregates a mid-call sees torn.
-    /// @param id The loan whose armed continuation is in question.
-    /// @param dst The destination market; the loan's own market asks exactly what `tryContinue` asks.
-    /// @return ok Whether the roll into `dst` is admissible on loan state alone.
-    /// @return reason The first failing leg's selector; zero when `ok`.
-    /// @return principal The successor's debt; zero when refused.
-    function tryContinueTo(uint256 id, bytes32 dst) external view nonReentrantView returns (bool ok, bytes4 reason, uint256 principal) {
-        /// @dev An unknown destination is a REFUSAL, never a revert: `_cache` would throw and kill a keeper's batch.
-        /// @dev This verb exists to be simulated over CANDIDATE markets, so a bad candidate must be skippable.
-        if (_market()[dst].p.quote == address(0)) return (false, NoMarket.selector, 0);
-        bytes32 mid = _book().loans[id].market;
-        return Borrower.tryContinue(_book(), _market(), RollFrames(_cache(mid), _cache(dst), dst), id);
-    }
-
     /* ============================= 2. BORROWER ============================= */
 
-    /// @notice Opens a terminal loan against escrowed collateral, funded by the market's UNRESERVED resting cash.
+    /// @notice Opens a terminal loan against escrowed collateral, funded by the market's resting cash.
     /// @notice THE ONE DOOR: every argument shape is a default here, never a separate function.
     /// @dev `tenor` 0 takes `minTenor`; an all-zero `bnd` is boundless; `borrower` may be the caller.
     /// @dev Opening in another party's name needs their `setCreditOperator` grant, enforced by `_open`.
@@ -280,6 +252,7 @@ contract Ace is ReentrancyGuardTransient {
     /// @notice Spends ONE nonce, so it kills the signature standing at that nonce and ARMS the one after it.
     /// @dev CREDIT delegation, not the title's ERC-721 `setApprovalForAll`; `_open` is the one gate every open passes.
     /// @dev The operator cannot repay, refinance, settle or withdraw the borrower's existing loans.
+    /// @dev The one widening: an operator that is a loan's market lender may `extend` it, in cash the operator pays.
     /// @dev NEVER short-circuit on an unchanged value: `setCreditOperator(anyone, false)` is the borrower's nonce burn.
     /// @dev Unguarded: two storage writes and an event, reaching no external code at all.
     function setCreditOperator(address operator, bool allowed) external {
@@ -305,6 +278,55 @@ contract Ace is ReentrancyGuardTransient {
         if (!SignatureChecker.isValidSignatureNowCalldata(borrower, digest, sig)) revert BadSig();
         _book().creditOperator[borrower][operator] = allowed;
         emit CreditOperatorSet(borrower, operator, allowed);
+    }
+
+    /// @notice Re-anchor a live loan in place at its own tenor from now: same id, same title, the debt unchanged, the fee on the time added, in cash.
+    /// @notice The new expiry is now plus the loan's own tenor, and the extended loan is admitted as a new one at `min(price, record)`.
+    /// @notice It lands only before expiry and never in the term's open second: those refuse `LoanMatured` and `ExtensionAddsNoTime`.
+    /// @notice The fee never exceeds the fee on the loan's whole tenor: a caller signing for a later landing signs for that.
+    /// @notice It needs the market lender's roll policy to return its selector; no policy, or any other answer, refuses `PolicyRefused`.
+    /// @notice The borrower extends, and so does the market lender holding the borrower's credit grant; whoever calls pays the fee.
+    /// @notice A lender pays on the holder's behalf: the unearned part of the escrow it funds refunds to the holder at close, never to the payer.
+    /// @notice It pulls quote as `repay` does, so a quote that refuses the caller leaves the loan to mature and `forceClose` to settle it.
+    /// @notice A limit that cannot hand the policy its whole budget past EIP-150's 1/64 reverts `PolicyGasShort`: resend with more gas.
+    /// @dev `msg.data[0:0]` is the empty-blob sentinel: it routes the pull to the caller's allowance, as `repay` does.
+    /// @param id The loan to extend.
+    /// @param minBufferWad The least admissibility buffer the caller accepts.
+    /// @param data The caller's payload for the lender's roll policy.
+    /// @return fee The extension's fee.
+    function extend(uint256 id, uint256 minBufferWad, bytes calldata data) external nonReentrant returns (uint256 fee) {
+        return _extend(id, minBufferWad, data, msg.data[0:0]);
+    }
+
+    /// @notice `extend` with the fee funded by a Permit2 SignatureTransfer on the quote; an empty blob is the plain allowance pull.
+    /// @dev This door passes msg.sender as the permit owner, so only the signer's own transaction spends it.
+    /// @param permit2 The SignatureTransfer blob.
+    /// @return fee The extension's fee.
+    function extendWithPermit2(uint256 id, uint256 minBufferWad, bytes calldata data, bytes calldata permit2) external nonReentrant returns (uint256 fee) {
+        return _extend(id, minBufferWad, data, permit2);
+    }
+
+    /// @dev Both extend doors funnel here.
+    function _extend(uint256 id, uint256 minBufferWad, bytes calldata data, bytes calldata permit2) private returns (uint256) {
+        bytes32 mid = _book().loans[id].market;
+        return Borrower.extend(_book(), _market()[mid], _cache(mid), id, minBufferWad, data, permit2);
+    }
+
+    /// @notice What `extend` would do if `caller` sent it now.
+    /// @notice It takes the caller as an argument, never `msg.sender`, so a lens or a router asks for the borrower it serves.
+    /// @notice A preview is reliable only for a policy that reads no lock and no caller: one may answer a preview and a verb apart.
+    /// @dev `nonReentrantView`: the answer reads a loan a mid-call sees torn; the policy is asked unlocked here.
+    /// @param caller The address that would call `extend`.
+    /// @return ok Whether the extension would land.
+    /// @return reason The first failing leg's selector; zero when `ok`.
+    /// @return fee The extension's fee; zero when refused.
+    function tryExtend(uint256 id, uint256 minBufferWad, bytes calldata data, address caller)
+        external
+        view
+        nonReentrantView
+        returns (bool ok, bytes4 reason, uint256 fee)
+    {
+        return Borrower.tryExtend(_book(), _cache(_book().loans[id].market), id, minBufferWad, data, caller);
     }
 
     /// @notice Withdraw collateral above this loan's COVERAGE LINE, at the live fold of funding floor and record.
@@ -341,7 +363,7 @@ contract Ace is ReentrancyGuardTransient {
     /// @notice Pays debt down, retiring the loan's claim by exactly what was paid.
     /// @notice Full repayment closes the loan, and pushes the lender's pooled quote credit to them, swallowed.
     /// @notice That push is STRICT: a closing repay whose limit is short of its fixed budget plus the tail reverts `PushGasShort`.
-    /// @notice Only the borrower, as `msg.sender`, may leave `(0, minDebt)`; a router or relayer paying for them must pay off or leave at least `minDebt`.
+    /// @notice No repay may leave a live loan under its debt floor, half `minPrincipal`, whoever sends it: pay it off or leave at least that.
     /// @dev `msg.data[0:0]` is the empty-blob sentinel: it routes `_repay` back to the allowance pull.
     function repay(uint256 id, uint256 amount) external nonReentrant {
         _repay(id, amount, msg.data[0:0]);
@@ -420,7 +442,7 @@ contract Ace is ReentrancyGuardTransient {
     /// @notice Rest cash in a market as a standing bid it can fill, at the one price the market was created at.
     /// @notice THE ONE DOOR, and it names no term: the market's own `maxTenor` is the whole maturity consent.
     /// @dev nonReentrant: the cash books before `pullQuote` moves a creator-chosen ERC20.
-    /// @dev `BelowMinLot` refuses a lot under `minDebt` unless it only refills a roll-reserve deficit, and any lot resting unreserved dust.
+    /// @dev `BelowMinLot` refuses a zero lot and any lot under `minPrincipal`.
     function deposit(bytes32 id, uint256 assets) external nonReentrant {
         Lender.depositCash(_market()[id], _cache(id), id, assets);
     }
@@ -433,11 +455,9 @@ contract Ace is ReentrancyGuardTransient {
 
     /// @notice Withdraw resting cash from a market to `to`; always available, it is the lender's own money.
     /// @notice LENDER-ONLY: the market names its one lender, and nobody else may take its resting cash.
-    /// @notice To back its armed rolls, cap at `drawableOf` in the same call: a stranger's arm, draw or fill can land first.
-    /// @notice That keeps only the reserve, backing each armed loan's NEXT roll as reserved: a successor re-arms only if cash past it covers its own need.
+    /// @notice Nothing here is held for an extension, which draws no resting cash.
     /// @dev `assets == type(uint256).max` withdraws the whole resting balance.
-    /// @dev Floor-or-zero on UNRESERVED cash: a remainder at or under the roll reserve lands, as does one past it by at least `minDebt`.
-    /// @dev Going under the reserve is the lender's own consent: an armed roll that cash backed may then settle at its fold.
+    /// @dev Floor-or-zero: a remainder in `(0, minPrincipal)` reverts `WouldLeaveDust`, and emptying the market always lands.
     /// @param id The market to withdraw from.
     /// @param assets Quote to take, or `type(uint256).max` for everything resting.
     /// @param to Recipient, never zero, the hub or the positionManager: the lender's own address or another wallet of theirs.
@@ -459,6 +479,14 @@ contract Ace is ReentrancyGuardTransient {
         return Lender.collect(quote, to, POSITION_MANAGER);
     }
 
+    /// @notice Name the contract every extension of the caller's loans asks for consent; zero consents to none.
+    /// @notice It lands at any time and binds the caller's own loans alone: the next extension asks the new policy.
+    /// @param policy The caller's roll policy, or zero.
+    function setRollPolicy(address policy) external nonReentrant {
+        Storage.lenders().rollPolicyOf[msg.sender] = policy;
+        emit RollPolicySet(msg.sender, policy);
+    }
+
     /// @notice Take the collateral a settled loan left against its claim, in kind.
     /// @notice `to` is never zero, the hub or the positionManager, refused after the lender check and before the pot is read.
     function redeemInKind(uint256 loanId, address to) external nonReentrant returns (uint256 out) {
@@ -466,7 +494,7 @@ contract Ace is ReentrancyGuardTransient {
         return Lender.redeemInKind(_market()[mid], _cache(mid), loanId, to);
     }
 
-    /// @notice Pull what a loan credited you: settlement residual, keeper sliver, close refund, roll payout.
+    /// @notice Pull what a loan credited you: settlement residual, keeper sliver, close refund.
     /// @notice PULL-BASED so no payout has a fixed destination: `to` is yours, and an absent claimant loses nothing.
     /// @notice Batch several loans with `multicall`; there is deliberately no second batched verb.
     /// @param loanId The loan the credit sits against.
@@ -502,22 +530,9 @@ contract Ace is ReentrancyGuardTransient {
         return (_book().unitsOwed[loanId][claimant], _book().quoteOwed[loanId][claimant]);
     }
 
-    /// @notice The cash resting in one market, which under sole tenancy IS its lender's balance there.
+    /// @notice The cash resting in one market, which under sole tenancy IS its lender's balance there, and all of it a fresh draw may take.
     function restingOf(bytes32 id) external view returns (uint256) {
         return _market()[id].s.cash;
-    }
-
-    /// @notice PER MARKET: what a fresh draw may take here now, resting cash less the roll reserve, floored at zero.
-    /// @notice NOT `lenderAssets`, which pools one lender's cash across every market it runs in a quote.
-    /// @dev The subtractive spelling of `Borrower.cashAdmits(M, fresh, 0)`: the largest `fresh` it admits, zero where it admits none.
-    /// @dev GUARDED by `nonReentrantView`: a refinance frees the roll reserve and debits cash at two points mid-body.
-    /// @dev Reads zero for an unknown id, as `restingOf` does.
-    /// @dev An armed loan's successor re-arms at its fold only if this, after the roll's draw, covers the successor's own roll need.
-    /// @param id The market to read.
-    /// @return The quote a fresh draw may take, which is what a vault may recall.
-    function drawableOf(bytes32 id) external view nonReentrantView returns (uint256) {
-        Market storage M = _market()[id];
-        return Math.saturatingSub(M.s.cash, M.s.rollReserve);
     }
 
     /// @notice A lender's whole position in one quote: resting cash, drawn at par, and uncollected credit.
@@ -565,7 +580,7 @@ contract Ace is ReentrancyGuardTransient {
 
     /// @notice One lender's footprint against one collateral in one quote: principal drawn at par, and collateral in unsold pots.
     /// @notice Summed over collaterals, `lent` is the lent leg of `lenderAssets`.
-    /// @notice FOR A PER-COLLATERAL CAP: every draw, roll, repay, crank, settlement, buy and redeem moves it, so a reader needs no poke.
+    /// @notice FOR A PER-COLLATERAL CAP: every draw, repay, crank, settlement, buy and redeem moves it, so a reader needs no poke.
     /// @dev GUARDED by `nonReentrantView` as the pools are: the draw, melt, settlement and sale paths move it mid-body.
     /// @dev Keyed by the collateral's ADDRESS: two tokens of one underlying are two entries.
     /// @dev A triple that never lent reads zero rather than reverting, as the pooled views do.
@@ -580,16 +595,17 @@ contract Ace is ReentrancyGuardTransient {
         return (x.lent, x.unsoldUnits);
     }
 
-    /* ====== 4. KEEPER CRANKS: deleverage, the refinance doors, and settlement ====== */
+    /* ====== 4. KEEPER CRANKS: deleverage, the refinance door, and settlement ====== */
 
-    /// @notice Sells just enough collateral to restore the target margin, once the record proves the band.
+    /// @notice Sells just enough collateral to restore the target margin, or to close the loan, once the record proves the band.
     /// @notice Every unit of proceeds melts debt; the CALLER routes the units.
     /// @dev msg.sender must implement IAceDeleverageCallback: it receives the units and returns the floor.
     /// @dev ONE DOOR: pass `minStableOut` 0 for no caller-side realization floor.
     /// @dev Refuses from the loan's expiry second with `LoanMatured`; after expiry the keeper's verb is `forceClose`.
-    /// @dev Never takes the debt under `minDebt`: at or under it `(0, 0)` returns after the disabled, closed and matured gates, before any record read.
-    /// @dev `minStableOut` is checked on EVERY return, so a caller floor above zero turns that `(0, 0)` into `BelowCallerFloor`.
-    /// @dev A wholly refused fill is an exact no-op, so a crank can hold an in-band loan's sized units fee-free for one call.
+    /// @dev A closing crank pushes the lender's pool, STRICT: a limit short of its fixed budget plus the tail reverts `PushGasShort`.
+    /// @dev `minStableOut` is checked on EVERY return, so a caller floor above zero turns a `(0, 0)` into `BelowCallerFloor`.
+    /// @dev A refused fill is an exact no-op on a restore only; a closing sale fills whole or reverts `CloseUnfilled`.
+    /// @dev The restore's no-op lets a crank hold an in-band loan's sized units fee-free for one call.
     /// @dev The hub's guard is held throughout, so those units cannot reach a hub verb; outside the hub, flash markets lend most tokens anyway.
     /// @param id The loan to deleverage.
     /// @param minStableOut The caller's realization floor, or 0 for none.
@@ -600,119 +616,42 @@ contract Ace is ReentrancyGuardTransient {
         (u, s) = _deleverage(id, minStableOut, data);
     }
 
-    /// @dev Cache once, hand to Deleverage, then the best-effort revenue sweep: a limit that cannot fund it skips it.
+    /// @dev Cache once, hand to Deleverage, push on a close, then the best-effort revenue sweep: a limit that cannot fund it skips it.
     function _deleverage(uint256 id, uint256 minStableOut, bytes calldata data) private returns (uint256 u, uint256 s) {
         bytes32 mid = _book().loans[id].market;
         Market storage M = _market()[mid];
         Cfg memory c = _cache(mid);
         (u, s) = Deleverage.deleverage(_book(), M, c, id, data);
         if (s < minStableOut) revert BelowCallerFloor();
+        if (_book().loans[id].closedAt != 0) _pushOwed(c); // a closing crank is a terminal close: the push rides it, STRICT
         _sweepIfDue(mid, M, c);
     }
 
-    /// @notice Close this loan and open a fresh one atomically: new id, new floor, new claim.
-    /// @notice The only continuation path; a loan never extends.
-    /// @notice An ARMED loan whose successor cannot re-reserve its roll refuses `RollUnbacked`; disarm in the same multicall to go on unarmed.
+    /// @notice Close this loan and open a fresh one atomically, in its own market or another securing the same collateral in the same quote.
+    /// @notice A new id, a new floor, a new claim and a fresh term: the only continuation into a NEW loan; `extend` lengthens one in place.
+    /// @notice From the expiry second it refuses `LoanMatured` before any write: a matured loan repays or settles, and is never re-termed.
+    /// @notice Its own market as `dst` re-terms or re-sizes the loan there.
     /// @notice The net out is PAID to the borrower in this call, as `open` pays; a quote that refuses it reverts the refinance.
-    /// @dev Borrower-only, because it is a new borrowing decision rather than maintenance.
-    /// @dev NO health gate on the old loan: its debt is retired in full, so its lenders take cash at par.
-    /// @dev Every admissibility question is open()'s, asked of the NEW loan; its cash leg needs only what the old debt does not recycle.
-    /// @dev A re-term drawing NO fresh cash is judged at `min(price, record)`, as the home roll is; one drawing fresh cash meets the draw cap.
-    /// @dev An armed loan's roll at its derived principal draws fresh, so under a low record it refuses here; `refinanceByPolicy` takes it.
-    /// @dev No try/catch anywhere here -- a failed draw gate must revert the whole thing.
-    /// @dev The band is a LEVEL test: a `bnd.minBufferWad` of at least `deleverageBandBps * 1e14`, judged at `min(price, record)`, keeps the successor out.
-    /// @param id The loan being refinanced.
-    /// @param newPrincipal The successor's principal; it clears minDebt like any other open.
-    /// @param newTenor The fresh term, within the market's min and max, or 0 for `minTenor`; on `setAutoRefinance` a 0 instead disarms.
-    /// @param bnd Open-time bounds; minPayout applies to the NET out, not to the inner draw.
-    /// @return newId The fresh loan.
-    /// @dev A draw that cannot retire the old debt is REFUSED: repay the gap first, in the same multicall.
-    function refinance(uint256 id, uint256 newPrincipal, uint64 newTenor, OpenBounds calldata bnd) external nonReentrant returns (uint256) {
-        /// @dev `dst == src` IS this verb; the body is `refinanceTo`'s, unbranched
-        return _refinance(MigrateArgs(id, _book().loans[id].market, newPrincipal, newTenor, bnd, 0, address(0)));
-    }
-
-    /// @notice refinance() into ANOTHER market securing the same collateral and quoting the same token.
     /// @notice Optionally sheds collateral off the SUCCESSOR in the same call; zero units to no recipient skips that leg.
-    /// @notice Its net out is paid to the borrower in the call, exactly as refinance() pays it.
     /// @notice A named `withdrawTo` is checked even with zero units: zero with units, the hub or the positionManager refuses.
+    /// @dev Borrower-only, because it is a new borrowing decision rather than maintenance; no keeper or periphery moves a loan.
+    /// @dev NO health gate on the old loan: its debt is retired in full, so its lenders take cash at par.
+    /// @dev Every admissibility question is open()'s, asked of the NEW loan; its cash leg needs only what the old claim does not recycle.
+    /// @dev Only into its own market does the claim recycle, on its lender's roll policy's yes; any other market, the same lender's too, draws it all fresh.
+    /// @dev A re-term drawing NO fresh cash is judged at `min(price, record)`; one drawing fresh cash meets the draw cap.
     /// @dev THE compatibility rules are collateral AND quote; fee, coverage, price and windows may differ.
-    /// @dev Floor and claim reseed from the destination; the auto policy is the one thing that rides across, or it refuses.
-    /// @dev It refuses `ArmNeedsRecord` into a recordless market, which holds no policy, and `RollUnbacked` where the roll cannot be re-reserved.
+    /// @dev Floor and claim reseed from the destination; only the collateral and the holder ride across.
     /// @dev A zero `newTenor` takes the DESTINATION's `minTenor`, as `open` takes its market's.
+    /// @dev The band is a LEVEL test: a `bnd.minBufferWad` of at least `deleverageBandBps * 1e14`, judged at `min(price, record)`, keeps the successor out.
+    /// @dev A draw that cannot retire the old debt is REFUSED `DrawBelowDebt`: repay the gap first, in the same multicall.
     /// @param m The migration args: loan id, destination market, the fresh terms, the open bounds and the withdrawal leg.
     /// @return newId The fresh loan, in the destination market.
     function refinanceTo(MigrateArgs calldata m) external nonReentrant returns (uint256) {
-        return _refinance(m);
-    }
-
-    /// @dev One body for both verbs: two caches, one for the retiring market and one for the destination.
-    /// @dev A zero `newTenor` resolves to the DESTINATION's `minTenor` here, so the successor and `Refinanced` carry the real term.
-    function _refinance(MigrateArgs memory m) private returns (uint256) {
-        bytes32 src = _book().loans[m.id].market;
-        Cfg memory cd = _cache(m.dst);
-        m.newTenor = Borrower.tenorOrMin(m.newTenor, cd.p.minTenor);
-        return Borrower.refinance(_book(), _market(), _cache(src), cd, m);
-    }
-
-    /// @notice Arm (or disarm) an automatic continuation on the caller's own loan.
-    /// @notice `tenor == 0` disarms. Anyone may then execute it, from the window's opening before expiry onward; it never shuts.
-    /// @notice A NONZERO `maxFeeBps` also CONSENTS to a keeper naming the destination market.
-    /// @notice ARMED MEANS RESERVED: arming holds the roll's fresh cash out of every later draw, or reverts `RollUnbacked`.
-    /// @notice It covers the NEXT roll only: a successor re-arms at its fold only where spare cash past the reserve covers its own roll need.
-    /// @notice A RECORDLESS market cannot arm: a nonzero tenor there reverts `ArmNeedsRecord`, ahead of every policy rail.
-    /// @notice In a market that names its borrower, only that borrower arms (`GateRefused`), and any title move disarms.
-    /// @notice The hold binds everyone BUT the market's lender: a withdrawal under it can fail the market's armed rolls while the deficit stands.
-    /// @notice Arm in the open's own transaction, from a contract that reads `open`'s returned id: between two, a draw can take the cash.
-    /// @notice A pre-encoded multicall arm leg must PREDICT the id, so any id allocated first reverts it or arms another loan of yours.
-    /// @notice The home roll's record leg is ONE READ: on a record one transaction can dent, a stranger can turn the fold to settle.
-    /// @dev The tenor and the buffer are validated in `Borrower.arm`, where the borrower is present to see them fail.
-    /// @dev The deleverage band is a LEVEL test on the record, so a roll can land inside it; a `minBufferBps` of at least `deleverageBandBps` rules that out.
-    /// @param id The loan to arm.
-    /// @param tenor The term each continuation takes; zero disarms.
-    /// @param minBufferBps The least admissibility buffer the borrower will accept, in bps; under 10000 whenever armed.
-    /// @param maxFeeBps Ceiling on the realized origination rate, in bps; zero means no ceiling AND home-only.
-    function setAutoRefinance(uint256 id, uint64 tenor, uint16 minBufferBps, uint16 maxFeeBps) external nonReentrant {
-        Borrower.arm(_book(), _market(), id, AutoPolicy(tenor, minBufferBps, maxFeeBps, 0));
-    }
-
-    /// @notice Execute an armed loan's stored policy. PERMISSIONLESS, and it pays the caller nothing.
-    /// @dev The incentive layer is periphery: a sponsor reads the logged executor and reimburses off-chain.
-    /// @dev The caller supplies no number at all, so the only discretion left is timing.
-    /// @dev Open at and AFTER expiry by ruling; the fold in forceClose is the PAID post-expiry backstop.
-    function refinanceByPolicy(uint256 id) external nonReentrant returns (uint256) {
-        bytes32 mid = _book().loans[id].market;
-        Cfg memory c = _cache(mid);
-        return Borrower.refinanceByPolicy(_book(), _market(), RollFrames(c, c, mid), id);
-    }
-
-    /// @notice Execute an armed loan's stored policy INTO A NAMED MARKET. Permissionless, and the hub pays nothing.
-    /// @notice The caller is paid by the destination: a roll charges origination, whose lender leg lands in ITS pool.
-    /// @notice Refuses until the incumbent's leading share of the roll window has run out; the home market has first refusal.
-    /// @dev Still no caller-supplied NUMBER: the destination is a choice among outcomes the borrower already bounded.
-    /// @dev The expiry fold never routes -- a destination it could not fund would SETTLE an admissible loan.
-    /// @param id The armed loan to continue.
-    /// @param dst The destination market; the loan's own market behaves exactly as `refinanceByPolicy`.
-    /// @return The fresh loan, in `dst`.
-    function refinanceByPolicyTo(uint256 id, bytes32 dst) external nonReentrant returns (uint256) {
-        bytes32 mid = _book().loans[id].market;
-        return Borrower.refinanceByPolicy(_book(), _market(), RollFrames(_cache(mid), _cache(dst), dst), id);
-    }
-
-    /// @notice refinanceByPolicy() over many loans in one transaction. ALL-OR-NOTHING.
-    /// @notice Any refusal reverts the whole batch; a keeper simulates first rather than filtering here.
-    /// @dev The loop reaches the library DIRECTLY -- the external singular would trip the shared guard.
-    /// @dev Skip-on-failure is IMPOSSIBLE, not declined: try/catch cannot wrap a library call.
-    /// @dev A repeated id reverts on its second pass, which finds the loan already closed.
-    /// @param ids The armed loans to continue; each is cached against its OWN market.
-    /// @return newIds The fresh loan per input, in the SAME order, so a sponsor attributes without logs.
-    function refinanceByPolicies(uint256[] calldata ids) external nonReentrant returns (uint256[] memory newIds) {
-        newIds = new uint256[](ids.length);
-        for (uint256 i; i < ids.length; i++) {
-            bytes32 mid = _book().loans[ids[i]].market;
-            Cfg memory c = _cache(mid);
-            newIds[i] = Borrower.refinanceByPolicy(_book(), _market(), RollFrames(c, c, mid), ids[i]);
-        }
+        MigrateArgs memory a = m;
+        bytes32 src = _book().loans[a.id].market;
+        Cfg memory cd = _cache(a.dst);
+        a.newTenor = Borrower.tenorOrMin(a.newTenor, cd.p.minTenor); // the successor and `Refinanced` carry the real term
+        return Borrower.refinance(_book(), _market(), _cache(src), cd, a);
     }
 
     /// @notice Settle a loan whose distress has persisted for the full settle window. Final.
@@ -729,43 +668,22 @@ contract Ace is ReentrancyGuardTransient {
 
     /// @notice Settle an expired loan by claim conversion; equity above what the market takes is CREDITED to the borrower.
     /// @notice A RECORDLESS market takes the whole coverage line rather than the claims' need, so its borrower may keep nothing.
-    /// @notice An ARMED policy's continuation is judged first and credits the same sliver; else it settles.
-    /// @notice On the SETTLE branch it pays the market's lender their pooled quote credit, swallowed.
+    /// @notice THE one settle verb at tenor, permissionless from the expiry second; it extends nothing, and asks no policy and no record.
+    /// @notice The keeper's in-kind sliver is CREDITED, priced at the loan's funding floor; `claimOwed` collects it.
+    /// @notice It pays the market's lender their pooled quote credit, swallowed, so no quote or lender can fail this door.
     /// @notice That push is STRICT: a limit short of its fixed budget plus the tail reverts `PushGasShort`.
     /// @notice THEN it sweeps any due protocol revenue, BEST-EFFORT on what the push left: a limit that cannot fund it skips it.
-    /// @dev The SETTLE branch consults no external DEPENDENCY; the ARMED branch asks the record through its predicate.
-    /// @dev The settle branch does BRANCH on whether a record is wired, and that read is what widens the bound.
-    /// @dev `settleExpired` is the must-execute backstop -- this door is the PAID one, and it can be starved.
-    /// @dev A sick record fails the continuation's predicate and settles; the roll it admits re-asks no external dependency.
-    /// @dev The roll moves no token: custody carries as a ledger write, and the hub's own payout leg is skipped.
-    /// @dev The borrower's disarm is a pure storage write, and it is the exit from that state.
+    /// @dev Whether a record is WIRED is still read, as a param compare: a recordless market forfeits the coverage line to its lender.
+    /// @dev Settleability at tenor survives by CONSTRUCTION on the units side, never by the swallowed legs' grace: never give it a units-side call.
     /// @dev The two token legs run LAST, after every state write: a view reached from a hook sees settled state.
     function forceClose(uint256 id) external nonReentrant {
         bytes32 mid = _book().loans[id].market;
+        Market storage M = _market()[mid];
         Cfg memory c = _cache(mid);
-        bool settled = Settlement.forceCloseOrContinue(_book(), _market(), c, id);
-        /// @dev THE SETTLE BRANCH ONLY: the push rides terminal closes, and a roll is a continuation; no roll door pushes.
-        if (settled) _pushOwed(c);
-        /// @dev The sweep runs AFTER the strict push, on whatever it left, so no sweep can starve the lender.
-        _sweepIfDue(mid, _market()[mid], c);
-    }
-
-    /// @notice Settle an expired loan once its roll window has passed, CALLING no record.
-    /// @notice Whether a record is WIRED is still read: a recordless market forfeits the coverage line to its lenders.
-    /// @notice Permissionless, and it pays the CALLER nothing; that caller may well be the market's lender, whose claim it settles.
-    /// @notice It DOES pay the market's LENDER their pooled quote credit, swallowed, so no quote or lender can fail this door.
-    /// @notice Only the caller's own limit can: one short of the push's fixed budget plus the tail reverts `PushGasShort`.
-    /// @dev The backstop for a market whose record cannot answer: such a dependency DELAYS settlement, never blocks it.
-    /// @dev The paid door never SHUTS, so a late roll still succeeds and this ends only a loan someone chose to end.
-    /// @dev Paying the caller nothing keeps it from being the cheap way to earn the sliver, which rides the paid doors alone.
-    /// @dev No sweep: the revenue push rides the paid crank, so this door gains no transfer on the PROTOCOL's behalf.
-    /// @dev Settleability at tenor survives by CONSTRUCTION on the units side, never by the swallowed leg's grace.
-    /// @dev That is what makes the quote push safe HERE and a units-side call unsafe: never give this door one.
-    function settleExpired(uint256 id) external nonReentrant {
-        bytes32 mid = _book().loans[id].market;
-        Cfg memory c = _cache(mid);
-        Settlement.settleExpired(_book(), _market()[mid], c, id);
+        Settlement.forceClose(_book(), M, c, id);
         _pushOwed(c);
+        /// @dev The sweep runs AFTER the strict push, on whatever it left, so no sweep can starve the lender.
+        _sweepIfDue(mid, M, c);
     }
 
     /* ============ 5. REVENUE AND INVENTORY: the protocol sweep, and the inventory bid ============ */
@@ -813,8 +731,8 @@ contract Ace is ReentrancyGuardTransient {
     }
 
     /// @dev Pay the market's lender what the hub holds for them, and swallow a refusal into the credit it came from.
-    /// @dev Called by the four terminal closes alone: sale proceeds land after the close and wait for the next push or `collect`.
-    /// @dev THE WHOLE POOL, never the door's delta, so those doors alone carry every partial repay, crank and sale.
+    /// @dev Called by the four terminal closes alone, a closing crank among them: sale proceeds land after the close and wait for the next push or `collect`.
+    /// @dev THE WHOLE POOL, never the door's delta, so those doors alone carry every partial repay, restore crank and sale.
     /// @dev STRICT ON THE CALLER: a limit leaving less than the fixed budget plus the tail reverts `PushGasShort`, so an estimate includes the push.
     /// @dev LENIENT ON THE CALLEE: a refusal or a transfer past its budget lands in the catch, never in a revert of the close.
     /// @dev CEI: the credit clears before the call and is restored whole on refusal, so a failure leaves prior state.
@@ -905,9 +823,9 @@ contract Ace is ReentrancyGuardTransient {
     /// @notice The storage half of a position transfer: the token moves there, `Loan.borrower` here.
     /// @notice One transaction, both ledgers, or neither.
     /// @notice `to` is never the hub, the positionManager, the title collection or the treasury (in production a router): none claims a holder's credit.
-    /// @notice In a market that NAMES its borrower, ANY title move disarms a live armed loan, a sale into an escrowing marketplace included.
+    /// @notice In a market that NAMES its borrower, a holder it does not name may hold the title but can never extend the loan.
     /// @dev NO solvency check: one `Loan` holds both legs, so trigger, debt and units cannot move here.
-    /// @dev Every field keyed by the loan alone rides along, bar a named market's auto policy; NEVER make a health input address-keyed.
+    /// @dev Every field keyed by the loan alone rides along; NEVER make a health input address-keyed.
     /// @dev Each close credits by loan AND claimant, the holder at the close or the crank's caller, so a title moved after any close carries none of them.
     /// @dev Nothing else resets -- no clock, no expiry, no settle-eligibility; distress travels with the sale.
     /// @dev `nonReentrant`, so an NFT transfer nested inside a hub call REVERTS. That is intended.
@@ -921,8 +839,7 @@ contract Ace is ReentrancyGuardTransient {
         Loan storage L = _book().loans[loanId];
         if (L.borrower != from) revert NotBorrower(); // defence in depth, never trust the caller alone
         if (from == to) return; // self-transfer: no write, no event (the Aave/Comet guard)
-        L.borrower = to; // first: the disarm asks the borrower rule of the NEW holder
-        Borrower.disarmOnRetitle(_book(), _market(), loanId);
+        L.borrower = to;
         emit Retitled(loanId, from, to, _book().feeEscrowOf[loanId]);
     }
 
@@ -972,6 +889,7 @@ contract Ace is ReentrancyGuardTransient {
         c.unitScale = M.s.unitScale;
         c.positionTitle = POSITION_TITLE; // immutable read; only the open body uses it, but the cache is built once
         c.positionManager = POSITION_MANAGER;
+        c.policyGas = POLICY_GAS;
     }
 
     /* ====== 9. VIEWS: the ones on-chain callers read from the hub, not a lens ====== */
@@ -1029,9 +947,9 @@ contract Ace is ReentrancyGuardTransient {
         return l.market != bytes32(0) && l.closedAt == 0;
     }
 
-    /// @notice What a LIVE loan owes: its `debt` word exactly, what a full repay pays and the most a home refinance recycles.
-    /// @notice Zero for every id that is not a live loan: never opened, an order, or closed by repay, refinance, roll or settlement.
-    /// @notice FOR AN ON-CHAIN CONSUMER bounding a market's cash beside `drawableOf`.
+    /// @notice What a LIVE loan owes: its `debt` word exactly, which is its claim, and what a full repay pays.
+    /// @notice Zero for every id that is not a live loan: never opened, an order, or closed by repay, refinance or settlement.
+    /// @notice FOR AN ON-CHAIN CONSUMER, read beside `restingOf`.
     /// @dev Nothing is netted: no fee, no escrow refund, no accrual; a settlement keeps the stored word but owes nothing.
     /// @dev GUARDED though it reads one loan: every verb that moves debt moves it across an external call, before or after the cash.
     /// @dev Zero rather than a revert outside a hub body, so a probe tells this view apart from a missing selector.
@@ -1073,7 +991,7 @@ contract Ace is ReentrancyGuardTransient {
     /// @dev PAGINATED ON PURPOSE: the list is unbounded and an immutable hub gets no second chance.
     /// @dev `limit` clamps silently, so a short page is not the end -- compare `marketLoansLength`.
     /// @dev An offset past the end returns empty rather than reverting; batched multicalls rely on it.
-    /// @dev START RECENT: ids are monotone and loans are tenor-bounded, so the tail is the live window.
+    /// @dev Ids are monotone, so the tail holds the newest loans; an extension keeps its id, so a live loan can sit anywhere in the list.
     /// @dev Expired is NOT closed (`forceClose` is permissionless, not automatic): liveness is `isClosed`.
     function marketLoans(bytes32 id, uint256 offset, uint256 limit) external view returns (uint256[] memory) {
         return Lender.slice(_market()[id].openedLoans, offset, limit);

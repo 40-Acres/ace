@@ -4,7 +4,6 @@ pragma solidity 0.8.36;
 import {Vm} from "forge-std/Test.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
@@ -12,7 +11,7 @@ import {AceSaleProceedsPullRig, ISaleProceedsQuote} from "./AceSaleProceedsPull.
 
 /// @title AceSaleProceedsPullHardening
 /// @notice The properties the first sale-pull rows leave open, each measured exactly rather than bounded.
-/// @notice N fills credit exactly their sum and call `pushToken` zero times; each of the four doors carries exactly the fills, once.
+/// @notice N fills credit exactly their sum and call `pushToken` zero times; each of the three doors carries exactly the fills, once.
 /// @notice A close in a DIFFERENT (lender, quote) pair pays its own lender his own pool and leaves the sale's credit where it is.
 /// @dev Every "carries" figure is a DIFFERENTIAL: the same close run in a snapshot with no sale, so the sale's part is isolated.
 /// @dev That is an independent derivation, never a restatement of `_pushOwed`: the two runs differ only by the buys.
@@ -23,7 +22,6 @@ contract AceSaleProceedsPullHardeningTest is AceSaleProceedsPullRig {
     uint8 internal constant REPAY = 0;
     uint8 internal constant FINALIZE = 1;
     uint8 internal constant FORCE_CLOSE = 2;
-    uint8 internal constant SETTLE_EXPIRED = 3;
 
     /// @dev One market a close can run in: who lends, in what, and the record `finalize` reads distress off.
     struct Side {
@@ -100,10 +98,6 @@ contract AceSaleProceedsPullHardeningTest is AceSaleProceedsPullRig {
     /// @dev The repay door's caller pays the debt itself, funded exactly, so its own wallet ends where it began.
     function _close(uint8 door, Side memory s, uint256 loanId, address caller) internal returns (Close memory r) {
         if (door == FORCE_CLOSE) vm.warp(uint256(read.loan(loanId).expiry) + 1);
-        if (door == SETTLE_EXPIRED) {
-            uint64 tenor = read.loan(loanId).tenor;
-            vm.warp(uint256(read.loan(loanId).expiry) + MarketInit.autoRefinanceWindow(tenor) + 1);
-        }
         if (door == FINALIZE) s.rec.setBelow(true);
         uint256 debt = read.loan(loanId).debt;
         if (door == REPAY) {
@@ -116,8 +110,7 @@ contract AceSaleProceedsPullHardeningTest is AceSaleProceedsPullRig {
         vm.prank(caller);
         if (door == REPAY) ace.repay(loanId, debt);
         else if (door == FINALIZE) ace.finalize(loanId);
-        else if (door == FORCE_CLOSE) ace.forceClose(loanId);
-        else ace.settleExpired(loanId);
+        else ace.forceClose(loanId);
         Vm.Log[] memory logs = vm.getRecordedLogs();
         if (door == FINALIZE) s.rec.setBelow(false);
         assertTrue(read.loan(loanId).closedAt != 0, "premise: the door closed the loan");
@@ -211,14 +204,9 @@ contract AceSaleProceedsPullHardeningTest is AceSaleProceedsPullRig {
         _assertTheCloseCarriesExactlyTheFills(FINALIZE);
     }
 
-    /// @notice `forceClose`'s settle branch carries them, exactly and once.
+    /// @notice `forceClose` carries them, exactly and once.
     function test_Carry_ForceCloseDeliversExactlyTheFills() public {
         _assertTheCloseCarriesExactlyTheFills(FORCE_CLOSE);
-    }
-
-    /// @notice `settleExpired` carries them, exactly and once.
-    function test_Carry_SettleExpiredDeliversExactlyTheFills() public {
-        _assertTheCloseCarriesExactlyTheFills(SETTLE_EXPIRED);
     }
 
     /* ============ 3. A CLOSE IN ANOTHER PAIR LEAVES THE SALE'S CREDIT WHERE IT IS ============ */
@@ -278,18 +266,13 @@ contract AceSaleProceedsPullHardeningTest is AceSaleProceedsPullRig {
         _bobsSide(FORCE_CLOSE);
     }
 
-    /// @notice Another lender's `settleExpired`, cranked by the sale's lender, leaves it pooled.
-    function test_Foreign_AnotherLendersSettleExpiredLeavesTheSaleAlone() public {
-        _bobsSide(SETTLE_EXPIRED);
-    }
-
     /// @notice The sale's lender's OWN close in another quote pays her that quote's pool and leaves the sale's untouched.
     function test_Foreign_TheSameLendersOtherQuoteClosingRepayLeavesTheSaleAlone() public {
         _otherQuoteSide(REPAY);
     }
 
-    /// @notice Likewise at `settleExpired`, the door that pays nobody but the market's lender.
-    function test_Foreign_TheSameLendersOtherQuoteSettleExpiredLeavesTheSaleAlone() public {
-        _otherQuoteSide(SETTLE_EXPIRED);
+    /// @notice Likewise at `forceClose`, cranked by a keeper whose sliver is paid in units, never in quote.
+    function test_Foreign_TheSameLendersOtherQuoteForceCloseLeavesTheSaleAlone() public {
+        _otherQuoteSide(FORCE_CLOSE);
     }
 }

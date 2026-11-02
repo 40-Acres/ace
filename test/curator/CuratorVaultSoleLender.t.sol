@@ -106,29 +106,18 @@ contract CuratorVaultSoleLenderTest is CuratorVaultBase {
     /// @dev THE DRAIN IS CLOSED BY THE KEY, not by a guard. `collect` pays in the MARKET's quote, so an
     /// @dev unbound call was a drain that needed no shares. The crank takes no market: it sweeps the vault's own pool,
     /// @dev keyed by (lender, quote), and a foreign market's credit is keyed to somebody else and simply unreachable.
-    /// @dev The two vault verbs that take a loan id reach no further: `crank(closed)` passed the stranger's loan changes nothing,
-    /// @dev and `roll` refuses it by name before any hub call that could move value.
     function test_Crank_AForeignMarketIsOutsideThePool() public {
         CuratorVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         bytes32 foreign = _marketLike(12e6, stranger);
         _lendDirectIn(stranger, foreign, 4_000e6);
-        uint256 theirs = _openIn(foreign, 2_000e6);
+        _openIn(foreign, 2_000e6);
 
         uint256 navBefore = v.grossNav();
         uint256 idleBefore = v.idle();
         v.crank();
         assertEq(v.grossNav(), navBefore, "a stranger's market is outside the pool the crank sweeps");
-
-        uint256[] memory ids = new uint256[](1);
-        ids[0] = theirs;
-        v.crank(ids);
-        assertEq(v.rollHold(), 0, "the stranger's loan was never on the vault's books");
-        assertEq(v.grossNav(), navBefore, "and pruning it moved no NAV");
-        assertEq(v.idle(), idleBefore, "and no cash");
-
-        vm.expectRevert(AceVault.NotOurLoan.selector);
-        v.roll(theirs, "");
+        assertEq(v.idle(), idleBefore, "and no cash moved");
     }
 
     // ---- multi-market: the pool is one position, never a single market assumed ----
@@ -166,7 +155,7 @@ contract CuratorVaultSoleLenderTest is CuratorVaultBase {
         ReenteringERC20 tok = new ReenteringERC20();
         VaultConfig memory cfg = _cfg(0);
         cfg.asset = address(tok);
-        CuratorVault v = new CuratorVault(cfg, RIG_MIN_DEBT, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, new Listing[](0), "Hostile", "cHOST");
+        CuratorVault v = new CuratorVault(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, new Listing[](0), "Hostile", "cHOST");
 
         tok.mint(bob, 10_000e6);
         vm.prank(bob);
@@ -179,22 +168,12 @@ contract CuratorVaultSoleLenderTest is CuratorVaultBase {
         vm.expectRevert(GUARD_TRIP);
         v.deposit(1_000e6, bob);
 
-        tok.arm(address(v), abi.encodeWithSignature("crank(uint256[])", new uint256[](0)));
-        vm.prank(bob);
-        vm.expectRevert(GUARD_TRIP);
-        v.deposit(1_000e6, bob);
-
         tok.arm(address(v), abi.encodeCall(AceVault.requestExit, (1)));
         vm.prank(bob);
         vm.expectRevert(GUARD_TRIP);
         v.deposit(1_000e6, bob);
 
         tok.arm(address(v), abi.encodeCall(AceVault.borrow, (_request(address(collateral), COLL, 100e6), "", "")));
-        vm.prank(bob);
-        vm.expectRevert(GUARD_TRIP);
-        v.deposit(1_000e6, bob);
-
-        tok.arm(address(v), abi.encodeCall(AceVault.roll, (1, "")));
         vm.prank(bob);
         vm.expectRevert(GUARD_TRIP);
         v.deposit(1_000e6, bob);

@@ -7,10 +7,8 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {Borrower} from "../../src/ace/hub/Borrower.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
 import {Cfg, Loan, MarketParams, OpenBounds, Storage} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
-import {ProtocolPolicy} from "../../src/config/Defaults.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockStakeVault} from "../mocks/MockStakeVault.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
@@ -40,14 +38,14 @@ contract AceStagedSettlementHandler is WarpClock {
     MockStakeVault public vault;
     MockPersistenceRecord public record; // the recorded market's own; crash and heal reach nothing else
 
-    bytes32 public recId; // the market with a record: finalize, the expiry fold and settleExpired all settle here
+    bytes32 public recId; // the market with a record: finalize and forceClose both settle here
     bytes32 public norecId; // the recordless market: its settlement takes the whole coverage line, the forfeit branch
 
     address public recLender = address(0xA11CE);
     address public norecLender = address(0xA11CF);
     address[2] public borrowers = [address(0xB0B), address(0xB0C)];
-    address public keeper = address(0xCAFE); // the paid settlement doors' caller, so the sliver has one named payee
-    address public stranger = address(0x57A2A6E2); // the unpaid backstop's caller: `settleExpired` pays nobody
+    address public keeper = address(0xCAFE); // the settlement doors' caller, so the sliver has one named payee
+    address public stranger = address(0x57A2A6E2); // no door names it: in the claimant set so a credit that reached it would show
     address public trader = address(0x74AD34);
     address public sink = address(0x5111C); // where staged units go: out of the system, as a withdrawal sends them
 
@@ -62,19 +60,15 @@ contract AceStagedSettlementHandler is WarpClock {
     /// @dev The settlement latch: the first settle whose ledgers disagree with the settle it was, and why.
     /// @dev 1 units not conserved, 2 claim survived, 3 lent did not fall by the claim, 4 shortfall record wrong,
     /// @dev 5 the market's loss total did not move with the record, 6 a short settle paid the defaulted borrower,
-    /// @dev 7 the unpaid backstop credited its caller, 8 the unpaid backstop landed inside the loan's roll window,
-    /// @dev 9 a loan in the recordless market was armed, which no record can judge.
+    /// @dev 7 a `forceClose` on an expired live loan reverted, or returned and left it live; from expiry it must always settle.
     uint8 public settleCode;
     uint256 public settleLoanId;
     uint256 public settleExpected;
     uint256 public settleActual;
 
-    uint256[3] public settlesShort; // per path (0 finalize, 1 expiry fold, 2 settleExpired): settles that came up short
-    uint256[3] public settlesCovered; // per path: settles the units covered
+    uint256[2] public settlesShort; // per path (0 finalize, 1 forceClose): settles that came up short
+    uint256[2] public settlesCovered; // per path: settles the units covered
     uint256 public forfeits; // recordless settles whose market took more than the claim's need
-    uint256 public foldRolls; // expiry folds that rolled an armed loan instead of settling it
-    uint256 public earlyRefused; // settleExpired calls inside the roll window that refused, as they must
-    uint256 public recordlessArmRefused; // arm attempts on the recordless market that refused, as they must
     uint256 public baselineShort; // short settles the baseline landed, so a report can tell the fuzzer's own from them
 
     /// @dev What one settle is checked against, taken before it runs.
@@ -108,7 +102,7 @@ contract AceStagedSettlementHandler is WarpClock {
         lens = new AceLens(address(ace));
 
         MarketParams memory q = AceFixtures.marketParams(address(usdc), address(vault));
-        q.lender = norecLender; // no record: the forfeit branch, and a market no loan can arm in
+        q.lender = norecLender; // no record: the forfeit branch
         norecId = ace.createMarket(q);
         require(norecId != recId, "TOPOLOGY: the two markets collided");
 
@@ -132,21 +126,15 @@ contract AceStagedSettlementHandler is WarpClock {
         _stage(b, 0); // one atom short after the paid door's sliver: the quantization edge
         _forceClose(b);
         _requireLatchClean();
-        require(settlesShort[1] > 0, "BASELINE: the staged short expiry fold did not land short");
+        require(settlesShort[1] > 0, "BASELINE: the staged short forceClose did not land short");
 
         uint256 c = _mustOpen(recId, borrowers[0]);
-        _stage(c, 1); // one atom short on the unpaid door, which takes no sliver
-        _settleExpired(c, true); // at expiry, inside the roll window: must refuse
+        _stage(c, 1); // one atom short before the sliver, which `forceClose` then takes too
+        _forceClose(c);
         _requireLatchClean();
-        require(earlyRefused > 0, "BASELINE: settleExpired inside the roll window did not refuse");
-        _settleExpired(c, false);
-        _requireLatchClean();
-        require(settlesShort[2] > 0, "BASELINE: the staged short settleExpired did not land short");
+        require(settlesShort[1] > 1, "BASELINE: the staged short forceClose before the sliver did not land short");
 
         uint256 e = _mustOpen(norecId, borrowers[1]);
-        _arm(e); // a recordless market cannot arm: must refuse
-        _requireLatchClean();
-        require(recordlessArmRefused > 0, "BASELINE: arming a loan in the recordless market did not refuse");
         _forceClose(e);
         _requireLatchClean();
         require(forfeits > 0, "BASELINE: the recordless settle forfeited nothing past the claim's need");
@@ -156,7 +144,7 @@ contract AceStagedSettlementHandler is WarpClock {
         uint256 f = _mustOpen(recId, borrowers[0]);
         _repayWhole(f); // a clean close refunds the unearned escrow AS A CREDIT, so the quote ledger has an entry to hold
         require(read.marketState(recId).quoteOwedTotal > 0, "BASELINE: the clean close credited no quote refund");
-        baselineShort = settlesShort[0] + settlesShort[1] + settlesShort[2];
+        baselineShort = settlesShort[0] + settlesShort[1];
     }
 
     function _repayWhole(uint256 id) internal {
@@ -248,7 +236,7 @@ contract AceStagedSettlementHandler is WarpClock {
         _bump("deposit");
         bytes32 m = _pickMarket(mSeed);
         address who = _lenderOf(m);
-        uint256 amt = bound(amtSeed, ace.idToMarketParams(m).minDebt, 50_000e6);
+        uint256 amt = bound(amtSeed, ace.idToMarketParams(m).minPrincipal, 50_000e6);
         usdc.mint(who, amt);
         vm.startPrank(who);
         usdc.approve(address(ace), amt);
@@ -305,24 +293,6 @@ contract AceStagedSettlementHandler is WarpClock {
         usdc.approve(address(ace), amt);
         try ace.repay(id, amt) {} catch {}
         vm.stopPrank();
-    }
-
-    /// @notice Arm the loan's roll, so the expiry fold has to judge a staged loan before it settles one.
-    /// @dev Drawn on BOTH markets: on the recordless one it must refuse, and a landing there is latched as code 9.
-    function armPolicy(uint256 loanSeed) external {
-        _bump("armPolicy");
-        (bool found, uint256 id) = _pickBy(loanSeed, true);
-        if (found) _arm(id);
-    }
-
-    function _arm(uint256 id) internal {
-        bool recordless = read.loan(id).market == norecId;
-        vm.prank(read.loan(id).borrower);
-        try ace.setAutoRefinance(id, ProtocolPolicy.MIN_TENOR, 0, 0) {
-            if (recordless) _latch(9, id, 0, 1);
-        } catch {
-            if (recordless) recordlessArmRefused++;
-        }
     }
 
     function claimOwed(uint256 loanSeed, uint256 whoSeed) external {
@@ -389,15 +359,13 @@ contract AceStagedSettlementHandler is WarpClock {
         uint256 staged = stagedShort;
         _stage(id, depthSeed);
         if (stagedShort == staged) return; // nothing staged: an expired loan, or one already under the target
-        uint256 door = read.loan(id).market == norecId ? 1 : doorSeed % 3; // the recordless market settles only by the fold
+        uint256 door = read.loan(id).market == norecId ? 1 : doorSeed % 2; // the recordless market settles only at expiry
         if (door == 0) {
             _crash(id);
             _finalize(id);
             _heal();
-        } else if (door == 1) {
-            _forceClose(id);
         } else {
-            _settleExpired(id, false);
+            _forceClose(id);
         }
     }
 
@@ -421,7 +389,7 @@ contract AceStagedSettlementHandler is WarpClock {
         if (depthSeed % 4 < 2) stagedOneAtom++;
     }
 
-    /// @dev The paid doors' keeper sliver, used ONLY to aim a staging; no assertion reads it, so a drift here mis-aims and never blesses.
+    /// @dev The keeper sliver `forceClose` pays, used ONLY to aim a staging; no assertion reads it, so a drift here mis-aims and never blesses.
     function _sliver(Loan memory l) internal view returns (uint256) {
         MarketParams memory p = ace.idToMarketParams(l.market);
         return FullMath.mulDiv(l.debt * p.settleBountyBps, read.marketState(l.market).unitScale, 10000 * p.price);
@@ -452,7 +420,7 @@ contract AceStagedSettlementHandler is WarpClock {
         record.setAbove(true);
     }
 
-    // ---- the three settlement doors, each checked against the settle it was ----
+    // ---- the two settlement doors, each checked against the settle it was ----
 
     function finalize(uint256 loanSeed) external {
         _bump("finalize");
@@ -478,45 +446,17 @@ contract AceStagedSettlementHandler is WarpClock {
         Loan memory l = read.loan(id);
         if (l.closedAt != 0) return;
         _warpAtLeastTo(l.expiry);
-        _heal(); // the fold judges an armed loan under a healthy print, so only the staging can settle it
+        _heal(); // `forceClose` reads no record; the heal only resets the print for the draws after it
         Pre memory p = _pre(id, keeper);
-        uint256 n = read.loanCount();
         vm.prank(keeper);
         try ace.forceClose(id) {
-            if (read.loanCount() != n) {
-                foldRolls++;
-                if (_loanIds.length < MAX_LOANS) _loanIds.push(read.loanCount());
+            if (read.loan(id).closedAt == 0) {
+                _latch(7, id, 1, 0); // sanity: `forceClose` writes `closedAt` first, so a return that leaves it live is a broken hub
                 return;
             }
             _post(p, id, 1);
-        } catch {}
-    }
-
-    /// @notice The unpaid backstop. One call in four is made EARLY, at expiry but inside the loan's roll window.
-    /// @dev The early call must refuse: the window is the borrower's roll, and a landing there is latched as code 8.
-    function settleExpired(uint256 loanSeed, uint256 timingSeed) external {
-        _bump("settleExpired");
-        (bool found, uint256 id) = _pickSettle(loanSeed);
-        if (found) _settleExpired(id, timingSeed % 4 == 0);
-    }
-
-    function _settleExpired(uint256 id, bool early) internal {
-        Loan memory l = read.loan(id);
-        if (l.closedAt != 0) return;
-        uint256 opens = uint256(l.expiry) + MarketInit.autoRefinanceWindow(l.tenor);
-        if (early) _warpAtLeastTo(l.expiry);
-        else _warpAtLeastTo(opens);
-        bool inWindow = _now() < opens;
-        Pre memory p = _pre(id, stranger);
-        vm.prank(stranger);
-        try ace.settleExpired(id) {
-            if (inWindow) {
-                _latch(8, id, opens, _now());
-                return;
-            }
-            _post(p, id, 2);
         } catch {
-            if (inWindow) earlyRefused++;
+            _latch(7, id, 1, 0); // MUST EXECUTE: from its expiry second a live loan always settles, and this call runs with ample gas
         }
     }
 
@@ -539,11 +479,6 @@ contract AceStagedSettlementHandler is WarpClock {
     function _post(Pre memory p, uint256 id, uint8 path) internal {
         (bool ok, uint256 potIn, uint256 toBorrower) = _postLedgers(p, id);
         if (!ok) return;
-        uint256 toCaller = read.unitsOwedOf(id, p.caller) - p.callerOwed;
-        if (path == 2 && toCaller != 0) {
-            _latch(7, id, 0, toCaller);
-            return;
-        }
         uint256 need = _need(p.m, p.claim);
         uint256 give = potIn < need ? potIn : need;
         (uint256 su, uint256 sq) = read.shortfallOf(id);

@@ -3,11 +3,9 @@ pragma solidity 0.8.36;
 
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
-import {MarketParams, MarketState, OpenBounds} from "../../src/ace/hub/Types.sol";
+import {MarketState, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
-import {ProtocolPolicy} from "../../src/config/Defaults.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
-import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {MockStakeVault} from "../mocks/MockStakeVault.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
@@ -16,7 +14,7 @@ import {AceReader} from "../utils/AceReader.sol";
 /// @notice Phase 12 (sequences): ordered pairs of legal calls, each leg passing alone.
 /// @notice Every row here is GREEN: a measurement of current behaviour, never a repro. A red would mean the ledger moved.
 /// @dev S1: the synthetic cap is conservation, not a budget two doors can spend twice.
-/// @dev S6: an armed loan repaid to dust rolls into `minDebt` through the PAID door (deepens #376); its armed rows run record-backed.
+/// @dev S6: a loan repaid to dust EXTENDS at its dust debt: a cash extension draws nothing and floors nothing, so it re-borrows no `minPrincipal`.
 /// @dev L1: a lender who withdraws every resting wei still has a payout to collect, and it waits for them.
 contract AceP12SequencesTest is WarpClock {
     Ace internal ace;
@@ -58,16 +56,6 @@ contract AceP12SequencesTest is WarpClock {
         loanId = ace.open(id, UNITS, principal, TEN, who, OpenBounds(0, 0, 0));
         usdc.approve(address(ace), type(uint256).max);
         vm.stopPrank();
-    }
-
-    /// @dev Points the suite at a record-backed twin of the fixture market, rested as deep: an armed row needs a record to arm.
-    function _recordBacked() internal {
-        MarketParams memory p = AceFixtures.marketParams(address(usdc), address(coll));
-        p.record = address(new MockPersistenceRecord(address(usdc), address(coll)));
-        id = ace.createMarket(p);
-        usdc.mint(alice, 100_000e6);
-        vm.prank(alice);
-        ace.deposit(id, 100_000e6);
     }
 
     function _headroom() internal view returns (uint256) {
@@ -121,67 +109,9 @@ contract AceP12SequencesTest is WarpClock {
         assertLe(s.netSyntheticOutflow, s.cumulativeBackedBurns, "so SyntheticCapExceeded is implied, never reached");
     }
 
-    /* ============================== S6: arm, repay to dust, forceClose ============================== */
+    /* ============================== S6 is DELETED ============================== */
 
-    /// @notice CONTROL: an UNARMED loan repaid to dust settles at expiry and mints no successor.
-    function test_S6_Control_AnUnarmedDustLoanSettles() public {
-        uint256 loanId = _open(borrower, DRAW);
-        vm.prank(borrower);
-        ace.repay(loanId, DRAW - 1);
-        assertEq(read.debtOf(loanId), 1, "PREMISE: one wei of debt stands");
-        uint256 n = read.loanCount();
-        _warpTo(uint256(read.loan(loanId).expiry) + 1);
-        vm.prank(keeper);
-        ace.forceClose(loanId);
-        assertEq(read.loanCount(), n, "no successor");
-        assertTrue(ace.isClosed(loanId), "settled");
-        assertGt(read.unitsOwedOf(loanId, borrower), 0, "the borrower's residual is credited");
-    }
-
-    /// @notice CONTROL: an ARMED loan at full debt rolls at expiry into a successor carrying the old debt plus a fee.
-    /// @dev In the record-backed twin: a recordless market cannot arm.
-    function test_S6_Control_AnArmedFullLoanRolls() public {
-        _recordBacked();
-        uint256 loanId = _open(borrower, DRAW);
-        vm.prank(borrower);
-        ace.setAutoRefinance(loanId, ProtocolPolicy.MIN_TENOR, 0, 0);
-        uint256 n = read.loanCount();
-        _warpTo(uint256(read.loan(loanId).expiry) + 1);
-        vm.prank(keeper);
-        ace.forceClose(loanId);
-        assertEq(read.loanCount(), n + 1, "one successor");
-        uint256 newId = n + 1;
-        assertGt(read.debtOf(newId), DRAW, "the successor owes the old debt plus the new origination fee");
-        assertLt(read.quoteOwedOf(loanId, borrower), 2, "the netting hands the borrower at most a rounding wei");
-    }
-
-    /// @notice THE PAIR (deepens #376): arm, repay to one wei, wait. The paid crank re-borrows `minDebt` in the borrower's name.
-    /// @dev Each leg alone is the control above; composed, the fold raises debt from 1 wei to `minDebt` and credits the difference.
-    /// @dev In the record-backed twin: a recordless market cannot arm.
-    function test_S6_Measure_AnArmedDustLoanRollsIntoMinDebt() public {
-        _recordBacked();
-        uint256 loanId = _open(borrower, DRAW);
-        vm.startPrank(borrower);
-        ace.setAutoRefinance(loanId, ProtocolPolicy.MIN_TENOR, 0, 0);
-        ace.repay(loanId, DRAW - 1);
-        vm.stopPrank();
-        assertEq(read.debtOf(loanId), 1, "PREMISE: one wei of debt stands, armed");
-        uint256 n = read.loanCount();
-        _warpTo(uint256(read.loan(loanId).expiry) + 1);
-        vm.prank(keeper);
-        ace.forceClose(loanId);
-
-        uint256 newId = n + 1;
-        assertEq(read.loanCount(), n + 1, "the paid crank rolled rather than settled");
-        uint256 minDebt = ace.idToMarketParams(id).minDebt;
-        assertEq(read.debtOf(newId), minDebt, "the successor's debt is the market's minDebt, not the wei that was owed");
-        uint256 credited = read.quoteOwedOf(loanId, borrower);
-        assertGt(credited, minDebt * 9 / 10, "the borrower is handed nearly minDebt of cash they did not ask for now");
-        emit log_named_uint("debt before the crank (atoms)", 1);
-        emit log_named_uint("debt after the crank (atoms)", read.debtOf(newId));
-        emit log_named_uint("quote credited to the borrower (atoms)", credited);
-        emit log_named_uint("keeper sliver (collateral atoms)", read.unitsOwedOf(loanId, keeper));
-    }
+    /// @dev Its pair repaid a loan to one wei, then settled or extended it; no repay leaves a live loan under `minPrincipal` any more.
 
     /* ============================== L1: the lender's exit ============================== */
 

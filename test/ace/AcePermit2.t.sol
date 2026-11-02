@@ -8,11 +8,12 @@ import {Ace} from "../../src/ace/hub/Ace.sol";
 import {Loan, MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {Permits} from "../../src/ace/hub/libraries/Permits.sol";
+import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {IPermit2} from "../../src/interfaces/IPermit2.sol";
 import {BelowMinLot, GateRefused} from "../../src/ace/hub/Lender.sol";
 import {FeeOnTransferUnsupported} from "../../src/ace/hub/libraries/Transfers.sol";
 import {NotPermitOwner, Permit2Missing, Permit2TokenMismatch} from "../../src/ace/hub/libraries/Permits.sol";
-import {LoanClosed} from "../../src/ace/hub/Borrower.sol";
+import {BelowDebtFloor, BelowMinPrincipal, LoanClosed} from "../../src/ace/hub/Borrower.sol";
 import {NoMarket} from "../../src/ace/hub/Ace.sol";
 import {GUARD_TRIP} from "../utils/GuardTrip.sol";
 import {ProtocolPolicy} from "../../src/config/Defaults.sol";
@@ -414,7 +415,7 @@ contract AcePermit2Test is WarpClock {
     /// @dev the signer unable to retry with the same nonce. `BelowMinLot` is the surviving refusal of that shape.
     function testRevert_DepositWithPermit2_RefusesBeforeThePullAndBeforeTheNonceBurns() public {
         _fundViaPermit2Only(lender, 1000e6);
-        uint256 under = ace.idToMarketParams(id).minDebt - 1;
+        uint256 under = ace.idToMarketParams(id).minPrincipal - 1;
         bytes memory blob = _blob(LENDER_PK, address(usdc), under, 0);
 
         vm.prank(lender);
@@ -497,18 +498,19 @@ contract AcePermit2Test is WarpClock {
         ace.repayWithPermit2(type(uint256).max, 100e6, blob);
     }
 
-    /// @dev `minDebt` gates ADMISSION only, so a paydown under it stands behind both doors; pin it from the permit one.
-    function test_RepayWithPermit2_MayLandUnderMinDebt() public {
+    /// @dev No repay leaves a live loan under its debt floor, whoever sends it: the permit door is floored as the allowance door is.
+    function test_RED_RepayWithPermit2_UnderTheDebtFloorReverts() public {
         uint256 loanId = _open();
-        uint256 amt = PRINCIPAL - 5e6; // 5e6 left, under the fixture's 10e6 minDebt
+        uint256 amt = PRINCIPAL - (LoanMath.debtFloor(ace.idToMarketParams(id).minPrincipal) - 1); // one atom under the floor left
         _fundViaPermit2Only(payer, amt);
         bytes memory blob = _blob(PAYER_PK, address(usdc), amt, 0);
 
         vm.prank(payer);
+        vm.expectRevert(BelowDebtFloor.selector);
         ace.repayWithPermit2(loanId, amt, blob);
 
-        assertEq(read.loan(loanId).debt, 5e6, "the paydown stands, under the floor and open");
-        assertFalse(read.loan(loanId).closedAt != 0, "and a dust loan is still a live loan");
+        assertEq(read.loan(loanId).debt, PRINCIPAL, "the refused paydown moved no debt");
+        assertEq(read.loan(loanId).closedAt, 0, "and the loan is live");
     }
 
     // ============ events survive the relocation under delegatecall ============
@@ -631,6 +633,23 @@ contract AcePermit2Test is WarpClock {
         assertEq(vault.allowance(payer, address(positionManager)), 0, "no borrower approval to the positionManager");
         assertEq(read.loan(loanId).borrower, payer, "title to the signer");
         assertGt(usdc.balanceOf(payer), 0, "principal drawn");
+    }
+
+    /// @notice RED: the permit door floors a birth as `open` does: one atom under `minPrincipal` is refused by name, and exactly it opens.
+    /// @dev The refusal reverts the pull it follows, so the same signed nonce then funds the control.
+    function test_RED_OpenWithPermit2_UnderMinPrincipalReverts() public {
+        _fundLadder();
+        uint256 mp = ace.idToMarketParams(id).minPrincipal;
+        vault.mint(payer, COLL);
+        vm.prank(payer);
+        vault.approve(PERMIT2, type(uint256).max);
+        bytes memory blob = _blob(PAYER_PK, address(vault), COLL, 0);
+        vm.prank(payer);
+        vm.expectRevert(BelowMinPrincipal.selector);
+        ace.openWithPermit2(id, COLL, mp - 1, 0, payer, OpenBounds(0, 0, 0), blob);
+        vm.prank(payer);
+        uint256 loanId = ace.openWithPermit2(id, COLL, mp, 0, payer, OpenBounds(0, 0, 0), blob);
+        assertEq(read.loan(loanId).debt, mp, "a permit open of exactly minPrincipal lands");
     }
 
     /// @dev Equivalence: tenor 0 through the permit stub is the plain open's minTenor form.

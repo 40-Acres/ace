@@ -83,7 +83,7 @@ contract AceS8EconomicTest is Test {
         assertEq(f.protocolFee, y.protocolFee, "the take does not grow with the term");
         assertGt(h.protocolFee, 780 * y.protocolFee, "an off-hub price moves 99.9 percent of ACE's take off the hub");
 
-        (uint256 lenderApr, uint256 allInApr,) = lens.rateBps(floorForever);
+        (uint256 lenderApr, uint256 allInApr) = lens.rateBps(floorForever);
         assertEq(lenderApr, 0, "the lens reads a zero lender APR");
         assertEq(allInApr, 0, "and a zero all-in APR");
     }
@@ -93,7 +93,7 @@ contract AceS8EconomicTest is Test {
     function test_Measure_TheAllInAprIsARateOnFaceNotOnTheCashReceived() public {
         bytes32 corner = _create(7 days, 7 days, 2272);
         Borrower.Quote memory q = _quote(corner, 7 days);
-        (, uint256 allInApr,) = lens.rateBps(corner);
+        (, uint256 allInApr) = lens.rateBps(corner);
         uint256 onProceedsApr = (q.fee * 10000 * 365) / (q.payout * 7);
 
         emit log_named_uint("corner: all-in APR on face, bps      ", allInApr);

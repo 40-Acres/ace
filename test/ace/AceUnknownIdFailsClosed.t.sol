@@ -2,8 +2,8 @@
 pragma solidity 0.8.36;
 
 import {WarpClock} from "../utils/WarpClock.sol";
-import {Ace, NoMarket, NotBorrower, NotPositionTitle} from "../../src/ace/hub/Ace.sol";
-import {ArmNeedsRecord} from "../../src/ace/hub/Borrower.sol";
+import {Ace, NoMarket, NotPositionTitle} from "../../src/ace/hub/Ace.sol";
+import {PolicyRefused} from "../../src/ace/hub/Borrower.sol";
 import {NotTheLender} from "../../src/ace/hub/Lender.sol";
 import {MarketParams, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
@@ -24,7 +24,7 @@ interface IClaimOwedPerLeg {
 /// @notice Caching the zero market reverts `NoMarket`, because that market's quote token is the zero address.
 /// @dev Nothing here remembers to block anything: the market read is the FIRST thing every verb does.
 /// @dev So the property survives a new verb being added, provided that verb also resolves its market first.
-/// @dev THREE verbs fail closed under a DIFFERENT selector, each because an earlier gate binds; rows below.
+/// @dev ONE verb, `retitle`, fails closed under a DIFFERENT selector, because an earlier gate binds; its row is below.
 /// @dev The control test is load-bearing: without it every row could pass on a fixture where nothing works.
 contract AceUnknownIdFailsClosedTest is WarpClock {
     Ace internal ace;
@@ -150,10 +150,16 @@ contract AceUnknownIdFailsClosedTest is WarpClock {
         vm.stopPrank();
     }
 
-    function test_UnknownId_Refinance_Refuses() public {
-        vm.prank(mallory);
+    /// @notice Both extend doors and the preview resolve the loan's market first, so a ghost id refuses before any leg.
+    function test_UnknownId_Extend_Refuses() public {
+        vm.startPrank(mallory);
         vm.expectRevert(NoMarket.selector);
-        ace.refinance(ghost, PRINCIPAL, TEN, _bounds());
+        ace.extend(ghost, 0, "");
+        vm.expectRevert(NoMarket.selector);
+        ace.extendWithPermit2(ghost, 0, "", "");
+        vm.expectRevert(NoMarket.selector);
+        ace.tryExtend(ghost, 0, "", mallory);
+        vm.stopPrank();
     }
 
     /// @notice `refinanceTo` names a REAL destination market, so only the source id is unknown.
@@ -163,21 +169,6 @@ contract AceUnknownIdFailsClosedTest is WarpClock {
         vm.prank(mallory);
         vm.expectRevert(NoMarket.selector);
         ace.refinanceTo(m);
-    }
-
-    function test_UnknownId_RefinanceByPolicy_Refuses() public {
-        vm.prank(mallory);
-        vm.expectRevert(NoMarket.selector);
-        ace.refinanceByPolicy(ghost);
-    }
-
-    /// @notice The batched form refuses on the same read, so one unknown id takes the whole batch.
-    function test_UnknownId_RefinanceByPolicies_Refuses() public {
-        uint256[] memory ids = new uint256[](1);
-        ids[0] = ghost;
-        vm.prank(mallory);
-        vm.expectRevert(NoMarket.selector);
-        ace.refinanceByPolicies(ids);
     }
 
     // ============ the keeper verbs ============
@@ -200,13 +191,7 @@ contract AceUnknownIdFailsClosedTest is WarpClock {
         ace.forceClose(ghost);
     }
 
-    /// @notice The unpaid backstop reads no gate and no record, so the market lookup is ALL that stands here.
-    /// @dev A ghost carries tenor zero, hence window zero, so its clock admits at once: only `NoMarket` refuses it.
-    function test_UnknownId_SettleExpired_Refuses() public {
-        vm.prank(mallory);
-        vm.expectRevert(NoMarket.selector);
-        ace.settleExpired(ghost);
-    }
+    // the `settleExpired` row went with the verb; `test_UnknownId_ForceClose_Refuses` covers the one settle verb at tenor
 
     function test_UnknownId_BuyInventory_Refuses() public {
         vm.prank(mallory);
@@ -244,16 +229,9 @@ contract AceUnknownIdFailsClosedTest is WarpClock {
         assertEq(owed, 0, "and the credit leg a collect would pay is zero on it too");
     }
 
-    // ============ the three that fail closed under ANOTHER selector ============
+    // ============ the verbs an earlier gate could have refused first ============
 
-    /// @notice `setAutoRefinance` refuses, but as `NotBorrower`: the title check runs before any market read.
-    /// @notice Still closed -- an unwritten record's borrower is the zero address and no caller can be it.
-    /// @dev Recorded because a caller catching `NoMarket` alone would not recognise this refusal.
-    function test_UnknownId_SetAutoRefinance_RefusesAsNotBorrower() public {
-        vm.prank(mallory);
-        vm.expectRevert(NotBorrower.selector);
-        ace.setAutoRefinance(ghost, TEN, 0, 0);
-    }
+    // the `setAutoExtend` row, refused as `NotBorrower`, went with the verb
 
     /// @notice `redeemInKind` refuses as `NotTheLender`: identity binds before any pot is read.
     /// @dev An unallocated loan resolves a zero-lender market, so no caller can ever be its lender.
@@ -287,10 +265,11 @@ contract AceUnknownIdFailsClosedTest is WarpClock {
         assertEq(read.loan(liveLoan).debt, debtBefore, "a zero repay moves nothing");
         assertFalse(ace.isClosed(liveLoan), "and it does NOT close the loan");
 
-        /// @dev The fixture market is recordless, so the verb passes the borrower gate and reaches the market's record.
+        /// @dev The lender names no roll policy, so the borrower's extension, a day in, passes every leg before the policy and refuses there.
         /// @dev A refusal by NAME from that far in still proves the refusal above was the id and not the verb.
+        _warpBy(1 days);
         vm.prank(bob);
-        vm.expectRevert(ArmNeedsRecord.selector);
-        ace.setAutoRefinance(liveLoan, TEN, 0, 0);
+        vm.expectRevert(PolicyRefused.selector);
+        ace.extend(liveLoan, 0, "");
     }
 }

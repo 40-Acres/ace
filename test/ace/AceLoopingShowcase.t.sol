@@ -193,7 +193,7 @@ contract AceLoopingShowcaseTest is Test {
         p.record = address(recWeth);
         p.price = T_WETH;
         p.baseBps = BASE_BPS;
-        p.minDebt = BACK_MIN_DEBT;
+        p.minPrincipal = BACK_MIN_DEBT;
     }
 
     function _paramsBack() internal view returns (MarketParams memory p) {
@@ -574,7 +574,7 @@ contract AceLoopingShowcaseTest is Test {
         for (uint256 i = 1; i + 2 < 8; i++) {
             assertLt(legs[i + 2].collateral, legs[i].collateral, "a turn of the cycle shrinks, never grows");
         }
-        assertGt(legs[7].principal, ace.idToMarketParams(legs[7].market).minDebt, "and eight hops still clear the dust floor");
+        assertGt(legs[7].principal, ace.idToMarketParams(legs[7].market).minPrincipal, "and eight hops still clear the dust floor");
     }
 
     /// @dev What the borrower HOLDS of a token (wallet plus every pledge) and what they OWE of it, hub-sourced.
@@ -625,12 +625,12 @@ contract AceLoopingShowcaseTest is Test {
     }
 
     /// @notice What ends a loop is the DUST FLOOR, not gas: the hops shrink geometrically, the cost does not.
-    /// @dev The first hop under `minDebt` is refused, so the ceiling on depth is economic and per market.
+    /// @dev The first hop under `minPrincipal` is refused, so the ceiling on depth is economic and per market.
     function test_TheLoopEndsAtTheDustFloor() public view {
         uint256 depth;
         Leg[] memory legs = _plan(40);
         for (uint256 i; i < 40; i++) {
-            if (legs[i].principal < ace.idToMarketParams(legs[i].market).minDebt) break;
+            if (legs[i].principal < ace.idToMarketParams(legs[i].market).minPrincipal) break;
             depth++;
         }
         console2.log("hops before the dust floor bites", depth);

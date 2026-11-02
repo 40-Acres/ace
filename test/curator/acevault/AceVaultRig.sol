@@ -7,8 +7,10 @@ import {AceReader} from "../../utils/AceReader.sol";
 import {MockERC20} from "../../mocks/MockERC20.sol";
 import {MockStakeVault} from "../../mocks/MockStakeVault.sol";
 import {MockPersistenceRecord} from "../../mocks/MockPersistenceRecord.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Ace} from "../../../src/ace/hub/Ace.sol";
-import {Borrower} from "../../../src/ace/hub/Borrower.sol";
+import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
+import {RefinanceMath} from "../../utils/RefinanceMath.sol";
 import {Loan, MarketParams} from "../../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../../src/ace/positions/PositionManager.sol";
 import {VaultConfig} from "../../../src/curator/AceVault.sol";
@@ -35,7 +37,7 @@ abstract contract AceVaultRig is WarpClock {
     address internal keeper = address(0xCAFE);
     address internal stranger = address(0x5EE);
 
-    uint256 internal constant MIN_DEBT = 10e6;
+    uint256 internal constant MIN_PRINCIPAL = 10e6;
     uint256 internal constant COVERAGE = 1.4e18;
     uint64 internal constant TIMELOCK = 3 days;
     uint16 internal constant BUFFER_BPS = 1000;
@@ -78,7 +80,7 @@ abstract contract AceVaultRig is WarpClock {
     function _newVault(Row memory row) internal returns (CuratorVault v) {
         Listing[] memory l = new Listing[](1);
         l[0] = Listing({collateral: address(coll), row: row});
-        v = new CuratorVault(_cfg(), MIN_DEBT, COVERAGE, TIMELOCK, l, "Curator", "cVLT");
+        v = new CuratorVault(_cfg(), MIN_PRINCIPAL, COVERAGE, TIMELOCK, l, "Curator", "cVLT");
     }
 
     function _lp(address who, uint256 amt) internal returns (uint256 shares) {
@@ -89,22 +91,21 @@ abstract contract AceVaultRig is WarpClock {
         vm.stopPrank();
     }
 
-    function _req(uint256 units, uint256 principal, uint64 tenor, bool arm) internal view returns (BorrowRequest memory) {
-        return
-            BorrowRequest({collateral: address(coll), units: units, principal: principal, tenor: tenor, arm: arm, minPayout: 0, minBufferWad: 0, deadline: 0});
+    function _req(uint256 units, uint256 principal, uint64 tenor) internal view returns (BorrowRequest memory) {
+        return BorrowRequest({collateral: address(coll), units: units, principal: principal, tenor: tenor, minPayout: 0, minBufferWad: 0, deadline: 0});
     }
 
     /// @dev Borrow through the vault's door as `who`, who is minted and approves exactly the units.
-    function _borrowAs(address who, uint256 units, uint256 principal, uint64 tenor, bool arm) internal returns (uint256 loanId) {
+    function _borrowAs(address who, uint256 units, uint256 principal, uint64 tenor) internal returns (uint256 loanId) {
         coll.mint(who, units);
         vm.startPrank(who);
         coll.approve(address(vault), units);
-        loanId = vault.borrow(_req(units, principal, tenor, arm), "", "");
+        loanId = vault.borrow(_req(units, principal, tenor), "", "");
         vm.stopPrank();
     }
 
-    function _borrow(uint64 tenor, bool arm) internal returns (uint256) {
-        return _borrowAs(borrower, UNITS, PRINCIPAL, tenor, arm);
+    function _borrow(uint64 tenor) internal returns (uint256) {
+        return _borrowAs(borrower, UNITS, PRINCIPAL, tenor);
     }
 
     function _mid(uint256 loanId) internal view returns (bytes32) {
@@ -115,7 +116,7 @@ abstract contract AceVaultRig is WarpClock {
         return ace.idToMarketParams(ace.loanMarket(loanId));
     }
 
-    /// @dev Inside the loan's roll window: an hour before expiry, which a week-or-longer tenor's two-hour window covers.
+    /// @dev An hour before expiry: inside the last tenor, where a holder's extension still lands under a 30-day ceiling.
     function _toWindow(uint256 loanId) internal {
         Loan memory l = read.loan(loanId);
         _warpAtLeastTo(uint256(l.expiry) - 1 hours);
@@ -134,19 +135,6 @@ abstract contract AceVaultRig is WarpClock {
         vm.stopPrank();
     }
 
-    function _need(uint256 loanId) internal view returns (uint256 need) {
-        (need,) = vault.rollOf(loanId);
-    }
-
-    function _funded(uint256 loanId) internal view returns (bool funded) {
-        (, funded) = vault.rollOf(loanId);
-    }
-
-    /// @dev The hold the plan states: zero on an empty book, else three times the record plus the dust floor.
-    function _holdNowOf(uint256 hold) internal pure returns (uint256) {
-        return hold == 0 ? 0 : 3 * hold + MIN_DEBT;
-    }
-
     /// @dev Nothing the vault funds rests across a call: the market reads zero cash.
     function _assertNothingRests(bytes32 id) internal view {
         assertEq(ace.restingOf(id), 0, "law: no vault cash rests in a market between calls");
@@ -158,13 +146,8 @@ abstract contract AceVaultRig is WarpClock {
         assertEq(coll.allowance(address(vault), address(pm)), 0, "law: no collateral allowance to custody outlives a call");
     }
 
-    /// @dev The vault's record covers the hub's reservation for this loan: every live armed reservation sits inside the hold.
-    function _assertRecordCovers(uint256 loanId) internal view {
-        assertGe(_need(loanId), read.reservedOf(loanId), "law: the recorded need covers the hub's reservation");
-    }
-
-    /// @dev The vault's successor principal bound, as the plan sizes it: the hub's own rule at the market's longest term.
+    /// @dev The successor principal that retires `debt` at the market's longest term, floored at `minPrincipal`: the retired roll's own sizing, kept test-side.
     function _succUp(MarketParams memory mp, uint256 debt) internal pure returns (uint256) {
-        return Borrower.successorPrincipal(mp.baseBps, mp.minTenor, mp.minDebt, debt, mp.maxTenor);
+        return Math.max(RefinanceMath.principalForOwed(debt, mp.maxTenor, mp.baseBps, mp.minTenor), mp.minPrincipal);
     }
 }

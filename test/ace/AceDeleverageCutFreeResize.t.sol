@@ -6,6 +6,7 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {Constants} from "../../src/ace/hub/Constants.sol";
+import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {NotInBand} from "../../src/ace/hub/Deleverage.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
@@ -17,31 +18,34 @@ import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
 
 /// @title AceDeleverageCutFreeResizeTest
-/// @notice #413: a crank whose cut-charging restore does not fit under its caps re-sizes CUT-FREE, then caps.
-/// @notice It sells `u` and takes the cut when `u < C` and `u <= min(securedBase, room)`; otherwise `min(free, that cap)`, with no cut.
+/// @notice #413: a crank whose cut-charging restore does not fit under its cap re-sizes CUT-FREE, then caps.
+/// @notice It sells `u` and takes the cut when `u < C` and `u <= securedBase`; otherwise `min(free, securedBase)`, with no cut.
+/// @notice Where that sale's net melt would leave the debt under its debt floor the crank closes the loan instead, selling `uClose`.
 /// @dev `free` is the restore sized with no cut: the cut multiplies the sale, so a crank that takes none must not be sized as if it did.
 /// @dev "No cut" is read off the DEBT, `debt drop == stableOut`, never off `protocolRevenue`: the crank piggybacks the revenue sweep.
 contract AceDeleverageCutFreeResizeTest is Test {
-    /// @dev Which branch one crank took, so the anti-vacuity count can tell the three apart.
+    /// @dev Which branch one crank took, so the anti-vacuity count can tell the four apart.
     enum Arm {
         Refused, // genesis refused the draw, the sizing asked for nothing, or nothing sold
-        Charged, // `u` fit under both caps: the restore sold whole and took its cut
+        Charged, // `u` fit under the cap: the restore sold whole and took its cut
         Resized, // `u` did not fit and the cut-free restore did: it sold `free` and took no cut
-        Capped // not even `free` fit: it sold the cap and took no cut
+        Capped, // not even `free` fit: it sold the cap and took no cut
+        Closed // the restore's net melt would have left dust: the crank sold `uClose` and closed the loan
     }
 
     /// @dev One crank's inputs and the figures it is held to, every one read BEFORE the crank runs.
     struct Run {
         uint256 loanId;
         uint256 cut; // the market's deleverage cut, bps
-        uint256 minDebt;
+        uint256 floor; // the debt floor, half the market's `minPrincipal`
         uint256 units; // collateral held before the crank
         uint256 debt; // debt before the crank
         uint256 u; // the restore sized WITH the cut
         uint256 free; // the restore sized with NO cut
         uint256 base; // `securedBase`
-        uint256 room; // the `minDebt` cap's room
-        uint256 cap; // min(base, room)
+        uint256 cap; // the restore's one cap, `securedBase`
+        uint256 eps; // the market's floor eps, bps
+        uint256 ps; // the record price the crank sizes and fills at
     }
 
     Ace internal ace;
@@ -153,23 +157,41 @@ contract AceDeleverageCutFreeResizeTest is Test {
         return req < sellable ? req : sellable;
     }
 
-    /// @dev Every figure one crank is held to, read before it runs; the `minDebt` room is the exact inverse of `_owed`.
+    /// @dev Every figure one crank is held to, read before it runs.
     function _read(bytes32 mid, uint256 loanId, MarketParams memory p, uint256 ps) internal view returns (Run memory r) {
-        (r.loanId, r.cut, r.minDebt) = (loanId, p.deleverageProtocolBps, p.minDebt);
+        (r.loanId, r.cut, r.floor, r.eps, r.ps) = (loanId, p.deleverageProtocolBps, LoanMath.debtFloor(p.minPrincipal), p.deleverageFloorEpsBps, ps);
         r.units = read.loan(loanId).collateralUnits;
         r.debt = read.loan(loanId).debt;
         uint256 trig = read.triggerPrice(loanId);
         r.u = _sizing(p, p.deleverageProtocolBps, r.units, trig, ps);
         r.free = _sizing(p, 0, r.units, trig, ps);
         r.base = _securedBase(mid, loanId, p);
-        r.room = FullMath.mulDiv(r.debt > p.minDebt ? r.debt - p.minDebt : 0, 10000 * UNIT_SCALE, ps * (10000 - p.deleverageFloorEpsBps));
-        r.cap = r.base < r.room ? r.base : r.room;
+        r.cap = r.base;
+    }
+
+    /// @dev `Deleverage._owed` on a `Run`: the keeper's ceiled bill for `units`.
+    function _owedRun(Run memory r, uint256 units) internal pure returns (uint256) {
+        return FullMath.mulDivRoundingUp(r.ps, units * (10000 - r.eps), 10000 * UNIT_SCALE);
+    }
+
+    /// @dev The close decision on a `Run`: the restore `_fit` would sell, its net melt, and whether that leaves the debt under the debt floor.
+    function _closes(Run memory r) internal pure returns (bool) {
+        bool charge = r.u < r.units && r.u <= r.cap;
+        uint256 gross = _owedRun(r, charge ? r.u : (r.free < r.cap ? r.free : r.cap));
+        uint256 net = gross - (charge ? FullMath.mulDiv(gross, r.cut, 10000) : 0);
+        return r.debt < r.floor + net;
+    }
+
+    /// @dev The close's size on a `Run`: the exact inverse of `_owed`'s ceil.
+    function _uClose(Run memory r) internal pure returns (uint256) {
+        return FullMath.mulDiv(r.debt - 1, 10000 * UNIT_SCALE, r.ps * (10000 - r.eps)) + 1;
     }
 
     /* ============================== THE PROPERTY ============================== */
 
-    /// @dev The whole admitted box with the cut never zero, the opening slack and `minDebt` drawn too, so every cap gets its turn.
+    /// @dev The whole admitted box with the cut never zero, the opening slack and the debt floor drawn too, so every cap gets its turn.
     /// @dev FROZEN SAMPLER: the arm count reads these draws, so reach a rare arm by widening a range, never by biasing one.
+    /// @dev The floor is drawn up to half the draw, so `minPrincipal`, twice it, never refuses the draw itself.
     function _drawParams(uint256 seed) internal view returns (MarketParams memory p, uint256 principal) {
         p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(record);
@@ -180,7 +202,7 @@ contract AceDeleverageCutFreeResizeTest is Test {
         p.deleverageStopBps = _pick(seed, 5, 1, p.deleverageBandBps - 1);
         p.deleverageProtocolBps = _pick(seed, 6, 1, Constants.MAX_DELEVERAGE_PROTOCOL_BPS);
         principal = _gate(p.minCoverageWad, _pick(seed, 7, 30, 97));
-        p.minDebt = _pick(seed, 8, 0, 1) == 0 ? 2 : _pick(seed, 9, 2, (principal * 95) / 100);
+        p.minPrincipal = 2 * (_pick(seed, 8, 0, 1) == 0 ? 1 : _pick(seed, 9, 1, principal / 2));
     }
 
     /// @dev One drawn market, one loan on it, the record parked anywhere strictly between its stop and band levels.
@@ -197,31 +219,32 @@ contract AceDeleverageCutFreeResizeTest is Test {
     }
 
     /// @dev ONE body, so the fuzz row and the anti-vacuity count can never exercise different code.
-    /// @dev The five properties come first and the exact figure last: the cut-free leg is the property, the figure ties the twins to the hub.
     function _crankOnce(uint256 seed) internal returns (Arm) {
         (bool ok, Run memory r) = _setUpDraw(seed);
         if (!ok) return Arm.Refused; // a config genesis refuses is `AceGenesisRails`' subject, not this one
-        if (r.u == 0) return Arm.Refused; // at or above target, or a dust restore: the crank returns before any cap is read
-        bool charge = r.u < r.units && r.u <= r.cap;
-        (uint256 sold, uint256 out) = keeper.crankDeleverage(r.loanId);
-        _assertProperties(r, charge, sold, out);
-        assertEq(sold, charge ? r.u : (r.free < r.cap ? r.free : r.cap), "the hub sold something other than the cut-free re-size predicts");
-        if (sold == 0) return Arm.Refused;
-        if (charge) return Arm.Charged;
-        return r.free <= r.cap ? Arm.Resized : Arm.Capped;
+        return _crankRun(r);
     }
 
     /// @dev The review's five, plus a bound against the pre-#413 sale `min(u, cap)`, transcribed so the change can only ever shrink a sale.
     function _assertProperties(Run memory r, bool charge, uint256 sold, uint256 out) internal view {
         uint256 debtAfter = read.loan(r.loanId).debt;
         uint256 cutPaid = charge ? FullMath.mulDiv(out, r.cut, 10000) : 0;
-        assertEq(r.debt - debtAfter, out - cutPaid, "(i) the cut is charged exactly when u < C and u fits under min(securedBase, room)");
-        assertLe(sold, r.cap, "(ii) the sale never passes min(securedBase, room)");
+        assertEq(r.debt - debtAfter, out - cutPaid, "(i) the cut is charged exactly when u < C and u fits under securedBase");
+        assertLe(sold, r.cap, "(ii) a restore never passes securedBase");
         if (!charge) assertLe(sold, r.free, "(iii) a crank that takes no cut never sells more than the cut-free restore");
-        assertGe(debtAfter, r.minDebt, "(iv) the debt never lands under minDebt");
+        assertGe(debtAfter, r.floor, "(iv) a restore never lands the debt under the debt floor");
         if (sold > 0) assertLt(debtAfter * r.units, r.debt * read.loan(r.loanId).collateralUnits, "(v) every crank that sells lowers D/C");
         assertLe(sold, r.u < r.cap ? r.u : r.cap, "the sale never exceeds what today's min(u, cap) sold");
         assertEq(r.units - read.loan(r.loanId).collateralUnits, sold, "the collateral debit is exactly the units the crank reports sold");
+    }
+
+    /// @dev A closing crank: the decision said close, it sold exactly `uClose`, took no cut, and retired the whole debt.
+    function _assertClose(Run memory r, uint256 sold, uint256 out) internal view {
+        assertTrue(_closes(r), "(iv) a crank closes only where the restore's net melt would leave dust");
+        assertEq(sold, _uClose(r), "the close sold exactly uClose");
+        assertEq(out, _owedRun(r, sold), "at its ceiled bill");
+        assertGe(out, r.debt, "which covers the whole debt");
+        assertEq(read.loan(r.loanId).debt, 0, "and the debt is retired");
     }
 
     /// @notice THE PROPERTY, sampled over the admitted box with a non-zero cut: a crank that takes no cut never out-sells the cut-free restore.
@@ -229,10 +252,11 @@ contract AceDeleverageCutFreeResizeTest is Test {
         _crankOnce(seed);
     }
 
-    /// @notice A sweep that never reaches an arm asserts nothing about it, so all three are counted, deterministically.
+    /// @notice A sweep that never reaches an arm asserts nothing about it, so every arm is counted, deterministically.
     /// @dev Same body as the fuzz row, so a sampler that stops reaching an arm fails here by name instead of going green.
+    /// @dev Measured: 49 charged, 15 closed, 0 re-sized, 0 capped of 64; only the deleted room re-sized here, so the reserve sweep owns those two.
     function test_TheFuzzBodyReachesEveryArm() public {
-        uint256[4] memory hits;
+        uint256[5] memory hits;
         for (uint256 s = 1; s <= 64; ++s) {
             uint256 snap = vm.snapshotState();
             ++hits[uint256(_crankOnce(s))];
@@ -241,9 +265,9 @@ contract AceDeleverageCutFreeResizeTest is Test {
         emit log_named_uint("cranks that took the cut, of 64", hits[uint256(Arm.Charged)]);
         emit log_named_uint("cranks re-sized to the cut-free restore, of 64", hits[uint256(Arm.Resized)]);
         emit log_named_uint("cranks that sold the cap, of 64", hits[uint256(Arm.Capped)]);
+        emit log_named_uint("cranks that closed the loan, of 64", hits[uint256(Arm.Closed)]);
         assertGt(hits[uint256(Arm.Charged)], 0, "the body never reached a crank that takes the cut");
-        assertGt(hits[uint256(Arm.Resized)], 0, "the body never reached a crank that re-sizes cut-free");
-        assertGt(hits[uint256(Arm.Capped)], 0, "the body never reached a crank whose cap is under the cut-free restore");
+        assertGt(hits[uint256(Arm.Closed)], 0, "the body never reached a crank that closes the loan");
         emit log_named_uint("draws that cranked nothing, of 64", hits[uint256(Arm.Refused)]);
         assertLe(hits[uint256(Arm.Refused)], 8, "over an eighth of the draws assert nothing: the fuzz row is going vacuous");
     }
@@ -268,7 +292,7 @@ contract AceDeleverageCutFreeResizeTest is Test {
         _arm(WITNESS_PS);
         Run memory r = _read(mid, loanId, p, WITNESS_PS);
         assertEq(r.u, r.units, "PREMISE: the sizing asks for the whole position, u == C");
-        assertLt(r.free, r.cap, "PREMISE: and the cut-free restore fits under min(securedBase, room)");
+        assertLt(r.free, r.cap, "PREMISE: and the cut-free restore fits under securedBase");
 
         (uint256 sold, uint256 out) = keeper.crankDeleverage(loanId);
         assertEq(sold, r.free, "the sizing cap re-sized cut-free: it sold min(free, cap), not the whole secured base");
@@ -291,29 +315,30 @@ contract AceDeleverageCutFreeResizeTest is Test {
     }
 
     /// @notice CONTROL: when even the cut-free restore does not fit, the crank sells the cap, exactly as before #413, with no cut.
-    /// @dev Two legs at the PoC dials and theta 0.85: the `minDebt` room binds the first, the settlement reserve the second.
+    /// @notice Unless that sale would leave the debt under its debt floor: then the crank closes the loan instead.
+    /// @dev Two legs at the PoC dials and theta 0.85: a floor at half the draw makes the first a close, the settlement reserve caps the second.
     function test_Control_ACapUnderTheCutFreeRestoreStillSellsTheCap() public {
         MarketParams memory p = _shipped();
         uint256 principal = _gate(p.minCoverageWad, 50);
-        p.minDebt = principal / 2;
+        p.minPrincipal = principal; // the debt floor at half the draw
         (Run memory r, uint256 sold, uint256 out) = _crankAtTheta(p, principal, 0.85e18);
-        assertLt(r.room, r.free, "PREMISE: the minDebt room is under the cut-free restore");
-        assertLt(r.room, r.base, "PREMISE: and under the secured base, so the room is the cap");
-        assertEq(sold, r.room, "a room under the cut-free restore is what sells");
-        assertEq(r.debt - read.loan(r.loanId).debt, out, "with no cut: every wei of proceeds melted debt");
-        assertEq(read.loan(r.loanId).debt, p.minDebt, "and the debt lands ON minDebt: one unit is worth under a quote atom here");
+        assertTrue(_closes(r), "PREMISE: the restore's melt would leave the debt under a floor at half the draw");
+        assertGt(read.loan(r.loanId).closedAt, 0, "so the crank closes the loan");
+        assertEq(sold, _uClose(r), "selling exactly uClose");
+        assertEq(out, r.debt, "whose bill lands on the debt: one unit is worth under a quote atom here");
+        assertEq(read.loan(r.loanId).debt, 0, "and the debt is retired");
 
         p = _shipped();
         (r, sold, out) = _crankAtTheta(p, _gate(p.minCoverageWad, 97), 0.85e18);
         assertLt(r.base, r.free, "PREMISE: near the coverage line the secured base is under the cut-free restore");
-        assertLt(r.base, r.room, "PREMISE: and under the room, so the reserve is the cap");
+        assertFalse(_closes(r), "PREMISE: and its melt leaves the debt over the floor, so the reserve is the cap");
         assertEq(sold, r.base, "the secured base is what sells");
         assertEq(r.debt - read.loan(r.loanId).debt, out, "with no cut: every wei of proceeds melted debt");
     }
 
     /// @notice O40, DISCLOSED: an under-filled crank that lifts the loan out of the band stands the channel down short of target.
     /// @notice A stranger's `repay` of the same melt does the same and lifts it further: `k(D-X)/C < k(D-X)/(C-f)`, `f` the units sold.
-    /// @dev So a partial fill buys the borrower nothing that a repay, permissionless above `minDebt`, does not already buy.
+    /// @dev So a partial fill buys the borrower nothing that a repay, permissionless above the debt floor, does not already buy.
     /// @dev The channel can reopen as soon as the trailing window clears the new band level; one fixed record here shows the stand-down only.
     function test_ABandLiftingPartialStandsDownLikeTheEquivalentRepay() public {
         MarketParams memory p = _shipped();
@@ -340,7 +365,9 @@ contract AceDeleverageCutFreeResizeTest is Test {
         usdc.approve(address(ace), melt);
         ace.repay(loanId, melt);
         vm.stopPrank();
-        assertGe(read.loan(loanId).debt, p.minDebt, "PREMISE: the stranger's repay leaves at least minDebt, so no borrower was needed");
+        assertGe(
+            read.loan(loanId).debt, LoanMath.debtFloor(p.minPrincipal), "PREMISE: the stranger's repay leaves at least the floor, so no borrower was needed"
+        );
         assertLt(read.triggerPrice(loanId), trigCrank, "the same melt as a repay keeps every unit, so it lifts the margin further");
         vm.expectRevert(NotInBand.selector);
         keeper.crankDeleverage(loanId);
@@ -348,21 +375,27 @@ contract AceDeleverageCutFreeResizeTest is Test {
 
     /* ============================== THE RESERVE'S CORNER ============================== */
 
-    /// @dev The main sampler reaches `securedBase` as the cap in ~1% of draws and never re-sizes against it, so this corner gets its own sweep.
-    /// @dev Thin coverage, a draw near the coverage line, `minDebt` at dust: the settlement reserve binds and the room stays slack.
-    /// @dev FROZEN SAMPLER, as `_drawParams`, whose other dials it keeps; only `k`, the draw and `minDebt` are its own.
+    /// @dev The main sampler re-sizes against `securedBase` too rarely to count on, so this corner gets its own sweep.
+    /// @dev Thin coverage, a draw near the coverage line, the debt floor at dust: the settlement reserve binds and no close interferes.
+    /// @dev FROZEN SAMPLER, as `_drawParams`, whose other dials it keeps; only `k`, the draw and `minPrincipal` are its own.
     function _drawReserveParams(uint256 seed) internal view returns (MarketParams memory p, uint256 principal) {
         (p,) = _drawParams(seed);
         p.minCoverageWad = _pick(seed, 11, Constants.MIN_COVERAGE_WAD, 2e18);
         principal = _gate(p.minCoverageWad, _pick(seed, 12, 80, 97));
-        p.minDebt = 2;
+        p.minPrincipal = 2;
     }
 
-    /// @dev Crank a read `Run` once, hold it to the five properties and the exact figure, and say which arm it took.
+    /// @dev Crank a read `Run` once, hold it to the five properties and the exact figure, or to the close's, and say which arm it took.
+    /// @dev The five properties come first and the exact figure last: the cut-free leg is the property, the figure ties the twins to the hub.
     function _crankRun(Run memory r) internal returns (Arm) {
-        if (r.u == 0) return Arm.Refused;
+        if (r.u == 0) return Arm.Refused; // at or above target, or a dust restore: the crank returns before any cap is read
         bool charge = r.u < r.units && r.u <= r.cap;
         (uint256 sold, uint256 out) = keeper.crankDeleverage(r.loanId);
+        if (read.loan(r.loanId).closedAt != 0) {
+            _assertClose(r, sold, out);
+            return Arm.Closed;
+        }
+        assertFalse(_closes(r), "a crank the decision closes did not close");
         _assertProperties(r, charge, sold, out);
         assertEq(sold, charge ? r.u : (r.free < r.cap ? r.free : r.cap), "the hub sold something other than the cut-free re-size predicts");
         if (sold == 0) return Arm.Refused;
@@ -370,18 +403,16 @@ contract AceDeleverageCutFreeResizeTest is Test {
         return r.free <= r.cap ? Arm.Resized : Arm.Capped;
     }
 
-    /// @dev ONE body for the reserve sweep's fuzz row and its count; true in `baseIsCap` when `securedBase`, not the room, was the cap.
-    function _crankReserveOnce(uint256 seed) internal returns (Arm arm, bool baseIsCap) {
+    /// @dev ONE body for the reserve sweep's fuzz row and its count.
+    function _crankReserveOnce(uint256 seed) internal returns (Arm arm) {
         (MarketParams memory p, uint256 principal) = _drawReserveParams(seed);
         (bool ok, bytes32 mid) = _create(p);
-        if (!ok) return (Arm.Refused, false);
+        if (!ok) return Arm.Refused;
         uint256 loanId = _open(mid, COLL, principal);
         uint256 trig = read.triggerPrice(loanId);
         uint256 ps = _pick(seed, 10, _level(trig, p.deleverageStopBps) + 1, _level(trig, p.deleverageBandBps) - 1);
         _arm(ps);
-        Run memory r = _read(mid, loanId, p, ps);
-        baseIsCap = r.base <= r.room;
-        arm = _crankRun(r);
+        arm = _crankRun(_read(mid, loanId, p, ps));
     }
 
     /// @notice THE PROPERTY at the reserve's corner: with `securedBase` as the cap, only a restore that fits is charged, and none out-sells `free`.
@@ -389,13 +420,12 @@ contract AceDeleverageCutFreeResizeTest is Test {
         _crankReserveOnce(seed);
     }
 
-    /// @notice The reserve sweep reaches all three arms with `securedBase` as the cap, counted the same way as the main sweep.
+    /// @notice The reserve sweep reaches all three restore arms with `securedBase` as the cap, counted the same way as the main sweep.
     function test_TheReserveSweepReachesEveryArmOnTheBase() public {
-        uint256[4] memory hits;
+        uint256[5] memory hits;
         for (uint256 s = 1; s <= 64; ++s) {
             uint256 snap = vm.snapshotState();
-            (Arm arm, bool baseIsCap) = _crankReserveOnce(s);
-            if (baseIsCap) ++hits[uint256(arm)];
+            ++hits[uint256(_crankReserveOnce(s))];
             vm.revertToState(snap);
         }
         emit log_named_uint("base-capped draws that took the cut, of 64", hits[uint256(Arm.Charged)]);
@@ -417,7 +447,7 @@ contract AceDeleverageCutFreeResizeTest is Test {
         MockDeleverageKeeper k;
     }
 
-    /// @dev The PoC dials on a q18/c6 pair with `minDebt` at dust, and a 20-quote loan whose trigger sits at `thetaBps` of par.
+    /// @dev The PoC dials on a q18/c6 pair with the debt floor at dust, and a 20-quote loan whose trigger sits at `thetaBps` of par.
     /// @dev One wei of price moves this pair's sizing by far under one c6 unit, so a record price can land `u` on any count.
     function _q18Loan(uint256 thetaBps) internal returns (Q18 memory s) {
         MockERC20 q = new MockERC20("Q18", "Q18", 18);
@@ -428,7 +458,7 @@ contract AceDeleverageCutFreeResizeTest is Test {
         p.minCoverageWad = 1.4e18;
         p.deleverageFloorEpsBps = 100;
         (p.deleverageBandBps, p.deleverageTargetBps, p.deleverageStopBps, p.deleverageProtocolBps) = (3000, 5000, 1000, 500);
-        p.minDebt = 2;
+        p.minPrincipal = 2;
         s.rec.setMinPrice(2 * p.price); // above the market, so the ladder lends
         s.mid = ace.createMarket(p);
         s.p = ace.idToMarketParams(s.mid);
@@ -466,7 +496,7 @@ contract AceDeleverageCutFreeResizeTest is Test {
 
     /// @notice THE BASE'S EDGE IS STRICT, a second pin of `u <= cap` from the other cap: a restore of exactly `securedBase` units keeps its cut.
     /// @notice One unit more and it no longer fits: the crank re-sizes to the cut-free restore and takes no cut.
-    /// @dev `AceDeleverageMinDebtCap` pins the room's edge on another pair; here `minDebt` is dust, so the settlement reserve is the cap.
+    /// @dev The settlement reserve is the restore's one cap; the debt floor is dust here, so no close interferes with its edge.
     /// @dev One loan, two record prices: `securedBase` does not read the record, so only the sizing moves between the legs.
     function test_BaseEdge_ARestoreOfExactlyTheBaseKeepsItsCut_OneUnitMoreResizes() public {
         Q18 memory s = _q18Loan(8500);
@@ -478,7 +508,7 @@ contract AceDeleverageCutFreeResizeTest is Test {
         Run memory r = _armQ18(s, _priceSizingAtMost(s.p, units, trig, base));
         assertEq(r.u, base, "PREMISE: the record lands the cut-charging restore on exactly the secured base");
         assertEq(r.base, base, "PREMISE: and the base did not move with the record");
-        assertLt(r.base, r.room, "PREMISE: the base, not the room, is the cap");
+        assertFalse(_closes(r), "PREMISE: and its melt leaves the debt over the floor");
         (uint256 sold, uint256 out) = s.k.crankDeleverage(s.loanId);
         uint256 cut = FullMath.mulDiv(out, 500, 10000);
         assertGt(cut, 0, "PREMISE: the cut is not rounded away");
@@ -499,16 +529,18 @@ contract AceDeleverageCutFreeResizeTest is Test {
     uint256 internal constant SIM_U = 2899989044485832172553; // the cut-charging restore at the sim fixture
     uint256 internal constant SIM_OUT_U = 2727439697; // its proceeds at the eps-discounted 0.95
     uint256 internal constant SIM_DEBT_U = 2408932287; // 5000e6 less the proceeds net of the 500 bps cut
-    uint256 internal constant SIM_FREE = 2673161458952120902443; // the cut-free restore at the same fixture
-    uint256 internal constant SIM_OUT_FREE = 2514108353; // its proceeds
-    uint256 internal constant SIM_MIN_DEBT_RESIZED = 2379225975; // 5000e6 less the mean of the two proceeds: a head between the restores
+    uint256 internal constant SIM_FLOOR_CLOSES = SIM_DEBT_U + 1; // a debt floor one atom over where the charged restore lands: the crank closes
+    uint256 internal constant SIM_UCLOSE_U = 5316321104731525834580; // the smallest sale whose ceiled bill covers the 5,000 debt
+    uint256 internal constant SIM_OUT_CLOSE_U = 5000000000; // its bill: one unit is worth under a quote atom here, so it lands on the debt
+    uint256 internal constant SIM_UNITS_CREDIT_U = 4683678895268474165420; // the lot less the close's sale, credited to the borrower
 
     /// @dev The sim's `ledger_delev(.., cut 500)` fixture on the hub: the PoC dials, the market bidding at exactly 1.0, the record at 0.95.
-    function _simFixture(uint256 minDebt) internal returns (bytes32 mid, uint256 loanId, MarketParams memory p) {
+    /// @dev `floor` is the debt floor; the market stores twice it as `minPrincipal`, as the sim's ledger does.
+    function _simFixture(uint256 floor) internal returns (bytes32 mid, uint256 loanId, MarketParams memory p) {
         p = _shipped();
         p.price = AceFixtures.px(1e18, address(usdc), address(vault));
         p.settleBountyBps = 50;
-        p.minDebt = minDebt;
+        p.minPrincipal = 2 * floor;
         bool ok;
         (ok, mid) = _create(p);
         assertTrue(ok, "PREMISE: genesis admits the sim's fixture");
@@ -517,26 +549,64 @@ contract AceDeleverageCutFreeResizeTest is Test {
         _arm(AceFixtures.px(0.95e18, address(usdc), address(vault)));
     }
 
-    /// @notice HUB AND SIM AGREE on `_fit`'s two live arms at the sim's own fixture, pinned to the literals `deleverage_hub_parity_pins` pins in the sim.
-    /// @dev The record is the only floor leg at 0.95, so #498's divergence is off; neither side's base binds, so the sim's reserve-free base is moot.
-    function test_SimParity_TheSimsFixtureChargesAndResizesAsTheSimDoes() public {
-        (bytes32 mid, uint256 loanId, MarketParams memory p) = _simFixture(10e6);
+    /// @notice HUB AND SIM AGREE on the charged restore and on the close at the sim's own fixture, pinned to `deleverage_hub_parity_pins`.
+    /// @dev The record is the only floor leg at 0.95, so #498's divergence is off; the base does not bind, so the restore is uncapped.
+    /// @dev The second leg sets the floor one atom over where the charged restore lands, so the same crank closes instead.
+    function test_SimParity_TheSimsFixtureChargesAndClosesAsTheSimDoes() public {
+        (bytes32 mid, uint256 loanId, MarketParams memory p) = _simFixture(5e6); // the fixture's 10 USDC minPrincipal
         Run memory r = _read(mid, loanId, p, AceFixtures.px(0.95e18, address(usdc), address(vault)));
         assertLt(r.u, r.base, "PREMISE: the hub's secured base does not bind");
-        assertLt(r.u, r.room, "PREMISE: nor does the room, at a 10 USDC minDebt");
         (uint256 sold, uint256 out) = keeper.crankDeleverage(loanId);
         assertEq(sold, SIM_U, "charged arm: units sold, as the sim pins");
         assertEq(out, SIM_OUT_U, "charged arm: proceeds, as the sim pins");
         assertEq(read.loan(loanId).debt, SIM_DEBT_U, "charged arm: debt after, net of the 500 bps cut, as the sim pins");
 
-        (mid, loanId, p) = _simFixture(SIM_MIN_DEBT_RESIZED);
+        (mid, loanId, p) = _simFixture(SIM_FLOOR_CLOSES);
         r = _read(mid, loanId, p, AceFixtures.px(0.95e18, address(usdc), address(vault)));
-        assertLt(r.free, r.room, "PREMISE: the cut-free restore fits under the room");
-        assertLt(r.room, r.u, "PREMISE: and the cut-charging one does not");
-        assertLt(r.room, r.base, "PREMISE: the room, not the base, is the cap");
+        assertTrue(_closes(r), "PREMISE: the charged restore's landing is one atom under the floor, so the decision closes");
+        uint256 escrow = read.feeEscrowOf(loanId);
         (sold, out) = keeper.crankDeleverage(loanId);
-        assertEq(sold, SIM_FREE, "re-sized arm: units sold, as the sim pins");
-        assertEq(out, SIM_OUT_FREE, "re-sized arm: proceeds, as the sim pins");
-        assertEq(read.loan(loanId).debt, 5_000e6 - SIM_OUT_FREE, "re-sized arm: no cut, as the sim pins");
+        assertGt(read.loan(loanId).closedAt, 0, "close arm: the crank closed the loan, as the sim's does");
+        assertEq(sold, SIM_UCLOSE_U, "close arm: units sold, as the sim pins");
+        assertEq(out, SIM_OUT_CLOSE_U, "close arm: proceeds, as the sim pins");
+        assertEq(read.unitsOwedOf(loanId, borrower), SIM_UNITS_CREDIT_U, "close arm: the borrower's units credit, as the sim pins");
+        assertEq(read.quoteOwedOf(loanId, borrower) - escrow, out - 5_000e6, "close arm: the bill's overshoot credited, as the sim pins");
+    }
+
+    /* ============================== HUB AND SIM: THE RESERVE BINDS AND THE BRANCH CLOSES ============================== */
+
+    uint256 internal constant SIM_CLOSE_PRINCIPAL = 6_000e6; // near enough the coverage line that the settlement reserve binds
+    uint256 internal constant SIM_CLOSE_FLOOR = 2_500e6; // a debt floor over what the reserve-capped restore would leave, so the crank closes
+    uint256 internal constant SIM_BASE = 3969999999999999954826; // securedBase: the lot less the claim's need and the keeper sliver
+    uint256 internal constant SIM_UCLOSE = 6379585325890483845728; // the smallest sale whose ceiled bill covers the 6,000 debt
+    uint256 internal constant SIM_OUT_CLOSE = 6000000000; // its bill: one unit is worth under a quote atom here, so it lands on the debt
+    uint256 internal constant SIM_UNITS_CREDIT = 3620414674109516154272; // the lot less the close's sale, credited to the borrower
+    uint256 internal constant SIM_QUOTE_CREDIT = 0; // the bill's overshoot of the debt, credited to the borrower
+
+    /// @notice HUB AND SIM AGREE where `securedBase` is the binding cap AND the crank closes, pinned to the sim's own literals.
+    /// @dev The sim fixture's dials and 0.95 record, a 6,000 draw, and a 2,500 floor: the record is the only floor leg.
+    function test_SimParity_TheReserveBindsAndTheBranchCloses() public {
+        MarketParams memory p = _shipped();
+        p.price = AceFixtures.px(1e18, address(usdc), address(vault));
+        p.settleBountyBps = 50;
+        p.minPrincipal = 2 * SIM_CLOSE_FLOOR;
+        (bool ok, bytes32 mid) = _create(p);
+        assertTrue(ok, "PREMISE: genesis admits the fixture");
+        uint256 loanId = _open(mid, COLL, SIM_CLOSE_PRINCIPAL);
+        uint256 ps = AceFixtures.px(0.95e18, address(usdc), address(vault));
+        _arm(ps);
+        Run memory r = _read(mid, loanId, p, ps);
+        assertEq(r.base, SIM_BASE, "PREMISE: the hub's secured base, as the sim pins");
+        assertLt(r.base, r.free, "PREMISE: the reserve binds under the cut-free restore");
+        assertLt(r.base, r.u, "PREMISE: and under the cut-charging one, so the restore would sell the base with no cut");
+        uint256 melt = FullMath.mulDivRoundingUp(ps, r.base * (10000 - p.deleverageFloorEpsBps), 10000 * UNIT_SCALE);
+        assertLt(r.debt, SIM_CLOSE_FLOOR + melt, "PREMISE: and that melt would leave dust, so the branch closes");
+        uint256 escrow = read.feeEscrowOf(loanId);
+        (uint256 sold, uint256 out) = keeper.crankDeleverage(loanId);
+        assertTrue(read.loan(loanId).closedAt != 0, "the reserve-bound crank closed the loan, as the sim's does");
+        assertEq(sold, SIM_UCLOSE, "close: units sold, as the sim pins");
+        assertEq(out, SIM_OUT_CLOSE, "close: proceeds, as the sim pins");
+        assertEq(read.unitsOwedOf(loanId, borrower), SIM_UNITS_CREDIT, "close: the borrower's units credit, as the sim pins");
+        assertEq(read.quoteOwedOf(loanId, borrower) - escrow, SIM_QUOTE_CREDIT, "close: the borrower's overshoot credit, as the sim pins");
     }
 }

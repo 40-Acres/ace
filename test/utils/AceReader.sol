@@ -30,14 +30,10 @@ contract AceReader {
     uint256 private constant B_LOANS = B_BASE + 1;
     uint256 private constant B_PRINCIPAL = B_BASE + 2;
     uint256 private constant B_CREDIT_OPERATOR = B_BASE + 3;
-    /// @dev `feeEscrowOf` sits past the nonce at index 5.
-    uint256 private constant B_FEE_ESCROW = B_BASE + 5;
-    /// @dev `autoPolicyOf` was APPENDED after it, at index 6.
-    uint256 private constant B_AUTO_POLICY = B_BASE + 6;
-    /// @dev The pull-credit ledger, APPENDED at 7 and 8.
-    uint256 private constant B_UNITS_OWED = B_BASE + 7;
-    uint256 private constant B_QUOTE_OWED = B_BASE + 8;
-    uint256 private constant B_SHORTFALL = B_BASE + 9;
+    uint256 private constant B_FEE_ESCROW = B_BASE + 5; // past the nonce at index 4
+    uint256 private constant B_UNITS_OWED = B_BASE + 6; // the pull-credit ledger, at 6 and 7
+    uint256 private constant B_QUOTE_OWED = B_BASE + 7;
+    uint256 private constant B_SHORTFALL = B_BASE + 8; // `orders` follows at 9, read through the hub's getter
 
     /// @dev Member offsets inside one `Market`: params occupy 0..16, state 17..25, mappings after.
     /// @dev A wrong index reads a plausible number and reverts nothing, so never edit these by hand.
@@ -49,7 +45,8 @@ contract AceReader {
     uint256 private constant M_CLAIM = 26;
     uint256 private constant M_INV_POT = 28; // +27 is the openedLoans array, not a gap
 
-    uint256 private constant L_POOLS = uint256(Storage.LENDERS); // `pools`, member 0 of three; an entry is _entry(quote, _entry(lender, root))
+    uint256 private constant L_POOLS = uint256(Storage.LENDERS); // `pools`, member 0 of four; an entry is _entry(quote, _entry(lender, root))
+    uint256 private constant L_ROLL_POLICY = uint256(Storage.LENDERS) + 3; // `rollPolicyOf`, member 3: an entry is _entry(lender, root + 3)
 
     constructor(address ace) {
         ACE = IAceRead(ace);
@@ -100,7 +97,6 @@ contract AceReader {
         bytes32[] memory w = _words(_marketBase(id) + M_STATE, M_STATE_WORDS);
         s.cash = uint256(w[0]);
         s.drawCount = uint64(uint256(w[1]));
-        s.rollReserve = uint128(uint256(w[1]) >> 64); // packed beside drawCount, at byte offset 8
         s.cumulativeBackedBurns = uint256(w[2]);
         s.netSyntheticOutflow = uint256(w[3]);
         s.protocolRevenue = uint256(w[4]);
@@ -276,23 +272,9 @@ contract AceReader {
         return FullMath.mulDiv(feeEscrowOf(loanId), remaining, l.tenor);
     }
 
-    /// @notice This loan's armed automatic continuation; `tenor == 0` is disarmed.
-    /// @dev The third field is the MIRROR of `AceLens.autoPolicyOf`: the two decode one slot and must move together.
-    function autoPolicyOf(uint256 loanId) external view returns (uint64 tenor, uint16 minBufferBps, uint16 maxFeeBps) {
-        uint256 p = _word(_entry(loanId, B_AUTO_POLICY));
-        tenor = uint64(p);
-        minBufferBps = uint16(p >> 64);
-        maxFeeBps = uint16(p >> 80);
-    }
-
-    /// @notice One armed loan's share of its market's roll reserve; the MIRROR of `AceLens.reservedOf`.
-    function reservedOf(uint256 loanId) external view returns (uint256) {
-        return uint128(_word(_entry(loanId, B_AUTO_POLICY)) >> 96);
-    }
-
-    /// @notice The cash a market's armed loans hold for their rolls; unguarded here, since a test reads between calls.
-    function rollReserve(bytes32 id) external view returns (uint256) {
-        return uint128(_word(_marketBase(id) + M_STATE + 1) >> 64);
+    /// @notice The roll policy every extension of this lender's loans asks; zero consents to none.
+    function rollPolicyOf(address lender) external view returns (address) {
+        return address(uint160(_word(_entry(lender, L_ROLL_POLICY))));
     }
 
     function creditOperator(address borrower, address operator) external view returns (bool) {

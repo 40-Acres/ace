@@ -5,7 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {Loan, MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
-import {BelowMinDebt} from "../../src/ace/hub/Borrower.sol";
+import {BelowMinPrincipal} from "../../src/ace/hub/Borrower.sol";
 import {MarketExists} from "../../src/ace/hub/MarketInit.sol";
 import {NotSettleable} from "../../src/ace/hub/Settlement.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
@@ -65,7 +65,7 @@ contract AceVenueMultiMarketTest is WarpClock {
         MarketParams memory a = _params();
         MarketParams memory b = _params();
         MarketParams memory c = _params();
-        b.minDebt = B_MIN_DEBT; // a different dust floor
+        b.minPrincipal = B_MIN_DEBT; // a different dust floor
         c.minCoverageWad = 1.8e18; // a different trigger coverage multiple
         (idA, idB, idC) = (ace.createMarket(a), ace.createMarket(b), ace.createMarket(c));
 
@@ -138,7 +138,7 @@ contract AceVenueMultiMarketTest is WarpClock {
         vault.mint(borrower, COLL);
         vm.startPrank(borrower);
         vault.approve(address(positionManager), COLL);
-        vm.expectRevert(BelowMinDebt.selector); // B's own minDebt, never a venue-level gate
+        vm.expectRevert(BelowMinPrincipal.selector); // B's own minPrincipal, never a venue-level gate
         ace.open(idB, COLL, small, 0, borrower, OpenBounds(0, 0, 0));
         vm.stopPrank();
 

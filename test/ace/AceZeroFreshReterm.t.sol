@@ -48,9 +48,15 @@ contract AceZeroFreshRetermTest is WarpClock {
         p.minTenor = DAY;
         p.maxTenor = TEN28;
         p.minCoverageWad = 1.4e18;
-        p.minDebt = 5_000e6; // the shipped floor
+        p.minPrincipal = 5_000e6; // the shipped floor
         AceFixtures.Deployment memory d = AceFixtures.deploy(p);
         (ace, pm, read, id) = (d.ace, d.positionManager, d.read, d.id);
+        AceFixtures.installYesPolicy(ace, alice); // an own-market re-term reuses the claim only on the lender's yes: every row's premise
+    }
+
+    /// @dev A re-term in the loan's own market, the retired `refinance` arity: `refinanceTo` naming `id`.
+    function _home(uint256 loanId, uint256 principal, uint64 tenor, OpenBounds memory bnd) internal view returns (MigrateArgs memory) {
+        return MigrateArgs(loanId, id, principal, tenor, bnd, 0, address(0));
     }
 
     function _px(uint256 human) internal view returns (uint256) {
@@ -76,7 +82,7 @@ contract AceZeroFreshRetermTest is WarpClock {
 
     function _reterm(uint256 loanId, uint256 principal, uint64 tenor, uint256 minBufferWad) internal returns (uint256) {
         vm.prank(borrower);
-        return ace.refinance(loanId, principal, tenor, OpenBounds(0, minBufferWad, 0));
+        return ace.refinanceTo(_home(loanId, principal, tenor, OpenBounds(0, minBufferWad, 0)));
     }
 
     /// @notice A record under the loan's trigger refuses the zero-fresh re-term by the trigger leg: no distressed loan re-terms out.
@@ -84,7 +90,7 @@ contract AceZeroFreshRetermTest is WarpClock {
         uint256 loanId = _bookUnder(0.6e18);
         vm.prank(borrower);
         vm.expectRevert(TriggerAboveFloor.selector);
-        ace.refinance(loanId, P, 7 days, OpenBounds(0, 0, 0));
+        ace.refinanceTo(_home(loanId, P, 7 days, OpenBounds(0, 0, 0)));
     }
 
     /// @notice The buffer is measured from the RECORD: at 0.9 the gap to a 0.7 trigger is 22.2%, not the price's 30%.
@@ -93,7 +99,7 @@ contract AceZeroFreshRetermTest is WarpClock {
         uint256 snap = vm.snapshotState();
         vm.prank(borrower);
         vm.expectRevert(BufferBelowMin.selector);
-        ace.refinance(loanId, P, 7 days, OpenBounds(0, 0.25e18, 0)); // met at the price, not at the record
+        ace.refinanceTo(_home(loanId, P, 7 days, OpenBounds(0, 0.25e18, 0))); // met at the price, not at the record
         vm.revertToState(snap);
         uint256 newId = _reterm(loanId, P, 7 days, 0.2e18);
         assertEq(read.debtOf(newId), P, "a buffer the record meets lands, drawing nothing fresh");
@@ -113,7 +119,7 @@ contract AceZeroFreshRetermTest is WarpClock {
         rec.setMinPrice(_px(0.9e18));
         vm.prank(borrower);
         vm.expectRevert(InsufficientCash.selector);
-        ace.refinance(loanId, P + 1_000e6, 7 days, OpenBounds(0, 0, 0));
+        ace.refinanceTo(_home(loanId, P + 1_000e6, 7 days, OpenBounds(0, 0, 0)));
     }
 
     /// @notice THE BOUNDARY of leg B: ONE atom of fresh cash is a fresh draw, so it meets the cap; the zero-fresh twin lands.
@@ -125,7 +131,7 @@ contract AceZeroFreshRetermTest is WarpClock {
         uint256 snap = vm.snapshotState();
         vm.prank(borrower);
         vm.expectRevert(InsufficientCash.selector);
-        ace.refinance(loanId, P + 1, 7 days, OpenBounds(0, 0, 0));
+        ace.refinanceTo(_home(loanId, P + 1, 7 days, OpenBounds(0, 0, 0)));
         vm.revertToState(snap);
         uint256 newId = _reterm(loanId, P, 7 days, 0);
         assertEq(read.debtOf(newId), P, "the zero-fresh twin lands under the same record");
@@ -148,7 +154,7 @@ contract AceZeroFreshRetermTest is WarpClock {
         uint256 snap = vm.snapshotState();
         vm.prank(borrower);
         vm.expectRevert(BufferBelowMin.selector);
-        ace.refinance(loanId, P, 7 days, OpenBounds(0, 0.35e18, 0));
+        ace.refinanceTo(_home(loanId, P, 7 days, OpenBounds(0, 0.35e18, 0)));
         vm.revertToState(snap);
         uint256 newId = _reterm(loanId, P, 7 days, 0.25e18);
         assertEq(read.debtOf(newId), P, "a buffer the price meets lands");
@@ -180,8 +186,9 @@ contract AceZeroFreshRetermTest is WarpClock {
         assertEq(read.loan(newId).collateralUnits, UNITS - 1_000e18, "the leg the record's buffer allows lands");
     }
 
-    /// @notice Leg C's boundary: only a lot WITHIN the deficit is exempt from the price leg; one clearing a floor past it is still a bid.
-    function test_ALotPastTheDeficitStillRefusesAtARecordUnderThePrice() public {
+    /// @notice The price leg exempts no lot: at a record under the price every deposit refuses, a fully lent market's included.
+    /// @dev Each lot clears `minPrincipal`, so the price leg is the only one that can refuse it.
+    function test_EveryLotRefusesLendingAbovePriceAtARecordUnderThePrice() public {
         usdc.mint(alice, 4 * P);
         vm.startPrank(alice);
         usdc.approve(address(ace), type(uint256).max);
@@ -190,19 +197,19 @@ contract AceZeroFreshRetermTest is WarpClock {
         coll.mint(borrower, UNITS);
         vm.startPrank(borrower);
         coll.approve(address(pm), UNITS);
-        uint256 loanId = ace.open(id, UNITS, P, 7 days, borrower, OpenBounds(0, 0, 0));
-        ace.setAutoRefinance(loanId, 7 days, 0, 0);
+        ace.open(id, UNITS, P, 7 days, borrower, OpenBounds(0, 0, 0));
         vm.stopPrank();
         vm.prank(alice);
         ace.withdraw(id, type(uint256).max, alice, 0);
-        uint256 deficit = read.rollReserve(id);
+        assertEq(ace.restingOf(id), 0, "PREMISE: the lent market rests nothing");
         rec.setMinPrice(_px(0.9e18));
-        vm.prank(alice);
-        vm.expectRevert(LendingAbovePrice.selector);
-        ace.deposit(id, deficit + 5_000e6);
-        vm.prank(alice);
-        ace.deposit(id, deficit);
-        assertEq(ace.restingOf(id), deficit, "the refill itself lands");
+        uint256[3] memory lots = [uint256(5_000e6), P, 2 * P];
+        for (uint256 i; i < lots.length; i++) {
+            vm.prank(alice);
+            vm.expectRevert(LendingAbovePrice.selector);
+            ace.deposit(id, lots[i]);
+        }
+        assertEq(ace.restingOf(id), 0, "and nothing landed");
     }
 
     /// @notice RULING B1, one step: a zero-fresh re-term that lands buys at most ~5/11 of the remaining exposure, `P * tenor`.
@@ -224,7 +231,7 @@ contract AceZeroFreshRetermTest is WarpClock {
     function _boundIfLands(uint256 loanId, uint256 np, uint64 nt, uint256 remaining) internal returns (uint256 landed) {
         uint256 snap = vm.snapshotState();
         vm.prank(borrower);
-        try ace.refinance(loanId, np, nt, OpenBounds(0, 0, 0)) {
+        try ace.refinanceTo(_home(loanId, np, nt, OpenBounds(0, 0, 0))) {
             assertLe(11 * np * nt, 5 * P * remaining + 1e5 * DAY / BASE_BPS, "a zero-fresh re-term bought more than its refund can fund");
             landed = 1;
         } catch {}
@@ -269,7 +276,7 @@ contract AceZeroFreshRetermTest is WarpClock {
     function _landsAt(uint256 loanId, uint64 tenor) internal returns (bool ok) {
         uint256 snap = vm.snapshotState();
         vm.prank(borrower);
-        try ace.refinance(loanId, P, tenor, OpenBounds(0, 0, 0)) {
+        try ace.refinanceTo(_home(loanId, P, tenor, OpenBounds(0, 0, 0))) {
             ok = true;
         } catch {}
         vm.revertToStateAndDelete(snap);

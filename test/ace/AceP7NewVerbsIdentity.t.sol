@@ -3,7 +3,6 @@ pragma solidity 0.8.36;
 
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace, InventoryHeld} from "../../src/ace/hub/Ace.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
 import {MarketParams, MarketState, OpenBounds, Order} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
@@ -14,7 +13,7 @@ import {AceReader} from "../utils/AceReader.sol";
 /// @title AceP7NewVerbsIdentity
 /// @notice Phase-7 (attacker) probe: the solvency identity across TWO markets sharing one quote, driven only through
 /// @notice the verbs that landed after the last attacker pass and that no invariant handler reaches:
-/// @notice `postOrder` / `fillOrder` / `closeOrder`, `settleExpired`, the held inventory ask, and `claimOwed` by legs.
+/// @notice `postOrder` / `fillOrder` / `closeOrder`, `forceClose` at tenor, the held inventory ask, and `claimOwed` by legs.
 /// @dev The identity: `quote.balanceOf(ace) == Σ_markets (totalCash + protocolRevenue + unitOwed + quoteOwedTotal) + Σ_loans feeEscrow`.
 /// @dev Checked after EVERY step, and the collateral pot identity beside it.
 contract AceP7NewVerbsIdentityTest is WarpClock {
@@ -117,7 +116,7 @@ contract AceP7NewVerbsIdentityTest is WarpClock {
         assertEq(now_.quoteOwedTotal, before.quoteOwedTotal, string.concat(at, ": sibling quoteOwedTotal moved"));
     }
 
-    /// @notice Post, fill twice, settle unpaid, buy the held inventory, claim both legs, close: the identity holds throughout.
+    /// @notice Post, fill twice, settle at tenor, buy the held inventory, claim both legs, close: the identity holds throughout.
     function test_NewVerbs_HoldTheIdentityAcrossTwoMarketsSharingTheQuote() public {
         MarketState memory b0 = _snapshotB();
         _identity("genesis");
@@ -142,15 +141,14 @@ contract AceP7NewVerbsIdentityTest is WarpClock {
         _identity("close order");
         _assertBUntouched(b0, "orders on A");
 
-        // loan 1 repaid in full by the maker; loan 2 abandoned to the unpaid backstop
+        // loan 1 repaid in full by the maker; loan 2 abandoned to forceClose at tenor
         vm.prank(maker);
         ace.repay(l1, type(uint256).max);
         _identity("repay l1");
-        _warpTo(read.loan(l2).expiry + MarketInit.autoRefinanceWindow(TEN));
+        _warpTo(read.loan(l2).expiry);
         vm.prank(keeper);
-        ace.settleExpired(l2);
-        _identity("settleExpired l2");
-        assertEq(read.unitsOwedOf(l2, keeper), 0, "the unpaid door credits the keeper nothing");
+        ace.forceClose(l2);
+        _identity("forceClose l2");
 
         // the held ask: refused inside the hold, admitted after it, proceeds land in the class
         vm.prank(buyer);

@@ -41,7 +41,7 @@ contract AceSliceFloorGasTest is WarpClock {
 
     /// @dev ETH price the dollar tables are struck at; every figure scales linearly in it.
     uint256 internal constant ETH_USD = 4000;
-    /// @dev The SHIPPED admission floor (Defaults.MIN_DEBT), not the fixture's 10e6, since it is the rival floor.
+    /// @dev The SHIPPED debt floor, half `PocDeployConfig.MIN_PRINCIPAL` (10000e6), not the fixture's: the smallest debt a settled slice carries.
     uint256 internal constant SHIPPED_MIN_DEBT = 5000e6;
 
     uint256 internal T;
@@ -123,29 +123,28 @@ contract AceSliceFloorGasTest is WarpClock {
         assertTrue(read.loan(loanId).closedAt != 0, "guard: the loan really settled");
     }
 
-    /// @notice The expiry door's gas, the other crank a slice needs someone to pay for.
-    function test_SliceFloor_SettleExpiredGas() public {
+    /// @notice The expiry door's gas, the other crank a slice needs someone to pay for: `forceClose`, push and sweep included.
+    function test_SliceFloor_ForceCloseGas() public {
         _deposit(T, TOP);
         uint256 loanId = _open(P, COLL);
         _warpTo(uint256(read.loan(loanId).expiry));
         vm.prank(alice);
         ace.withdraw(id, type(uint256).max, alice, 0); // empty the market, so the crank's push to alice is not a first write
         assertEq(read.marketState(id).cash, 0, "guard: the withdraw really emptied the market");
-        _warpBy(Constants.AUTO_REFINANCE_WINDOW + 1); // past the paid door's roll window
 
         vm.prank(keeper);
         uint256 g0 = gasleft();
-        ace.settleExpired(loanId);
+        ace.forceClose(loanId);
         uint256 used = g0 - gasleft();
 
-        emit log_named_uint("settleExpired gas, one funded tick", used);
-        _emitFloorTable("settleExpired", used);
+        emit log_named_uint("forceClose gas, one funded tick", used);
+        _emitFloorTable("forceClose", used);
         assertGt(used, 0, "guard: the expiry crank ran");
         assertTrue(read.loan(loanId).closedAt != 0, "guard: the loan really settled");
     }
 
-    /// @notice The floor the two rival bounds produce: gas-break-even against the SHIPPED minDebt.
-    /// @notice MEASURED ANSWER: the ADMISSION floor binds through 25 gwei; near 29 gwei gas takes over and sets the slice.
+    /// @notice The floor the two rival bounds produce: gas-break-even against the SHIPPED debt floor, half `MIN_PRINCIPAL`.
+    /// @notice MEASURED ANSWER: that floor binds through 25 gwei; near 29 gwei gas takes over and sets the slice.
     /// @dev The row also emits the gas price at which the two swap, which is the number a router would watch.
     /// @dev The crossover fell from above 30 gwei when settlement began writing the lender's per-collateral split.
     /// @dev Was `test_SliceFloor_AdmissionFloorBindsAcrossTheGasRange`, renamed when 30 gwei stopped being inside that range.
@@ -167,11 +166,11 @@ contract AceSliceFloorGasTest is WarpClock {
         emit log_named_decimal_uint("break-even slice,  5 gwei, 50bps (USDC)", atFive, 6);
         emit log_named_decimal_uint("break-even slice, 25 gwei, 50bps (USDC)", atTwentyFive, 6);
         emit log_named_decimal_uint("break-even slice, 30 gwei, 50bps (USDC)", atThirty, 6);
-        emit log_named_decimal_uint("shipped MIN_DEBT                 (USDC)", SHIPPED_MIN_DEBT, 6);
+        emit log_named_decimal_uint("shipped MIN_PRINCIPAL                 (USDC)", SHIPPED_MIN_DEBT, 6);
 
         // the gas price at which the gas bound overtakes the admission floor, in gwei
         uint256 flip = (SHIPPED_MIN_DEBT * 50 * 1000) / (10000 * gas * ETH_USD);
-        emit log_named_uint("gwei at which GAS overtakes MIN_DEBT", flip);
+        emit log_named_uint("gwei at which GAS overtakes MIN_PRINCIPAL", flip);
 
         assertLt(atTwentyFive, SHIPPED_MIN_DEBT, "the ADMISSION floor binds through 25 gwei: gas does not set the slice there");
         assertGt(flip, 25, "and the crossover sits above 25 gwei");

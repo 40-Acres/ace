@@ -4,7 +4,7 @@ pragma solidity 0.8.36;
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
-import {ArmNeedsRecord, InsufficientCash} from "../../src/ace/hub/Borrower.sol";
+import {InsufficientCash, PolicyRefused} from "../../src/ace/hub/Borrower.sol";
 import {BelowCallerFloor, BelowMinLot, ExitToHub, GateRefused, Lender, NotTheLender, WouldLeaveDust, ZeroWithdrawTo} from "../../src/ace/hub/Lender.sol";
 import {MarketParams, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
@@ -15,9 +15,9 @@ import {AceReader} from "../utils/AceReader.sol";
 
 /// @title AceP2StarvedRoll
 /// @notice Audit run 2026-09-13-670568 phase 2, F1: a sole lender starved an armed recordless roll and was paid the coverage.
-/// @notice A RECORDLESS LOAN CANNOT ARM NOW (`ArmNeedsRecord`), so there is no roll for its lender to refuse before tenor.
-/// @notice What stands is the unarmed default: at tenor the loan settles and the lender's pot takes the whole coverage line.
-/// @dev The revert row pins the refusal; the premises pin the forfeit and the escape; the KNOWN row pins that no lender act is involved.
+/// @notice Arming is gone: a recordless loan's one continuation is its borrower's cash `extend`, which asks the lender's roll policy.
+/// @notice What stands is the default: a loan nobody extends settles at tenor and the lender's pot takes the whole coverage line.
+/// @dev The premises pin the forfeit and the escape; the KNOWN row pins that the lender's policy alone answers the extension.
 contract AceP2StarvedRollTest is WarpClock {
     Ace internal ace;
     AceReader internal read;
@@ -62,28 +62,13 @@ contract AceP2StarvedRollTest is WarpClock {
         vm.stopPrank();
     }
 
-    /// @dev A healthy unarmed loan: collateral far above its line. A recordless market has no armed kind to open.
+    /// @dev A healthy loan: collateral far above its line.
     function _loan() internal returns (uint256 loanId) {
         coll.mint(borrower, COLL);
         vm.startPrank(borrower);
         coll.approve(address(pm), COLL);
         loanId = ace.open(mid, COLL, PRINCIPAL, 0, borrower, OFF);
         vm.stopPrank();
-    }
-
-    /// @notice REVERT: with the lender's cash resting, arming a recordless loan refuses `ArmNeedsRecord` and reserves nothing.
-    function testRevert_ARecordlessLoanCannotArm() public {
-        _rest(mid, alice, DEPOSIT);
-        uint256 loanId = _loan();
-        uint64 tenor = read.loan(loanId).tenor; // read before the prank: an argument's own call would consume it
-        vm.prank(borrower);
-        vm.expectRevert(ArmNeedsRecord.selector);
-        ace.setAutoRefinance(loanId, tenor, 0, 0);
-        (uint64 armedTenor,,) = read.autoPolicyOf(loanId);
-        assertEq(armedTenor, 0, "no policy was written");
-        assertEq(read.reservedOf(loanId), 0, "and no cash was reserved for it");
-        (bool ok, uint256 q) = lens.armable(loanId, tenor);
-        assertTrue(!ok && q == 0, "the lens agrees: nothing here is armable, at any cash level");
     }
 
     /// @notice PREMISE: nobody but the named lender can put cash where the home roll draws, not even the borrower.
@@ -102,9 +87,9 @@ contract AceP2StarvedRollTest is WarpClock {
         vm.stopPrank();
     }
 
-    /// @notice PREMISE: an unarmed recordless loan, cash still resting, settles at tenor and the pot takes the whole coverage line.
-    /// @dev No arm and no withdrawal: this is the forfeit #539 is about, and the lender needs no act to reach it.
-    function test_Premise_AnUnarmedRecordlessLoanSettlesToTheLineAtTenor() public {
+    /// @notice PREMISE: a recordless loan nobody extends, cash still resting, settles at tenor and the pot takes the whole coverage line.
+    /// @dev No extension and no withdrawal: this is the forfeit #539 is about, and the lender needs no act to reach it.
+    function test_Premise_AnUnextendedRecordlessLoanSettlesToTheLineAtTenor() public {
         _rest(mid, alice, DEPOSIT);
         uint256 loanId = _loan();
         uint256 units = read.loan(loanId).collateralUnits;
@@ -134,7 +119,7 @@ contract AceP2StarvedRollTest is WarpClock {
         emit log_named_uint("as bps of debt", (forfeitAtBook * 10000) / debt);
     }
 
-    /// @notice PREMISE: the escape is the borrower's own migration, unarmed, into a SECOND lender's market before expiry.
+    /// @notice PREMISE: the escape is the borrower's own migration into a SECOND lender's market before expiry.
     /// @dev The home lender has taken every resting atom, so the home market can fund nothing; the borrower needs no consent from it.
     function test_Premise_TheEscapeIsTheBorrowersOwnMigration() public {
         bytes32 dst = ace.createMarket(_params(bob));
@@ -149,25 +134,23 @@ contract AceP2StarvedRollTest is WarpClock {
         uint256 newId = ace.refinanceTo(MigrateArgs(loanId, dst, 2 * PRINCIPAL, tenor, OFF, 0, address(0)));
         assertEq(ace.loanMarket(newId), dst, "the borrower escaped into the second lender's market");
         assertEq(read.invPotOf(mid, loanId), 0, "and nothing was forfeited on the way out");
-        (uint64 newTenor,,) = read.autoPolicyOf(newId);
-        assertEq(newTenor, 0, "the successor is unarmed, like the loan it replaced");
     }
 
-    /// @notice KNOWN: a recordless loan has NO ROLL TO REFUSE. Arming refuses, nothing is reserved, and the twins settle alike at tenor.
-    /// @dev The lender's veto #514 accepted here is unreachable rather than ruled: no lender act is needed to reach the forfeit.
-    /// @dev The forfeit itself is the unarmed default at tenor, and it stands.
-    function test_Known_ARecordlessLoanHasNoRollToRefuse() public {
+    /// @notice KNOWN: a recordless loan's extension is its lender's to refuse: with no policy named it answers `PolicyRefused`.
+    /// @notice The twins then settle alike at tenor, the one the borrower asked to extend and the one never asked.
+    /// @dev The refusal is the lender's ruled roll option, which arming once left unreachable on a recordless loan.
+    /// @dev The forfeit itself is the default at tenor, and it stands.
+    function test_Known_ARecordlessLoansExtensionIsTheLendersToRefuse() public {
         _rest(mid, alice, DEPOSIT);
         uint256 first = _loan();
         uint256 plain = _loan();
-        uint64 tenor = read.loan(first).tenor;
-        vm.prank(borrower);
-        vm.expectRevert(ArmNeedsRecord.selector);
-        ace.setAutoRefinance(first, tenor, 0, 0);
-        uint256 line = read.loan(first).collateralUnits - lens.withdrawableUnits(mid, first);
+        uint256 line = read.loan(first).collateralUnits - lens.withdrawableUnits(mid, first); // read live: nothing is withdrawable at expiry
         assertEq(read.loan(plain).expiry, read.loan(first).expiry, "fixture: the twins mature together");
         assertGt(line, lens.collateralNeeded(mid, first), "fixture: the line exceeds the claim's need, so there is coverage to take");
-        assertEq(read.rollReserve(mid), 0, "nothing in the market is reserved for any roll");
+        _warpTo(uint256(read.loan(first).expiry) - 1);
+        (bool ok, bytes4 reason,) = ace.tryExtend(first, 0, "", borrower);
+        assertFalse(ok, "the borrower's extension does not land on a market whose lender names no policy");
+        assertEq(reason, PolicyRefused.selector, "and the lender's silence is what refuses it, by name");
 
         uint256 snap = vm.snapshotState();
         uint256 resting = ace.restingOf(mid);
@@ -183,25 +166,9 @@ contract AceP2StarvedRollTest is WarpClock {
         ace.forceClose(plain);
         vm.stopPrank();
 
-        assertEq(read.invPotOf(mid, first), line, "the loan the borrower tried to arm settles to the whole coverage line");
+        assertEq(read.invPotOf(mid, first), line, "the loan the borrower asked to extend settles to the whole coverage line");
         assertEq(read.invPotOf(mid, first), read.invPotOf(mid, plain), "exactly what the twin that never tried forfeits");
         assertEq(read.unitsOwedOf(first, borrower), read.unitsOwedOf(plain, borrower), "and the borrower keeps the same on both");
-    }
-
-    /// @notice FUZZ: whatever the policy, a recordless market refuses `ArmNeedsRecord`, reserves nothing, and its lender takes it all.
-    /// @dev The record check runs FIRST, so a bad buffer, an unconsented route or an off-grid tenor answers the same way.
-    function testFuzz_ARecordlessMarketReservesNothingWhateverTheArm(uint64 tenor, uint16 minBufferBps, uint16 maxFeeBps) public {
-        tenor = uint64(bound(tenor, 1, type(uint64).max));
-        _rest(mid, alice, DEPOSIT);
-        uint256 loanId = _loan();
-        vm.prank(borrower);
-        vm.expectRevert(ArmNeedsRecord.selector);
-        ace.setAutoRefinance(loanId, tenor, minBufferBps, maxFeeBps);
-        assertEq(read.rollReserve(mid), 0, "nothing is reserved");
-        assertEq(read.reservedOf(loanId), 0, "for this loan or any other");
-        uint256 resting = ace.restingOf(mid);
-        vm.prank(alice);
-        assertEq(ace.withdraw(mid, type(uint256).max, alice, 0), resting, "and the lender's full withdraw takes every resting atom");
     }
 }
 
@@ -501,7 +468,7 @@ contract AceP2CollectDestinationTest is WarpClock {
 }
 
 /// @title AceP2DrawDust
-/// @notice Audit run 2026-09-13-670568 phase 2, F3: a draw leaves resting cash strictly under `minDebt`.
+/// @notice Audit run 2026-09-13-670568 phase 2, F3: a draw leaves resting cash strictly under `minPrincipal`.
 /// @notice `AceInvariants._invariant_theDustWallIsUnreachable` says that state is unreachable through either door.
 /// @dev The deposit and withdraw doors both refuse it; the draw is the third door that lowers cash, and it does not.
 contract AceP2DrawDustTest is WarpClock {
@@ -517,7 +484,7 @@ contract AceP2DrawDustTest is WarpClock {
     address internal borrower2 = address(0xB0B3);
 
     uint256 internal constant COLL = 10_000e18;
-    uint256 internal FLOOR; // the market's minDebt, read back from the fixture
+    uint256 internal FLOOR; // the market's minPrincipal, read back from the fixture
 
     function setUp() public {
         _warpTo(1_000_000);
@@ -527,7 +494,7 @@ contract AceP2DrawDustTest is WarpClock {
         p.lender = alice;
         AceFixtures.Deployment memory d = AceFixtures.deploy(p);
         (ace, pm, read, mid) = (d.ace, d.positionManager, d.read, d.id);
-        FLOOR = p.minDebt;
+        FLOOR = p.minPrincipal;
     }
 
     function _rest(uint256 amt) internal {
@@ -577,7 +544,7 @@ contract AceP2DrawDustTest is WarpClock {
     }
 
     /// @dev DELETED: `test_RED_ADrawNeverLeavesCashUnderMinDebt`, which asserted that resting cash is never
-    /// @dev strictly between zero and `minDebt` whichever door moved it last. THE REMEDY WAS REJECTED, so the
+    /// @dev strictly between zero and `minPrincipal` whichever door moved it last. THE REMEDY WAS REJECTED, so the
     /// @dev row asserted a design nobody chose: C-18 was ACCEPTED, the draw is deliberately the unfloored third
     /// @dev door, and flooring it would refuse an otherwise-good draw to tidy a band in which nothing is trapped.
     /// @dev The two lender doors ARE floored and the rows above still pin that; `Types.sol` states the asymmetry.

@@ -458,7 +458,7 @@ contract LaunchVaultForkTest is WarpClock {
         vm.prank(x[0].who);
         (bytes32 id, uint256 got) = L.vault.reserve(type(uint256).max);
         _moveTo(L, _clearing(L) / 5); // the whale, same block
-        uint256 draw = ace.drawableOf(id);
+        uint256 draw = ace.restingOf(id); // `drawableOf` is deleted: with no roll reserve, resting cash is what a draw may take
         address acct = L.lock.predict(x[0].who, 0);
         deal(L.token, acct, IERC20(L.token).balanceOf(acct) + _unitsFor(draw, ace.idToMarketParams(id).price)); // bought at the dump
         (, uint256 units) = _borrow(L, x[0].who, id, draw);

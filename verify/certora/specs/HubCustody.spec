@@ -4,7 +4,7 @@
 // Every hub write is paired with a custodian move on the same id: an open pulls or carries in what it books, a
 // withdrawal and a deleverage release what they debit, a refund pulls back what it re-credits, a close retires or
 // carries out the whole lot. PositionManager.spec proves the custodian's side (O40); this is the pairing, which is
-// the hub's alone. The unpaid backstop leans on it: `settleExpired` retires the loan's units, which must be there.
+// the hub's alone. O51 leans on it: `forceClose` retires the loan's units, which must be there.
 //
 // THE CUSTODIAN RUNS FOR REAL, linked both ways as the hub's constructor requires. Under via-IR the hub's custodian
 // calls are unresolved, so the dispatch routes them to its six ledger verbs by selector. Every other unresolved call
@@ -131,10 +131,10 @@ rule aWithdrawalReleasesCustody(env e, uint256 id, uint256 units, address to) {
     satisfy pm.collateralOf(id) < before;
 }
 
-// `retireCustody`, by the unpaid backstop
-rule theBackstopRetiresCustody(env e, uint256 id) {
+// `retireCustody`, by the settle verb at tenor
+rule aSettlementRetiresCustody(env e, uint256 id) {
     uint256 before = pm.collateralOf(id);
-    settleExpired(e, id);
+    forceClose(e, id);
     satisfy pm.collateralOf(id) < before;
 }
 

@@ -11,9 +11,9 @@ import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
 
 /// @title AceWithdrawStatedAmount
-/// @notice A lender's withdraw IGNORES the roll reserve: any amount, stated or the max sentinel, may take reserved cash.
-/// @notice Going under the reserve is the lender's consent, so the next armed fold may settle; the hold binds only other draws.
-/// @dev At the SHIPPED `minDebt`, 5,000 USDC, where a reservation sits far under the floor.
+/// @notice A lender's withdraw may take every resting atom beside a live loan: nothing holds cash for a continuation.
+/// @notice An extension draws none, so emptying the market changes nothing for the loan; at expiry `forceClose` settles it.
+/// @dev At the SHIPPED `minPrincipal`, 5,000 USDC.
 contract AceWithdrawStatedAmountTest is WarpClock {
     Ace internal ace;
     AceReader internal read;
@@ -27,10 +27,10 @@ contract AceWithdrawStatedAmountTest is WarpClock {
     address internal keeper = address(0xCAFE);
 
     uint64 internal constant TEN7 = 7 days;
-    uint256 internal constant MIN_DEBT = 5_000e6;
+    uint256 internal constant MIN_PRINCIPAL = 5_000e6;
     uint256 internal constant P = 50_000e6;
     uint256 internal constant UNITS = 100_000e18;
-    uint256 internal constant SPARE = 10_000e6; // the unreserved cash beside the reserve, two floors of it
+    uint256 internal constant SPARE = 10_000e6; // the cash resting beside the live loan, two floors of it
 
     uint256 internal loanId;
 
@@ -47,7 +47,7 @@ contract AceWithdrawStatedAmountTest is WarpClock {
         p.minTenor = TEN7;
         p.maxTenor = TEN7;
         p.minCoverageWad = 1.4e18;
-        p.minDebt = MIN_DEBT;
+        p.minPrincipal = MIN_PRINCIPAL;
         AceFixtures.Deployment memory d = AceFixtures.deploy(p);
         (ace, pm, read, id) = (d.ace, d.positionManager, d.read, d.id);
 
@@ -56,19 +56,18 @@ contract AceWithdrawStatedAmountTest is WarpClock {
         usdc.approve(address(ace), type(uint256).max);
         ace.deposit(id, 2 * P);
         vm.stopPrank();
-        loanId = _openArmed(borrower, P);
-        uint256 trim = ace.restingOf(id) - (read.rollReserve(id) + SPARE);
+        loanId = _open(borrower, P);
+        uint256 trim = ace.restingOf(id) - SPARE;
         vm.prank(alice);
         ace.withdraw(id, trim, alice, 0);
-        assertEq(ace.drawableOf(id), SPARE, "PREMISE: the spare is exactly what a fresh draw may take");
+        assertEq(ace.restingOf(id), SPARE, "PREMISE: the spare is exactly what a fresh draw may take");
     }
 
-    function _openArmed(address who, uint256 principal) internal returns (uint256 id_) {
+    function _open(address who, uint256 principal) internal returns (uint256 id_) {
         coll.mint(who, UNITS);
         vm.startPrank(who);
         coll.approve(address(pm), UNITS);
         id_ = ace.open(id, UNITS, principal, TEN7, who, OpenBounds(0, 0, 0));
-        ace.setAutoRefinance(id_, TEN7, 0, 0);
         vm.stopPrank();
     }
 
@@ -77,28 +76,19 @@ contract AceWithdrawStatedAmountTest is WarpClock {
         return ace.withdraw(id, assets, alice, minPaid);
     }
 
-    function _foldRolled() internal returns (bool) {
+    function _settledAtExpiry() internal returns (bool) {
         _warpTo(read.loan(loanId).expiry);
         vm.prank(keeper);
         ace.forceClose(loanId);
-        return read.invPotOf(id, loanId) == 0;
+        return read.invPotOf(id, loanId) != 0;
     }
 
-    /// @notice THE RULING: a stated amount past the unreserved cash is paid in full, and the next armed fold settles.
-    function test_AStatedWithdrawMayGoUnderTheReserveAndTheNextArmedFoldSettles() public {
-        uint256 rr = read.rollReserve(id);
-        uint256 ask = SPARE + rr / 2; // past the unreserved cash, half into the reserve
-        assertEq(_withdraw(ask, ask), ask, "the stated amount is paid in full, reserve or not");
-        assertLt(ace.restingOf(id), rr, "so the market now rests under its roll reserve");
-        assertFalse(_foldRolled(), "and the armed loan settles at its fold: the lender's withdraw is its consent");
-    }
-
-    /// @notice The max sentinel empties the market, reserve included, and the armed fold then settles.
-    /// @dev A CuratorVault does exactly this after every call, by its own consent, and holds its rolls' cover in idle instead.
-    function test_TheMaxSentinelEmptiesTheMarketReserveIncluded() public {
+    /// @notice The max sentinel empties the market beside a live loan, and a third party's `forceClose` at expiry then settles it.
+    /// @dev A CuratorVault does exactly this after every call; an extension draws no resting cash, so its loans lose nothing by it.
+    function test_TheMaxSentinelEmptiesTheMarketBesideALiveLoanWhichThenSettles() public {
         uint256 resting = ace.restingOf(id);
         assertEq(_withdraw(type(uint256).max, 0), resting, "max takes everything resting");
-        assertEq(ace.restingOf(id), 0, "the reserve went with it");
-        assertFalse(_foldRolled(), "and the armed loan settles at its fold");
+        assertEq(ace.restingOf(id), 0, "nothing rests beside the live loan");
+        assertTrue(_settledAtExpiry(), "and the loan settles at expiry");
     }
 }

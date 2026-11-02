@@ -319,7 +319,7 @@ contract LaunchVaultSequenceTest is LaunchVaultFixture {
         (e, cap) = _exposure(a, 0, p);
         assertGt(e, cap, "fixture: the release left the resting cash over the shrunk cap");
         vm.prank(alice);
-        vm.expectRevert(LaunchVault.BelowMinDebt.selector);
+        vm.expectRevert(LaunchVault.BelowMinPrincipal.selector);
         vault.reserve(type(uint256).max); // re-reserve: nothing more rests
         uint256 principal = ace.restingOf(id) / 2;
         uint256 loanId = _borrow(m, alice, id, principal, 30 days); // draw

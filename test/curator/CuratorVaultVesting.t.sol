@@ -357,7 +357,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
 
     /// @dev A vault from `cfg` listing `l`, at the rig's table inputs; the deploy is the one call, so an expectation binds it.
     function _make(VaultConfig memory cfg, Listing[] memory l, string memory name) internal returns (CuratorVault) {
-        return new CuratorVault(cfg, RIG_MIN_DEBT, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, name, name);
+        return new CuratorVault(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, name, name);
     }
 
     /// @dev The floor's own EDGE: one second under, refused; the floor itself, admitted. The rail row
@@ -414,7 +414,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     // ---- liquidity: the ladder defers RECOGNITION, never availability ----
 
     /// @dev THE PROPERTY MOST LIKELY TO BE BROKEN BY A LATER EDITOR. Deferred value is still spendable cash.
-    /// @dev No loan is armed, so exitable is all of idle.
+    /// @dev Exitable is all of idle.
     /// @dev MUTATION TARGET: make the claim's cash bound read `exitable - unvested()` and this must fail.
     function test_Vest_CashStaysAvailableForExitsWhileDeferred() public {
         CuratorVault v = _newVault(0);
@@ -438,7 +438,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     }
 
     /// @dev Lending is bounded by lendable ALONE: unvested value is nobody's in particular and reserves nothing.
-    /// @dev No request and no armed loan stand, so lendable is all of idle, and a borrow of all of it lands while a pile vests.
+    /// @dev No request stands, so lendable is all of idle, and a borrow of all of it lands while a pile vests.
     function test_Vest_LendingDoesNotReserveTheLadder() public {
         CuratorVault v = _newVault(0);
         uint256 loanId = _standingPremium(v);
@@ -628,7 +628,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
                 cap: type(uint192).max
             })
         });
-        v = new CuratorVault(cfg, RIG_MIN_DEBT, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, "Curator 18", "cV18");
+        v = new CuratorVault(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, "Curator 18", "cV18");
         bigMid = _doorMarket(v, address(collateral));
     }
 

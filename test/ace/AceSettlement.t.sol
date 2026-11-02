@@ -308,7 +308,7 @@ contract AceSettlementTest is WarpClock {
 
     /// @dev Did this settlement store either word of the loan's shortfall record?
     function _touched(bytes32[] memory writes, uint256 loanId) internal pure returns (bool) {
-        uint256 base = uint256(keccak256(abi.encode(loanId, uint256(Storage.BOOK) + 9))); // shortfallOf
+        uint256 base = uint256(keccak256(abi.encode(loanId, uint256(Storage.BOOK) + 8))); // shortfallOf
         for (uint256 i; i < writes.length; i++) {
             if (uint256(writes[i]) == base || uint256(writes[i]) == base + 1) return true;
         }

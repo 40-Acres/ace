@@ -12,6 +12,7 @@ pragma solidity 0.8.36;
 /// @dev A pair not served must answer `supportsPair` false, and reads on it should revert.
 /// @dev The two below-questions are DISTINCT FUNCTIONS even where one body answers both.
 /// @dev A source with no persistence layer answers them identically; that is a property of the source, not of ACE.
+/// @dev Below-ness need not follow `minPrice`: a record may answer it off a steadier reading, so ask the twins, never `minPrice < x`.
 /// @dev SILENCE IS THE IMPLEMENTER'S CHOICE and ACE constrains it neither way: a dark price channel implies nothing about below-ness.
 /// @dev `OracleRecord` drops below-ness with the price; a windowed venue record may keep it off the last print, so a quiet venue still settles.
 interface IPersistenceRecord {
@@ -31,6 +32,6 @@ interface IPersistenceRecord {
 
     /// @notice Minimum price observed over the DISTRESS window; 0 when the record cannot answer over it.
     /// @dev Wick-spoof resistant: the draw cap and the deleverage floor size off what HELD, never off a print.
-    /// @dev THE ONE NUMBER a decline sale turns on: it admits the crank, sizes it, and IS the floor the keeper pays.
+    /// @dev THE ONE NUMBER a decline sale turns on once the band admits it: it must clear the stop, sizes the sale, and IS the floor the keeper pays.
     function minPrice(address quote, address collateral) external view returns (uint256);
 }

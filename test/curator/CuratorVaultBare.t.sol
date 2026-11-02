@@ -80,7 +80,7 @@ contract CuratorVaultBareTest is CuratorVaultBase {
     }
 
     /// @dev New lending is bounded by `lendable` alone; a realized loss reserves nothing against it.
-    /// @dev With no armed loan and no request standing, `lendable` is all of idle: a borrow of it lands and one wei past it is refused.
+    /// @dev With no request standing, `lendable` is all of idle: a borrow of it lands and one wei past it is refused.
     function test_Borrow_IsBoundedByLendableAloneAfterALoss() public {
         CuratorVault v = _newVault(0);
         _impaired(v, 9_000e6, 8_000e6);

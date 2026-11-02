@@ -578,7 +578,7 @@ contract AceLensViewsTest is WarpClock {
         p.deleverageBandBps = BAND_BPS;
         p.deleverageTargetBps = 4000;
         p.deleverageStopBps = 1;
-        p.minDebt = 11e6; // the one field that gives it a distinct id
+        p.minPrincipal = 11e6; // the one field that gives it a distinct id
         bytes32 other = ace.createMarket(p);
         assertTrue(other != id, "two markets, two ids");
 
@@ -697,7 +697,7 @@ contract AceLensViewsTest is WarpClock {
     }
 
     /// @dev The verb refuses `ZeroCollateral` on a withdrawal that strips the lot bare; the view never offers one.
-    /// @dev Aimed at the smallest line this market admits, a loan at `minDebt`; a live loan carries debt, so its ceiled line is never zero.
+    /// @dev Aimed at the smallest line this market admits, a loan at `minPrincipal`; a live loan carries debt, so its ceiled line is never zero.
     function test_WithdrawableUnits_AlwaysLeavesAUnit_SoTheVerbNeverRefusesZeroCollateral() public {
         vault.mint(borrower, COLL);
         vm.startPrank(borrower);

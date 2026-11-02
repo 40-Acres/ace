@@ -10,10 +10,11 @@ import {LoanMath} from "../ace/hub/libraries/LoanMath.sol";
 import {MarketParams} from "../ace/hub/Types.sol";
 import {IAceLenderOps} from "../interfaces/IAceLenderOps.sol";
 import {IPersistenceRecord} from "../interfaces/IPersistenceRecord.sol";
+import {Extension} from "../interfaces/IRollPolicy.sol";
 import {IPriceFrame} from "../interfaces/IPriceFrame.sol";
 
 /// @notice One collateral's lending terms: its price source and buffer, its rate and terms, and its exposure cap.
-/// @dev Any `IPersistenceRecord` may price a row; an oracle-class record has no window, a windowed venue record blocks rolls for its window after a wick.
+/// @dev Any `IPersistenceRecord` may price a row; a record minimum under the price blocks an extension.
 struct Row {
     address record; // the windowed minimum the door prices off; zero is no row
     uint16 bufferBps; // how far under that minimum the door lends
@@ -47,12 +48,12 @@ struct PendingCap {
 /// @notice EVERY MARKET names nobody as borrower, sells settled pots at the hub's ask, pays no fill fee and no settle bounty, and runs no deleverage band.
 /// @notice A NEW ROW OR A CAP RAISE waits the timelock and anyone accepts it after; a cap cut lands at once, by the curator or the guardian.
 /// @notice THE CAP IS A BRAKE, not a bound, never a utilization cap: exposure is lent plus unsold units at the minimum, and only new lending reads it.
-/// @notice A ROLL runs while the market's record admits a fresh draw at its price; its successor needs the row to still name that record and a cap.
-/// @dev `MIN_DEBT` and `COVERAGE_WAD` are every market's, fixed at deploy and checked against the hub's genesis rails.
+/// @notice AN EXTENSION lands while the record admits the market's price, the row still names its record, terms and a cap, and idle covers exits.
+/// @dev `MIN_PRINCIPAL` and `COVERAGE_WAD` are every market's, fixed at deploy and checked against the hub's genesis rails.
 contract CuratorVault is AceVault {
     error NotListed(); // the collateral has no row, so the door has no price for it
     error BadRow(); // a row naming no record, the vault's own tokens, or terms genesis would refuse
-    error BadTerms(); // a minDebt or coverage genesis would refuse, so no borrow could ever open
+    error BadTerms(); // a minPrincipal or coverage genesis would refuse, so no borrow could ever open
     error TimelockOutOfBounds();
     error NothingDue(); // nothing pending for this collateral has waited out the timelock
     error PriceZero(); // the record answers no price, or the buffered price falls off the grid
@@ -61,7 +62,7 @@ contract CuratorVault is AceVault {
     uint64 public constant MAX_TIMELOCK = 14 days;
     uint256 internal constant Q96 = 1 << 96;
 
-    uint256 public immutable MIN_DEBT; // every market's floor ticket, and so the roll hold's dust term
+    uint256 public immutable MIN_PRINCIPAL; // every market's floor ticket
     uint256 public immutable COVERAGE_WAD; // every market's coverage multiple
     uint64 public immutable TIMELOCK; // how long a new row or a cap raise waits
 
@@ -81,27 +82,27 @@ contract CuratorVault is AceVault {
     event RevokePending(address indexed by, address indexed collateral);
 
     /// @param cfg The vault's write-once config.
-    /// @param minDebt Every market's floor ticket.
+    /// @param minPrincipal Every market's floor ticket.
     /// @param coverageWad Every market's coverage multiple.
     /// @param timelock How long a new row or a cap raise waits, one to fourteen days.
     /// @param listings The collaterals listed at deploy.
     constructor(
         VaultConfig memory cfg,
-        uint256 minDebt,
+        uint256 minPrincipal,
         uint256 coverageWad,
         uint64 timelock,
         Listing[] memory listings,
         string memory name_,
         string memory symbol_
     ) AceVault(cfg, name_, symbol_) {
-        if (minDebt == 0 || minDebt > type(uint128).max || coverageWad < Constants.MIN_COVERAGE_WAD || coverageWad > Constants.MAX_COVERAGE_WAD) {
+        if (minPrincipal < 2 || minPrincipal > type(uint128).max || coverageWad < Constants.MIN_COVERAGE_WAD || coverageWad > Constants.MAX_COVERAGE_WAD) {
             revert BadTerms();
         }
         if (timelock < MIN_TIMELOCK || timelock > MAX_TIMELOCK) revert TimelockOutOfBounds();
-        (MIN_DEBT, COVERAGE_WAD, TIMELOCK) = (minDebt, coverageWad, timelock);
+        (MIN_PRINCIPAL, COVERAGE_WAD, TIMELOCK) = (minPrincipal, coverageWad, timelock);
         for (uint256 i; i < listings.length; i++) {
             Listing memory l = listings[i];
-            _checkRow(l.collateral, l.row, minDebt);
+            _checkRow(l.collateral, l.row, minPrincipal);
             _rows[l.collateral] = l.row;
             emit SetCollateral(l.collateral, l.row);
         }
@@ -127,10 +128,12 @@ contract CuratorVault is AceVault {
     }
 
     /// @notice Submit a collateral's row, new or changed, to go live after the timelock. CURATOR ONLY.
-    /// @notice A windowed venue record blocks this collateral's rolls for its window after a wick; an oracle-class record has no window.
+    /// @notice A record minimum under a market's price blocks its extensions; a new record, rate or tenor stops the old markets' extensions.
+    /// @notice It also drops a pending cap raise: the row carries its own cap, and the raise was judged against the row it replaces.
     function submitCollateral(address collateral, Row calldata row) external nonReentrant {
         _onlyCurator();
-        _checkRow(collateral, row, MIN_DEBT);
+        _checkRow(collateral, row, MIN_PRINCIPAL);
+        if (_pendingCaps[collateral].validAt != 0) _revokePending(collateral);
         uint64 validAt = uint64(block.timestamp) + TIMELOCK;
         _pendingRows[collateral] = PendingRow(row, validAt);
         emit SubmitCollateral(collateral, row, validAt);
@@ -144,8 +147,7 @@ contract CuratorVault is AceVault {
         if (cap < w.cap) {
             if (msg.sender != CURATOR && msg.sender != GUARDIAN) revert NotCurator();
             w.cap = cap;
-            delete _pendingRows[collateral];
-            delete _pendingCaps[collateral];
+            if (_pendingRows[collateral].validAt != 0 || _pendingCaps[collateral].validAt != 0) _revokePending(collateral);
             emit SetCap(msg.sender, collateral, cap);
             return;
         }
@@ -178,19 +180,24 @@ contract CuratorVault is AceVault {
     /// @notice Drop whatever is pending for a collateral. The curator or the guardian.
     function revokePending(address collateral) external nonReentrant {
         if (msg.sender != CURATOR && msg.sender != GUARDIAN) revert NotCurator();
+        _revokePending(collateral);
+    }
+
+    /// @dev Drop the pending row and raise, and say so: every path that drops one emits it, so an indexer replaying events ends right.
+    function _revokePending(address collateral) internal {
         delete _pendingRows[collateral];
         delete _pendingCaps[collateral];
         emit RevokePending(msg.sender, collateral);
     }
 
     /// @dev A row prices the pair off a record that affirms it, never lists this vault's own tokens, and carries terms genesis admits at the floor ticket.
-    function _checkRow(address collateral, Row memory row, uint256 minDebt) internal view {
+    function _checkRow(address collateral, Row memory row, uint256 minPrincipal) internal view {
         if (row.record == address(0) || collateral == address(0) || collateral == asset() || collateral == address(this)) revert BadRow();
         if (!IPriceFrame(row.record).supportsPair(asset(), collateral)) revert BadRow();
         if (row.bufferBps >= 10_000 || row.baseBps < Constants.MIN_BASE_BPS) revert BadRow();
         if (row.minTenor < Constants.MIN_TENOR_FLOOR || row.maxTenor < row.minTenor || row.maxTenor > type(uint40).max) revert BadRow();
         if (!LoanMath.feeFundable(row.baseBps, row.maxTenor, row.minTenor)) revert BadRow();
-        if (LoanMath.originationFee(minDebt, row.maxTenor, row.baseBps, row.minTenor) >= minDebt) revert BadRow();
+        if (LoanMath.originationFee(minPrincipal, row.maxTenor, row.baseBps, row.minTenor) >= minPrincipal) revert BadRow();
     }
 
     // ---- the hooks ----
@@ -210,21 +217,22 @@ contract CuratorVault is AceVault {
         mp.baseBps = w.baseBps;
         mp.minTenor = w.minTenor;
         mp.maxTenor = w.maxTenor;
-        mp.minDebt = MIN_DEBT;
+        mp.minPrincipal = MIN_PRINCIPAL;
         mp.lender = address(this);
         mp.inventoryAsk = true;
-        t = Terms(r.units, r.principal, r.tenor == 0 ? w.minTenor : r.tenor, r.arm, r.minBufferWad);
+        t = Terms(r.units, r.principal, r.tenor == 0 ? w.minTenor : r.tenor, r.minBufferWad);
     }
 
-    /// @dev The current roll runs while the market's own record admits a fresh draw at its price, the hub's draw-cap test.
-    function _priceAdmits(MarketParams memory mp, uint256, bytes calldata) internal view override returns (bool) {
-        return IPersistenceRecord(mp.record).minPrice(asset(), mp.collateral) >= mp.price;
+    /// @dev An extension's price leg: the record's windowed minimum at or over the market's price, so one high print cannot win it.
+    function _priceAdmits(Extension calldata e, bytes calldata) internal view override returns (bool) {
+        return IPersistenceRecord(e.dst.record).minPrice(e.dst.quote, e.dst.collateral) >= e.dst.price;
     }
 
-    /// @dev A successor is promised while the row still names the market's record and a cap.
-    function _rollAdmits(MarketParams memory mp) internal view override returns (bool) {
-        Row storage w = _rows[mp.collateral];
-        return w.cap != 0 && w.record == mp.record;
+    /// @dev An extension's curator legs: the row still names the market's record, a cap, and the market's rate and tenors.
+    /// @dev A buffer edit keeps an old market extending: the price leg still judges it, by the record against the market's price.
+    function _legsAdmit(Extension calldata e) internal view override returns (bool) {
+        Row storage w = _rows[e.dst.collateral];
+        return w.cap != 0 && w.record == e.dst.record && w.baseBps == e.dst.baseBps && w.minTenor == e.dst.minTenor && w.maxTenor == e.dst.maxTenor;
     }
 
     /// @dev The cap less exposure: the hub's lent against the collateral plus its unsold pot units at the market record's minimum.

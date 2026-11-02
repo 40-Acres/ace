@@ -23,7 +23,7 @@ import {AceHandler} from "./AceHandler.sol";
 /// @dev Solvency, the aggregate walks, LR-9, lentPrincipal and the flag aggregates are RECOMPUTED from live state on every check.
 /// @dev No-theft, the floor law, settlement monotonicity and inv-15 LATCH into handler ghosts: fail_on_revert = false discards a revert.
 /// @dev Junior is out of core v1, so the junior-depth fold and the cohort-coverage invariants are CANCELLED.
-/// @dev Singleton-specific replacements: the roll reserve is a term in the solvency identity, and the sparse tick bitmap has its own mirror.
+/// @dev Singleton-specific replacement: the fee escrow is a term in the solvency identity.
 /// @dev FOUR DRIVEN MARKETS plus two passive canaries, one canary per quote token.
 /// @dev Plus every market the fuzzer creates MID-SEQUENCE, held outside that index space deliberately.
 /// @dev Isolation on this hub is LOGICAL, per market id, so it is measured here rather than assumed.
@@ -43,8 +43,8 @@ contract AceInvariantsTest is StdInvariant, Test {
     function setUp() public {
         handler = new AceHandler();
         handler.baselineSkim(); // pre-snapshot, but it needs the handler's code deployed to be called back
-        handler.baselineNoFlip(); // this suite's alone: it asserts the ghost, and the other baselineSkim callers keep their state
-        handler.baselineThirdParty(); // every third-party lever pulled once on an armed loan; none may flip its fold
+        handler.baselineCrankCloses(); // a dust-bound loan's crank closes it clean: the close and the dust ghosts' witness
+        handler.baselineExtend(); // a loan extends in place in cash with nothing resting, twice, by its holder
         ace = handler.ace();
         read = handler.read();
         usdc = handler.usdc();
@@ -54,7 +54,7 @@ contract AceInvariantsTest is StdInvariant, Test {
         /// @dev SELECTOR ARRAY FIRST (baseline-satisfied-ghosts rule): the unit verbs joined and the
         /// @dev exit-flag verbs left in the SAME edit that changed the handler, with per-verb counts
         /// @dev asserted below so a ghost cannot be satisfied by the constructor baseline alone.
-        bytes4[] memory sel = new bytes4[](36);
+        bytes4[] memory sel = new bytes4[](29);
         sel[0] = AceHandler.deposit.selector;
         sel[1] = AceHandler.withdraw.selector;
         /// @dev `materialize`, `claimUnits` and `transferUnits` are GONE with the receipt ledger, and are
@@ -84,30 +84,25 @@ contract AceInvariantsTest is StdInvariant, Test {
         sel[19] = AceHandler.transferTitle.selector;
         /// @dev THE MIGRATING SIBLING of `refinance` above: without it no verb whose subject is two markets runs.
         sel[20] = AceHandler.migrate.selector;
-        /// @dev THE POLICY VERBS. `refinanceByPolicies` is the hub's SECOND cross-market surface: one call, many markets.
-        /// @dev The isolation invariant lives in THIS suite, so the entitlement model is exercised only if they run here.
-        /// @dev Arming a policy is also what makes `forceClose` take its ROLL branch and mint a successor.
-        sel[21] = AceHandler.armPolicy.selector;
-        sel[22] = AceHandler.refinanceByPolicy.selector;
-        sel[23] = AceHandler.refinanceByPolicies.selector;
+        /// @dev THE EXTENSION VERBS: the holder's cash `extend`, asked of the lender's roll policy.
+        /// @dev `setRollPolicy` moves that yes between a no, a gas burner and none; it entitles no market, so isolation judges it too.
+        sel[21] = AceHandler.extend.selector;
+        sel[22] = AceHandler.setRollPolicy.selector;
         /// @dev GENESIS AS A MOVE: before this selector, market creation could only ever be read AT REST.
-        sel[24] = AceHandler.createMarket.selector;
+        sel[23] = AceHandler.createMarket.selector;
         /// @dev THE REDIRECTED EXITS: `withdraw` and `collect` paying a third party, so value leaves to a non-caller.
-        sel[25] = AceHandler.exitTo.selector;
-        /// @dev THE SMALL ARMED POPULATION: loans at 1.0-1.5x `minDebt`, the regime the no-flip ghost needs and `open` never draws.
-        sel[26] = AceHandler.openSmallArmed.selector;
-        /// @dev THE THIRD-PARTY LEVERS on an armed loan's next fold (#666, #514): each is bracketed by the real fold.
-        sel[27] = AceHandler.strangerDrain.selector;
-        sel[28] = AceHandler.strangerAtomicDrain.selector;
-        sel[29] = AceHandler.postOrder.selector;
-        sel[30] = AceHandler.strangerFill.selector;
-        sel[31] = AceHandler.strangerRepayPartial.selector;
-        sel[32] = AceHandler.routeIn.selector;
-        sel[33] = AceHandler.recordPush.selector;
+        sel[24] = AceHandler.exitTo.selector;
+        /// @dev An honest maker's resting order, so posted escrow is part of what the campaign's books carry.
+        sel[25] = AceHandler.postOrder.selector;
         /// @dev THE COVERAGE LINE AT BOTH DOORS: every other draw posts far more than the line asks, so its refusal went undriven.
-        sel[34] = AceHandler.openNearLine.selector;
-        /// @dev THE UNPAID BACKSTOP: no action called it before, so a regression in its window or its pay was invisible here.
-        sel[35] = AceHandler.settleExpired.selector;
+        sel[26] = AceHandler.openNearLine.selector;
+        /// @dev THE E-3 PATH: the market lender extending in cash on the holder's grant, and refused ungranted.
+        sel[27] = AceHandler.lenderExtend.selector;
+        /// @dev THE CLOSE IN THE CAMPAIGN: every other draw is too large for a crank to close, so closes happened in setUp alone.
+        sel[28] = AceHandler.openSmall.selector;
+        /// @dev DELETED with manual renewal: `setAutoExtend`, `openSmallArmed`, `settleExpired`, `foldAtExpiry`, and the five
+        /// @dev third-party levers on an armed loan's fold (`strangerDrain`, `strangerAtomicDrain`, `strangerFill`,
+        /// @dev `strangerRepayPartial`, `recordPush`): no loan arms and the fold only settles, so none has a subject.
         /// @dev DELETED: `setRearm` and `compound`, the lender's standing compounding choice and its crank.
         /// @dev The credit path only ever pays out now, which is the whole of what the verb deletion means here.
         targetSelector(FuzzSelector({addr: address(handler), selectors: sel}));
@@ -138,16 +133,19 @@ contract AceInvariantsTest is StdInvariant, Test {
         _invariant_aSaleNeverPays();
         _invariant_floorLaw();
         _invariant_deleverageNeverRaisesTheTrigger();
+        _invariant_aSellingCrankNeverLeavesDust();
+        _invariant_noLiveLoanUnderTheDebtFloor();
+        _invariant_everyLoanWasBornAtMinPrincipal();
         _invariant_settlementMonotonicity();
         _invariant_refinanceNeverMovesAnotherLoansFloor();
         _invariant_revenueOnlyLeavesViaTheSweep();
         _invariant_genesisMidSequenceIsInert();
         _invariant_forceCloseHonoursItsPromise();
-        _invariant_noThirdPartyFlipsAnArmedFold();
-        _invariant_reserveIsTheSumOfLiveShares();
-        _invariant_anArmedShareNeverExceedsItsRollsNeed();
+        _invariant_anExtensionLandsInPlace();
+        _invariant_theTermIsOneTenorLong();
+        _invariant_aLoansTenorNeverMoves();
+        _invariant_theLenderExtendsOnlyInCashOnTheGrant();
         _invariant_aLiveTriggerNeverExceedsThePrice();
-        _invariant_noFreshDrawBreachesTheReserve();
         // ---- the pooled model's own laws, which had no per-market analogue before ----
         _invariant_cashIsTheRestingPool();
         _invariant_lentIsTheClaimBook();
@@ -157,7 +155,6 @@ contract AceInvariantsTest is StdInvariant, Test {
         _invariant_zeroCollateralMeansZeroClaim();
         _invariant_onlyTheLenderMovesItsMoney();
         _invariant_aClosedLoanHoldsNoEscrow();
-        _invariant_theUnpaidBackstopKeepsItsTerms();
         _invariant_anAskOffPotFallsOnlyInKind();
     }
 
@@ -272,17 +269,20 @@ contract AceInvariantsTest is StdInvariant, Test {
 
     // ---- 4. Claim integrity, both sides of the ledger ----
 
-    /// @notice An open loan's claims sum to its debt, exactly; a closed loan carries none.
-    /// @notice The funded-tick LIST survives a close for pot discovery, by design.
-    /// @dev Every melt debits debt and claims alike, so equality, not a bound: no phantom claims.
+    /// @notice O10: an open loan's debt is its claim, exactly; a closed loan carries no claim.
+    /// @dev Every melt debits debt and the claim alike and an extension moves neither, so equality, not a bound: no phantom claims.
+    /// @dev NO escrow bound on the claim: a cash extension funds escrow without raising the claim.
     /// @dev CLAIMS ARE KEYED (market, loan): asked of market 0, a loan drawn elsewhere reads a false zero.
     function _invariant_loanClaimsEqualDebt() public view {
         uint256[] memory ids = handler.loanIds();
         for (uint256 i; i < ids.length; i++) {
             Loan memory l = read.loan(ids[i]);
             uint256 claim = read.claimOf(ace.loanMarket(ids[i]), ids[i]); // ONE word: there is nothing to sum
-            if (l.closedAt != 0) assertEq(claim, 0, "a closed loan still carries a live claim");
-            else assertEq(claim, l.debt, "an open loan's claim is not its debt");
+            if (l.closedAt != 0) {
+                assertEq(claim, 0, "a closed loan still carries a live claim");
+                continue;
+            }
+            assertEq(claim, l.debt, "O10: an open loan's claim is not its debt");
         }
     }
 
@@ -499,9 +499,9 @@ contract AceInvariantsTest is StdInvariant, Test {
 
     /// @notice THE DUST WALL IS A PROPERTY OF THE TWO LENDER DOORS, never of the resting balance.
     /// @dev IT WAS WRITTEN AS A STATE INVARIANT AND THAT WAS FALSE. The old form asserted no market ever
-    /// @dev rests strictly between zero and `minDebt`, on the reasoning that neither door can leave it
+    /// @dev rests strictly between zero and `minPrincipal`, on the reasoning that neither door can leave it
     /// @dev there -- naming two doors when there are THREE. The DRAW lowers resting cash too and has no
-    /// @dev remainder test, so `minDebt` 10, rest 15, draw 10 leaves 5, in one ordinary call.
+    /// @dev remainder test, so `minPrincipal` 10, rest 15, draw 10 leaves 5, in one ordinary call.
     /// @dev It passed only because the fuzzer never composed that draw, which is the shape this campaign
     /// @dev exists to catch and is worth saying out loud: a green invariant that cannot fail reads exactly
     /// @dev like a true one. Ruled ACCEPTED on the draw side rather than railed -- a draw-side floor would
@@ -509,7 +509,7 @@ contract AceInvariantsTest is StdInvariant, Test {
     /// @dev So what is asserted is what actually holds: neither LENDER door ever leaves a market there.
     /// @dev It is latched per action rather than read off the state, because the draw is allowed to.
     function _invariant_noLenderDoorLeavesDust() public view {
-        assertFalse(handler.lenderDoorLeftDust(), "dust wall: a deposit or withdraw left unreserved cash under the market's own minDebt");
+        assertFalse(handler.lenderDoorLeftDust(), "dust wall: a deposit or withdraw left resting cash under the market's own minPrincipal");
     }
 
     /// @notice NO COLLATERAL, NO CLAIM: a loan holding nothing in escrow carries no live claim against it.
@@ -542,13 +542,6 @@ contract AceInvariantsTest is StdInvariant, Test {
             if (read.loan(id).closedAt == 0) continue;
             assertEq(read.feeEscrowOf(id), 0, "ESCROW: a closed loan still holds a fee escrow no close earned, refunded or carried");
         }
-    }
-
-    /// @notice `settleExpired` refuses inside a loan's roll window and pays its caller nothing.
-    /// @dev Code 1: it landed inside the window, which is the borrower's roll. Code 2: it credited its caller a sliver.
-    function _invariant_theUnpaidBackstopKeepsItsTerms() public view {
-        if (handler.backstopCode() != 0) console2.log("backstop loan", handler.backstopLoanId());
-        assertEq(uint256(handler.backstopCode()), 0, "BACKSTOP: settleExpired landed inside the roll window, or paid its caller");
     }
 
     /// @dev Every loan the INCUMBENT market (`mid`) has opened, from the hub's own append-only registry.
@@ -722,6 +715,38 @@ contract AceInvariantsTest is StdInvariant, Test {
         assertFalse(handler.deleverageRaisedTrigger(), "DELEVERAGE: a crank sold collateral without retiring its share of debt");
     }
 
+    /// @notice A crank that sells either closes the loan clean, retiring the whole debt, or leaves its debt at or over its debt floor.
+    /// @dev A restore that would leave dust is replaced by a sale of the whole debt; a partial fill of it reverts, so no crank leaves dust.
+    function _invariant_aSellingCrankNeverLeavesDust() public {
+        if (handler.crankLeftDust()) {
+            emit log_named_uint("loan", handler.crankDustLoanId());
+            emit log_named_uint("debt left", handler.crankDustDebt());
+        }
+        assertFalse(handler.crankLeftDust(), "DUST: a selling crank left a live loan under its debt floor, or a closing one left debt");
+    }
+
+    /// @notice O71c (L): a live loan's debt is never under its market's debt floor, half `minPrincipal`, whoever repaid it and whatever cranked it.
+    /// @dev Births issue at least twice it, a repay pays off or leaves at least it, and a crank restores to at least it or closes.
+    function _invariant_noLiveLoanUnderTheDebtFloor() public view {
+        uint256[] memory ids = handler.loanIds();
+        for (uint256 i; i < ids.length; i++) {
+            Loan memory l = read.loan(ids[i]);
+            if (l.closedAt != 0) continue;
+            uint256 floor = LoanMath.debtFloor(ace.idToMarketParams(ace.loanMarket(ids[i])).minPrincipal);
+            assertGe(l.debt, floor, "O71c: a live loan sits under its market's debt floor");
+        }
+    }
+
+    /// @notice O71c (B): every loan, live or closed, was born at or over its market's `minPrincipal`: open, fill and refinance successor alike.
+    /// @dev The stored principal is written once, at the birth, and never cleared, so a closed loan still answers.
+    function _invariant_everyLoanWasBornAtMinPrincipal() public view {
+        uint256[] memory ids = handler.loanIds();
+        for (uint256 i; i < ids.length; i++) {
+            uint256 mp = ace.idToMarketParams(ace.loanMarket(ids[i])).minPrincipal;
+            assertGe(read.principalOf(ids[i]), mp, "O71c: a loan was born under its market's minPrincipal");
+        }
+    }
+
     /// @notice Settlement is terminal: a closed loan never reopens.
     function _invariant_settlementMonotonicity() public {
         if (handler.monotonicityViolated()) emit log_named_uint("loan", handler.monoLoanId());
@@ -807,91 +832,65 @@ contract AceInvariantsTest is StdInvariant, Test {
         }
     }
 
-    // ---- 7c. The settlement promise: an expired loan settles or rolls, and a refusal is never silence ----
+    // ---- 7c. The settlement promise: an expired loan settles, and a refusal is never silence ----
 
-    /// @notice `forceClose` past expiry on a live loan is PROMISED to settle or roll, so a refusal is a regression.
+    /// @notice `forceClose` past expiry on a live loan is PROMISED to settle, so a refusal is a regression, and so is a loan it left live.
     /// @notice Checked PER STEP, so the sequence that broke it is the one forge reports and minimizes.
-    /// @dev Not a hit count: a zero `expiryFolds` reads identically to a campaign that never reached expiry.
+    /// @dev Not a hit count: a zero `forceCloseSettles` reads identically to a campaign that never reached expiry.
     /// @dev The handler establishes both declared preconditions before it calls, so code 1 is a flat contradiction.
-    /// @dev Code 2 is the promise breaking downstream of them, which is where a settlement regression would live.
+    /// @dev Code 2 is the promise breaking downstream of them, where a settlement regression would live; code 3 a return that settled nothing.
     function _invariant_forceCloseHonoursItsPromise() public {
         if (handler.forceCloseCode() != 0) {
-            emit log_named_uint("forceClose refusal code", handler.forceCloseCode());
+            emit log_named_uint("forceClose code (1 precondition 2 other refusal 3 left live)", handler.forceCloseCode());
             emit log_named_uint("on loan", handler.forceCloseLoanId());
             emit log_named_bytes32("refusal selector", bytes32(handler.forceCloseSelector()));
         }
-        assertEq(uint256(handler.forceCloseCode()), 0, "SETTLE: forceClose refused a live loan at or past expiry, which it promises to settle or roll");
+        assertEq(uint256(handler.forceCloseCode()), 0, "SETTLE: forceClose refused or left live a loan at or past expiry, which it promises to settle");
     }
 
-    // ---- 7d. The no-flip rule: no third party changes an armed loan's NEXT fold ----
-
-    /// @notice No third party turns an armed loan's expiry fold from ROLL into SETTLE (#674, #666, #514; #403's regime 1).
-    /// @notice The levers: a `deleverage` crank, a stranger's drain (persistent and atomic), a fill of someone's order,
-    /// @notice a partial repay, a route-in from another market, and a push of a movable record under the lender's price.
-    /// @dev The handler runs the real fold at expiry in a snapshot before and after each lever; only the lever differs.
-    /// @dev The subject always holds `reserved >= need`, which is the property's premise: a borrower's own repay can forfeit it.
-    /// @dev A successor born DISARMED is not a flip -- it is the accepted chain residual, counted apart in `bracketDisarms`.
-    /// @dev Witnessed structurally for the crank: `baselineNoFlip` REQUIRES the same branch after a 1.2x `minDebt` crank.
-    function _invariant_noThirdPartyFlipsAnArmedFold() public {
-        if (handler.foldFlipped()) {
-            emit log_named_uint("flipped loan", handler.foldFlipLoanId());
-            emit log_named_uint("cause (0 crank 1 drain 2 atomic 3 fill 4 repay 5 route 6 record)", handler.foldFlipCause());
-            emit log_named_uint("debt before", handler.foldFlipDebtBefore());
-            emit log_named_uint("debt after", handler.foldFlipDebtAfter());
+    /// @notice A holder's extension lands IN PLACE, in cash: the expiry by its tenor, the debt unmoved, no cash rested or drawn.
+    /// @notice The fee reaches the hub whole: its three cuts are booked there, so the solvency identity holds across it.
+    function _invariant_anExtensionLandsInPlace() public {
+        if (handler.extendInPlaceCode() != 0) {
+            emit log_named_uint("code (1 minted 2 expiry 3 debt 4 resting 5 cash fee 6 draw count)", handler.extendInPlaceCode());
+            emit log_named_uint("on loan", handler.extendInPlaceLoanId());
         }
-        assertFalse(handler.foldFlipped(), "NO-FLIP: a third party turned an armed fold that rolled into one that settles");
+        assertEq(uint256(handler.extendInPlaceCode()), 0, "EXTEND: a holder's extension broke an in-place law");
     }
 
-    /// @notice A market's roll reserve is EXACTLY the sum of its loans' reservations, and only live, armed loans hold one.
-    /// @notice Over EVERY known market: the driven four, the two canaries, and each market created mid-sequence.
-    /// @dev Walks the hub's own append-only loan list, so a loan the handler never tracked is counted too.
-    /// @dev The two legs are one ledger: a release that forgot to zero its share breaks the second, a drift the first.
-    function _invariant_reserveIsTheSumOfLiveShares() public view {
-        for (uint256 i; i < handler.marketCount(); i++) {
-            _assertReserveLedger(handler.midAt(i));
-        }
-        for (uint256 i; i < 2; i++) {
-            _assertReserveLedger(handler.canaries(i));
-        }
-        for (uint256 i; i < handler.strangerCount(); i++) {
-            _assertReserveLedger(handler.strangerAt(i));
+    /// @notice I1: every tracked loan's term is one tenor long, `openTime + tenor == expiry`, closed or live, through every extension.
+    function _invariant_theTermIsOneTenorLong() public view {
+        uint256[] memory ids = handler.loanIds();
+        for (uint256 i; i < ids.length; i++) {
+            Loan memory l = read.loan(ids[i]);
+            assertEq(uint256(l.openTime) + l.tenor, l.expiry, "I1: a loan's term is not one tenor long");
         }
     }
 
-    /// @dev One market's leg of the identity; a canary or a created market holds no loan, so its reserve must read zero.
-    function _assertReserveLedger(bytes32 m) internal view {
-        uint256[] memory ids = ace.marketLoans(m, 0, ace.marketLoansLength(m));
-        uint256 sum;
-        for (uint256 k; k < ids.length; k++) {
-            uint256 share = read.reservedOf(ids[k]);
-            if (share == 0) continue;
-            sum += share;
-            assertEq(read.loan(ids[k]).closedAt, 0, "RESERVE: a closed loan still holds a roll reservation");
-            (uint64 tenor,,) = read.autoPolicyOf(ids[k]);
-            assertGt(tenor, 0, "RESERVE: a disarmed loan still holds a roll reservation");
+    /// @notice I2: a loan's tenor is the one it was issued at, on its market's grid: no extension or other verb moves it.
+    function _invariant_aLoansTenorNeverMoves() public view {
+        uint256[] memory ids = handler.loanIds();
+        for (uint256 i; i < ids.length; i++) {
+            Loan memory l = read.loan(ids[i]);
+            MarketParams memory p = ace.idToMarketParams(l.market);
+            assertEq(l.tenor, handler.tenorAtIssue(ids[i]), "I2: a loan's tenor moved after it was issued");
+            assertGe(l.tenor, p.minTenor, "I2: a loan's tenor is under its market's shortest term");
+            assertLe(l.tenor, p.maxTenor, "I2: a loan's tenor is over its market's longest term");
         }
-        assertEq(sum, read.rollReserve(m), "RESERVE: a market's roll reserve is not the sum of its live loans' shares");
     }
 
-    /// @notice A live armed loan's share never exceeds its expiry roll's need at today's debt, floored at the dust band's worst (YI-26).
-    /// @notice The sum identity above cannot see a stale share: a share sized at the arm-time debt IS a live armed loan's share.
-    /// @dev The need is re-derived from the fee algebra, never read off the hub: the floored successor less the debt it recycles.
-    /// @dev The floor is the need at one atom of debt, `minDebt - 1`: a shrink keeps it so a later dust repay stays covered (code-review 1).
-    function _invariant_anArmedShareNeverExceedsItsRollsNeed() public view {
-        for (uint256 i; i < handler.marketCount(); i++) {
-            bytes32 m = handler.midAt(i);
-            uint256[] memory ids = ace.marketLoans(m, 0, ace.marketLoansLength(m));
-            for (uint256 k; k < ids.length; k++) {
-                uint256 share = read.reservedOf(ids[k]);
-                if (share == 0) continue;
-                (uint64 tenor,,) = read.autoPolicyOf(ids[k]);
-                uint256 cap = _rollNeed(m, read.loan(ids[k]).debt, tenor);
-                uint256 dust = _rollNeed(m, 1, tenor);
-                if (dust > cap) cap = dust;
-                assertLe(share, cap, "RESERVE: an armed share outgrew its roll's need at today's debt, floored at the dust band's worst");
-            }
+    /// @notice E-3: the market lender extends a loan only on its holder's credit grant, in cash, and only from its own wallet.
+    /// @notice Ungranted it refuses `NotBorrower`, the caller leg's own name, at the view and at the verb alike.
+    /// @dev Latched per `lenderExtend` straddle; the in-place law and the claim identity above judge the landed ones too.
+    function _invariant_theLenderExtendsOnlyInCashOnTheGrant() public {
+        if (handler.operatorCode() != 0) {
+            emit log_named_uint("code (1 ungranted 2 other refusal 3 fee not the lender's)", handler.operatorCode());
+            emit log_named_uint("on loan", handler.operatorLoanId());
         }
+        assertEq(uint256(handler.operatorCode()), 0, "E-3: the market lender extended outside its holder's grant, or another wallet paid");
     }
+
+    // DELETED with the roll reservation: the three reserve invariants (sum of shares, share under need, no draw breaches it) and their helpers.
 
     /// @notice A live loan's trigger never exceeds its market's price (#738 C-16): the bound `Deleverage._fit` and settlement rest on.
     /// @dev Admission puts it at or under `min(price, record)`; a withdrawal keeps it under the line's fold; a melt only lowers it.
@@ -905,22 +904,6 @@ contract AceInvariantsTest is StdInvariant, Test {
                 assertLe(read.triggerPrice(ids[k]), price, "TRIGGER: a live loan's trigger sits over its market's price");
             }
         }
-    }
-
-    /// @dev What an expiry roll of `debt` at `tenor` draws fresh in market `m`: `max(principalForOwed(debt), minDebt) - debt`.
-    function _rollNeed(bytes32 m, uint256 debt, uint64 tenor) internal view returns (uint256) {
-        MarketParams memory p = ace.idToMarketParams(m);
-        uint256 succ = LoanMath.principalForOwed(debt, tenor, p.baseBps, p.minTenor);
-        if (succ < p.minDebt) succ = p.minDebt;
-        return succ > debt ? succ - debt : 0;
-    }
-
-    /// @notice No fresh draw takes reserved cash: only a lender's own door may leave a market under its roll reserve.
-    /// @dev Latched per action, since the lender's withdraw may legally leave that state and the draws never may.
-    function _invariant_noFreshDrawBreachesTheReserve() public view {
-        assertFalse(
-            handler.reserveBreached(), string.concat("RESERVE: a non-lender action left cash under the roll reserve -- verb ", handler.reserveBreachedBy())
-        );
     }
 
     // ---- 8. Deterministic coverage proofs: the invariants above are not asserting over dead state ----
@@ -1069,7 +1052,7 @@ contract AceInvariantsTest is StdInvariant, Test {
 
         handler.forceClose(idx);
         uint256 pot = read.invPotOf(askOff, loanId);
-        assertGt(pot, 0, "PREMISE: the fold left a pot in the ask-off market");
+        assertGt(pot, 0, "PREMISE: the settlement left a pot in the ask-off market");
         assertEq(handler.askOffPotsSeen(), had[0] + 1, "the latch saw the pot appear");
 
         handler.buyInventory(50_000e6);
@@ -1104,54 +1087,47 @@ contract AceInvariantsTest is StdInvariant, Test {
         _invariant_aClosedLoanHoldsNoEscrow();
     }
 
-    /// @notice The unpaid backstop refuses inside a loan's roll window, then settles it once the window has passed.
-    function test_Coverage_TheUnpaidBackstopRefusesEarlyAndLandsLate() public {
+    /// @notice A loan opened ON its coverage line settles at its expiry: `forceClose` takes the sliver off a lot with no slack and still lands.
+    function test_Coverage_ANearLineLoanSettlesAtItsExpiry() public {
         uint256 n = handler.loanIds().length;
-        handler.open(0, 0, 4_000e6);
-        assertEq(handler.loanIds().length, n + 1, "PREMISE: the open landed");
-        uint256 refused = handler.backstopEarlyRefused();
-        uint256 landed = handler.unpaidSettles();
-        handler.settleExpiredAtExpiry(n); // at expiry, inside the roll window
-        assertEq(handler.backstopEarlyRefused(), refused + 1, "settleExpired inside the roll window did not refuse");
-        handler.warp(type(uint256).max); // `bound` maps the max seed onto 45 days: past the term and its window
-        handler.settleExpired(n); // where the clock stands, which is now past the window
-        assertEq(handler.unpaidSettles(), landed + 1, "settleExpired past the roll window did not settle");
-        assertFalse(ace.isClosed(handler.loanIds()[n]), "and the action rolled its settle back, so no fold is starved");
-        _invariant_theUnpaidBackstopKeepsItsTerms();
-    }
-
-    /// @notice An armed loan opened ON its coverage line settles at its fold: its successor's fee puts it under that line.
-    /// @dev The fold must refuse the roll by the line, and a predicate that forgot the line rolls into a draw that reverts.
-    function test_Coverage_ANearLineArmedLoanSettlesAtItsFold() public {
-        uint256 n = handler.loanIds().length;
-        handler.openNearLine(0, 0, 4_000e6, 5); // slack seed 5: units exactly on the line, then armed
+        handler.openNearLine(0, 0, 4_000e6, 1); // slack seed 1: units exactly on the line
         assertEq(handler.loanIds().length, n + 1, "PREMISE: the on-the-line draw landed");
-        uint256 id = handler.loanIds()[n];
-        (uint64 armed,,) = read.autoPolicyOf(id);
-        assertGt(armed, 0, "PREMISE: the near-line loan is armed");
-        uint256 folds = handler.expiryFolds();
+        uint256 settled = handler.forceCloseSettles();
         handler.forceClose(n);
-        assertEq(uint256(handler.forceCloseCode()), 0, "forceClose refused an armed near-line loan at expiry");
-        assertEq(handler.expiryFolds(), folds + 1, "the near-line loan's fold settled rather than rolled");
+        assertEq(uint256(handler.forceCloseCode()), 0, "forceClose refused a near-line loan at expiry");
+        assertEq(handler.forceCloseSettles(), settled + 1, "the near-line loan did not settle at its expiry");
     }
 
-    /// @notice The fuzzed `forceClose` folds an expired, unarmed loan: the path `make reach` measures as a rate, pinned once here.
+    /// @notice A dust-bound loan the campaign opens closes on the fuzzed crank: the campaign's own close path, pinned once here.
+    function test_Coverage_ASmallLoanClosesOnTheFuzzedCrank() public {
+        uint256 n = handler.loanIds().length;
+        handler.openSmall(0, 0, 0);
+        assertEq(handler.loanIds().length, n + 1, "PREMISE: the small loan landed");
+        uint256 id = handler.loanIds()[n];
+        (uint256 cranked, uint256 closes, uint256 dust) = (handler.smallCranked(), handler.smallCloses(), handler.crankCloses());
+        handler.deleverage(n);
+        assertEq(handler.smallCranked(), cranked + 1, "the fuzzed crank sold on the small loan");
+        assertEq(handler.smallCloses(), closes + 1, "and closed it");
+        assertEq(handler.crankCloses(), dust + 1, "the campaign's close tally counted it");
+        assertTrue(ace.isClosed(id), "the small loan is closed");
+        _invariant_aSellingCrankNeverLeavesDust();
+    }
+
+    /// @notice The fuzzed `forceClose` settles an expired loan: the path `make reach` measures as a rate, pinned once here.
     function test_Coverage_TheFuzzedForceCloseFoldsAnExpiredLoan() public {
         uint256 n = handler.loanIds().length;
         handler.open(0, 0, 4_000e6);
         assertEq(handler.loanIds().length, n + 1, "PREMISE: the open landed");
         uint256 id = handler.loanIds()[n];
-        (uint64 armed,,) = read.autoPolicyOf(id);
-        assertEq(armed, 0, "PREMISE: the loan is not armed, so its fold settles rather than rolls");
-        uint256 folds = handler.expiryFolds();
+        uint256 settled = handler.forceCloseSettles();
         handler.forceClose(n);
-        assertEq(uint256(handler.forceCloseCode()), 0, "forceClose refused an expired, unarmed loan");
-        assertEq(handler.expiryFolds(), folds + 1, "the handler's forceClose did not fold the expired loan");
-        assertTrue(ace.isClosed(id), "the folded loan is closed");
+        assertEq(uint256(handler.forceCloseCode()), 0, "forceClose refused an expired loan");
+        assertEq(handler.forceCloseSettles(), settled + 1, "the handler's forceClose did not settle the expired loan");
+        assertTrue(ace.isClosed(id), "the settled loan is closed");
     }
 
     /// @notice A `forceClose` drawn onto a CLOSED tracked loan acts on the next live one, so the draw is never wasted.
-    /// @dev A closed pick is not owed, so it judged nothing; at depth those picks were what left whole runs without a fold.
+    /// @dev A closed pick is not owed, so it judged nothing; at depth those picks were what left whole runs without an expiry settle.
     function test_Coverage_ForceCloseSkipsAClosedPickForALiveLoan() public {
         uint256 n = handler.loanIds().length;
         handler.open(0, 0, 4_000e6);
@@ -1160,25 +1136,118 @@ contract AceInvariantsTest is StdInvariant, Test {
         handler.repay(n, type(uint256).max); // `bound` maps the max seed onto the whole debt
         assertTrue(ace.isClosed(handler.loanIds()[n]), "PREMISE: the first loan is closed");
         uint256 live = handler.loanIds()[n + 1];
-        uint256 folds = handler.expiryFolds();
+        uint256 settled = handler.forceCloseSettles();
         handler.forceClose(n); // the seed's own slot holds the closed loan
-        assertEq(handler.expiryFolds(), folds + 1, "a forceClose drawn onto a closed loan folded nothing");
-        assertTrue(ace.isClosed(live), "the live loan after the closed slot is the one that folded");
+        assertEq(handler.forceCloseSettles(), settled + 1, "a forceClose drawn onto a closed loan settled nothing");
+        assertTrue(ace.isClosed(live), "the live loan after the closed slot is the one that settled");
     }
 
-    /// @notice An armed loan whose successor would sit EXACTLY on its trigger's requirement still settles: the line refuses it.
-    /// @dev The roll predicate asks the trigger before the line, and the line is one atom tighter, so this is the only state
-    /// @dev where the predicate's line leg decides. A predicate without it admits a roll the draw then refuses, and the fold reverts.
-    function test_Coverage_AnArmedLoanOnItsSuccessorsEdgeSettlesAtItsFold() public {
+    /// @notice Every roll-policy kind the campaign moves a lender between LANDS, and `forceClose` settles under each: the yes included.
+    /// @dev `forceClose` asks no policy, so whatever the lender names, an expired loan's `forceClose` settles it.
+    function test_Coverage_EachRollPolicyKindLandsAndForceCloseSettlesUnderEach() public {
+        address lender = handler.lenders(0);
+        uint256[4] memory kindSeed = [uint256(0), 5, 6, 7]; // yes, no, gas burner, none
+        address[4] memory named = [address(handler.yesPolicy()), address(handler.noPolicy()), address(handler.gasPolicy()), address(0)];
+        for (uint256 k; k < 4; k++) {
+            uint256 sets = handler.policySets(k);
+            handler.setRollPolicy(0, kindSeed[k]);
+            assertEq(handler.policySets(k), sets + 1, "the policy set did not land");
+            assertEq(read.rollPolicyOf(lender), named[k], "and names another policy than its kind's");
+            uint256 n = handler.loanIds().length;
+            handler.open(0, 0, 1_000e6);
+            assertEq(handler.loanIds().length, n + 1, "PREMISE: the open landed");
+            uint256 settled = handler.forceCloseSettles();
+            handler.forceClose(n);
+            assertEq(handler.forceCloseSettles(), settled + 1, "forceClose did not settle the expired loan under this policy");
+            assertTrue(ace.isClosed(handler.loanIds()[n]), "the expired loan settled");
+        }
+        assertEq(read.rollPolicyOf(lender), address(0), "CONTROL: the last kind set, none, stands");
+        handler.setRollPolicy(0, kindSeed[0]);
+        assertEq(read.rollPolicyOf(lender), named[0], "and the yes is named again");
+    }
+
+    /// @notice The holder's extension LANDS in place, in cash, twice over on the same loan: the debt never moves.
+    function test_Coverage_TheHoldersExtensionLandsInPlace() public {
         uint256 n = handler.loanIds().length;
-        handler.openNearLine(0, 0, 4_000e6, 7); // slack seed 7: units on the successor's edge, then armed
-        assertEq(handler.loanIds().length, n + 1, "PREMISE: the successor-edge draw landed");
-        (uint64 armed,,) = read.autoPolicyOf(handler.loanIds()[n]);
-        assertGt(armed, 0, "PREMISE: the successor-edge loan is armed");
-        uint256 folds = handler.expiryFolds();
-        handler.forceClose(n);
-        assertEq(uint256(handler.forceCloseCode()), 0, "forceClose refused an armed loan on its successor's edge");
-        assertEq(handler.expiryFolds(), folds + 1, "the edge loan's fold settled rather than rolled");
+        handler.open(0, 0, 4_000e6);
+        assertEq(handler.loanIds().length, n + 1, "PREMISE: the open landed");
+        uint256 id = handler.loanIds()[n];
+        uint256 debt = read.loan(id).debt;
+        uint256 landed = handler.extendsLanded();
+        handler.extend(n, 0);
+        assertEq(handler.extendsLanded(), landed + 1, "the cash extension did not land");
+        handler.extend(n, 1);
+        assertEq(handler.extendsLanded(), landed + 2, "the second cash extension did not land");
+        assertFalse(ace.isClosed(id), "both extended the same live loan");
+        assertEq(read.loan(id).debt, debt, "and neither moved its debt");
+        _invariant_anExtensionLandsInPlace();
+        _invariant_loanClaimsEqualDebt();
+    }
+
+    /// @dev Two of the campaign's longest warps: every loan the ctor and its baselines opened is lapsed past one term after its expiry.
+    function _lapseEveryTrackedLoan() internal {
+        handler.warp(45 days);
+        handler.warp(45 days);
+        uint256[] memory ids = handler.loanIds();
+        for (uint256 i; i < ids.length; i++) {
+            assertFalse(handler.reachable(ids[i]), "PREMISE: every tracked loan is out of an extension's reach");
+        }
+    }
+
+    /// @notice A LONG SEQUENCE'S BOOK: with every tracked loan lapsed, `extend` asks the seed's own pick, and both doors refuse it alike.
+    /// @notice Then one fresh loan in reach: seed 0 names a lapsed slot, and the walk skips every lapsed loan to try, and land, that one alone.
+    function test_Coverage_ExtendSkipsLapsedLoansAndFallsBackToTheSeedsPick() public {
+        _lapseEveryTrackedLoan();
+        (uint256 fallbacks, uint256 refused, uint256 tries) = (handler.extendFallbacks(), handler.modeBothRefuse(0), handler.extendTries());
+        handler.extend(0, 0);
+        assertEq(handler.extendFallbacks(), fallbacks + 1, "with nothing in reach the walk fell back to the seed's own pick");
+        assertEq(handler.modeBothRefuse(0), refused + 1, "which both doors refused");
+        assertEq(handler.extendTries(), tries + 1, "and was the one loan tried");
+        uint256 n = handler.loanIds().length;
+        handler.open(0, 0, 4_000e6);
+        assertEq(handler.loanIds().length, n + 1, "PREMISE: the open landed");
+        uint256 id = handler.loanIds()[n];
+        uint64 expiry = read.loan(id).expiry;
+        uint256 landed = handler.extendsLanded();
+        handler.extend(0, 0);
+        assertEq(handler.extendTries(), tries + 2, "the walk skipped every lapsed loan and tried only the one in reach");
+        assertEq(handler.extendsLanded(), landed + 1, "and that extension landed");
+        assertGt(read.loan(id).expiry, expiry, "on the fresh loan");
+        assertEq(handler.extendCode(), 0, "the view and the verb agreed on both asks");
+        _invariant_anExtensionLandsInPlace();
+    }
+
+    /// @notice E-3 END TO END: on the holder's grant the market lender extends in cash it pays; ungranted, it is refused by name.
+    /// @dev Grant seeds: 1 and 5 granted, 0 ungranted. The latch pins that only the lender's wallet paid.
+    function test_Coverage_TheLenderExtendsInCashOnTheGrantAndIsRefusedOtherwise() public {
+        uint256 n = handler.loanIds().length;
+        handler.open(0, 0, 4_000e6);
+        assertEq(handler.loanIds().length, n + 1, "PREMISE: the open landed");
+        uint256 id = handler.loanIds()[n];
+        uint64 expiry = read.loan(id).expiry;
+        uint256 debt = read.loan(id).debt;
+        (uint256 tries, uint256 landed, uint256 byName) = (handler.operatorTries(), handler.operatorLanded(), handler.operatorRefusedByName());
+        (uint256 admitted, uint256 refused) = (handler.modeBothAdmit(1), handler.modeBothRefuse(1));
+        handler.lenderExtend(n, 1);
+        assertEq(handler.operatorLanded(), landed + 1, "the granted lender's cash extension landed");
+        assertGt(read.loan(id).expiry, expiry, "and moved the loan's expiry");
+        assertEq(read.loan(id).debt, debt, "in cash: the debt did not grow");
+        assertEq(handler.modeBothAdmit(1), admitted + 1, "the operator's view admitted it too");
+        expiry = read.loan(id).expiry;
+        handler.lenderExtend(n, 0);
+        assertEq(handler.operatorRefusedByName(), byName + 1, "ungranted, refused NotBorrower");
+        assertEq(handler.modeBothRefuse(1), refused + 1, "at the view and at the verb");
+        assertEq(read.loan(id).expiry, expiry, "the refusal did not move the loan");
+        handler.lenderExtend(n, 5);
+        assertEq(handler.operatorTries(), tries + 3, "PREMISE: all three asks were straddled");
+        assertEq(handler.operatorLanded(), landed + 2, "the second granted cash extension landed too");
+        assertEq(handler.modeBothAdmit(1), admitted + 2, "and its view admitted it");
+        assertGt(read.loan(id).expiry, expiry, "moving the expiry again");
+        assertEq(read.loan(id).debt, debt, "and never the debt");
+        assertEq(handler.operatorCode(), 0, "no operator law broke");
+        assertEq(handler.extendCode(), 0, "the operator's view and verb agreed");
+        _invariant_anExtensionLandsInPlace();
+        _invariant_loanClaimsEqualDebt();
     }
 
     /// @dev DELETED with the rearm policy: `test_Coverage_ARearmIsDrivenAndMovesNoToken`. It armed each lender,
@@ -1236,23 +1305,25 @@ contract AceInvariantsTest is StdInvariant, Test {
 
     // ---- 9. The run report, and the coverage-collapse guard ----
 
-    /// @dev The third-party levers, per cause: judged, landed, rolled-before, FLIPS (must be 0), and stranger-caused DISARMS (KNOWN).
-    function _logBrackets() internal view {
-        string[7] memory causes = ["  crank ", "  drain ", "  atomic", "  fill  ", "  repay ", "  route ", "  record"];
-        console2.log("third-party levers: judged / landed / rolled, then flips / disarms");
-        for (uint256 c = 1; c < 7; c++) {
-            console2.log(causes[c], handler.bracketJudged(c), handler.bracketLanded(c), handler.bracketRolled(c));
-            console2.log(causes[c], "flips / disarms", handler.bracketFlips(c), handler.bracketDisarms(c));
-        }
+    /// @dev The extension paths: the holder's and the lender's straddles and landings, and each policy kind set.
+    function _logExtensions() internal view {
+        console2.log("holder extends: calls / tries / landed", handler.extendCalls(), handler.extendTries(), handler.extendsLanded());
+        console2.log("  straddles both admit / both refuse", handler.extendBothAdmit(), handler.extendBothRefuse());
+        console2.log("  in reach / fallbacks", handler.extendCalls(), handler.extendFallbacks());
+        console2.log("  both admit by caller (holder / lender)", handler.modeBothAdmit(0), handler.modeBothAdmit(1));
+        console2.log("  both refuse by caller (holder / lender)", handler.modeBothRefuse(0), handler.modeBothRefuse(1));
+        console2.log("lender extends: tries / landed / refused by name", handler.operatorTries(), handler.operatorLanded(), handler.operatorRefusedByName());
+        console2.log("policy sets yes / no", handler.policySets(0), handler.policySets(1));
+        console2.log("policy sets gas / none", handler.policySets(2), handler.policySets(3));
     }
 
     /// @dev forge reverts handler state between runs, so each report below covers ONE run's sequence.
     /// @dev And it is checked after EVERY run, not once at the end: a guard here must hold in all of them.
     /// @dev Enough to assert that sequence moved the book, which trips when a swath of paths goes no-op.
     /// @dev The hard guards below are the ones the constructor's BASELINE EXERCISE makes structural.
-    /// @dev Per-verb asserts stay out AT EVERY DEPTH: with 36 selectors, one verb's presence in a run is a lottery.
+    /// @dev Per-verb asserts stay out AT EVERY DEPTH: with 29 selectors, one verb's presence in a run is a lottery.
     /// @dev Depth shortens the odds and never ends them, and this hook must hold in EVERY run, so the odds compound.
-    /// @dev The expiry fold, which the ctor deliberately never lands, is judged as a rate instead: `make reach`.
+    /// @dev The expiry settle, which the ctor deliberately never lands, is judged as a rate instead: `make reach`.
     /// @dev TWO TALLIES ARE PRINTED AND DELIBERATELY NOT ASSERTED, at any depth.
     /// @dev `settlementsFinalized` is a lottery everywhere -- 13 of 30 seeds at depth 256, and WORSE at 128 than 64.
     /// @dev `distressArmed` counts arming CALLS past the trigger gate, not distinct episodes: `crashBelow` does not
@@ -1267,7 +1338,7 @@ contract AceInvariantsTest is StdInvariant, Test {
         /// @dev verbs deleted with the receipt ledger -- and named neither `collect` nor `compound`, the two
         /// @dev that replaced them. `total` was therefore blind to the credit path entirely, and the cold
         /// @dev first run reported "no action at all" while the sequence had in fact driven one.
-        string[36] memory tags = [
+        string[29] memory tags = [
             "transferTitle",
             "deposit",
             "withdraw",
@@ -1289,21 +1360,14 @@ contract AceInvariantsTest is StdInvariant, Test {
             "warp",
             "sweepRevenue",
             "migrate",
-            "armPolicy",
-            "refinanceByPolicy",
-            "refinanceByPolicies",
+            "extend",
+            "setRollPolicy",
             "createMarket",
             "exitTo",
-            "openSmallArmed",
-            "strangerDrain",
-            "strangerAtomicDrain",
             "postOrder",
-            "strangerFill",
-            "strangerRepayPartial",
-            "routeIn",
-            "recordPush",
             "openNearLine",
-            "settleExpired"
+            "lenderExtend",
+            "openSmall"
         ];
         console2.log("=== AceHandler verb hits (LAST sequence only) ===");
         uint256 total;
@@ -1315,9 +1379,8 @@ contract AceInvariantsTest is StdInvariant, Test {
         console2.log("loans opened          ", handler.loansOpened());
         console2.log("opens refused at cap  ", handler.opensRefusedAtCap());
         console2.log("settlements           ", handler.settlements());
-        console2.log("  of which expiry fold", handler.expiryFolds());
+        console2.log("  of which forceClose", handler.forceCloseSettles());
         console2.log("  of which finalize   ", handler.settlementsFinalized());
-        console2.log("expiry rolls (no fold)", handler.expiryRolls());
         console2.log("forceClose owed       ", handler.forceCloseOwed(), handler.forceCloseHonoured());
         console2.log("distress armed        ", handler.distressArmed());
         console2.log("buyInventory units    ", handler.buyInventoryUnits());
@@ -1334,12 +1397,13 @@ contract AceInvariantsTest is StdInvariant, Test {
         console2.log("refinances refused    ", handler.refinancesRefused());
         console2.log("skims measured        ", handler.skimsMeasured());
         console2.log("cranks completed      ", handler.skimSuccesses());
-        console2.log("small armed opened    ", handler.smallArmedOpened());
         console2.log("near-line opened      ", handler.nearLineOpened());
-        console2.log("unpaid settles        ", handler.unpaidSettles(), handler.backstopEarlyRefused());
         console2.log("stranger doors refused", handler.strangerDoorsRefused());
-        console2.log("armed folds judged    ", handler.foldChecks(), handler.foldChecksRolled());
-        _logBrackets();
+        console2.log("crank closes          ", handler.crankCloses());
+        console2.log("floor repays (try/ok) ", handler.floorRepaysTried(), handler.repaysToTheFloor());
+        console2.log("small loans opened    ", handler.smallOpened());
+        console2.log("small cranks / closes ", handler.smallCranked(), handler.smallCloses());
+        _logExtensions();
         console2.log("genesis mid-sequence  ", handler.genesisAttempted());
         console2.log("  of which created    ", handler.genesisCreated());
         console2.log("migrations attempted  ", handler.migrationsAttempted());
@@ -1372,7 +1436,7 @@ contract AceInvariantsTest is StdInvariant, Test {
         );
         assertGt(handler.migrationsDone(), 0, "STRUCTURAL: the ctor M1->M0 baseline migration stopped landing");
         assertGt(handler.migrationsRefused(), 0, "STRUCTURAL: the ctor cross-quote refusal baseline stopped landing");
-        /// @dev CONDITIONAL: this tally is the LAST sequence only, and one selector in 36 may never land in 32 draws.
+        /// @dev CONDITIONAL: this tally is the LAST sequence only, and one selector in 29 may never land in 32 draws.
         /// @dev The per-step invariant leg runs over every sequence regardless; only the IMPLICATION is asserted here.
         /// @dev The equality is a real PROPERTY, not a witness: a refusal means genesis started reading live state.
         if (handler.genesisAttempted() > 0) {
@@ -1385,7 +1449,12 @@ contract AceInvariantsTest is StdInvariant, Test {
         }
         assertTrue(handler.everInventory(), "STRUCTURAL: the ctor baseline settlement stopped minting inventory");
         assertGt(handler.debtMelted(), 0, "STRUCTURAL: the baselineSkim crank stopped melting debt");
+        assertGt(handler.crankCloses(), 0, "STRUCTURAL: the baselineCrankCloses crank stopped closing its dust-bound loan");
         assertGt(handler.refinancesDone(), 0, "STRUCTURAL: the ctor baseline refinance stopped landing");
+        /// @dev THE EXTENSION'S STRUCTURAL GUARD: `baselineExtend` lands two cash extensions in setUp, behind its own `require`s.
+        /// @dev No per-run STOP LINE here: a run may set every lender to a no, and then a refusal is the right answer, not a starved seed.
+        /// @dev The campaign's landings are reported above, and `test_Coverage_*` pins each path landing once, unconditionally.
+        assertGt(handler.extendsLanded(), 0, "STRUCTURAL: the ctor baseline cash extension stopped landing");
         /// @dev THE ASK'S DRAIN GUARD IS GONE, at every depth: a drawn buy may legitimately drain nothing.
         /// @dev Its unconditional pin is `test_Coverage_FillsMoveInventory_ReconNonTrivial`; the history is in
         /// @dev the design record.
@@ -1395,8 +1464,12 @@ contract AceInvariantsTest is StdInvariant, Test {
         if (handler.callCount("collect") > 0) {
             assertGt(handler.claimableChecks(), 0, "VACUOUS: collect ran and its preview differential never measured a leg");
         }
+        /// @dev AN IMPLICATION, never the count: every live-loan repay sized to leave exactly the debt floor lands on it.
+        if (handler.floorRepaysTried() > 0) {
+            assertEq(handler.repaysToTheFloor(), handler.floorRepaysTried(), "FLOOR: a repay leaving exactly the debt floor was refused");
+        }
         /// @dev NO PER-RUN `> 0` ON THE REDIRECTED EXITS, and that is a ruling on odds rather than an omission: one
-        /// @dev selector of 36 split three ways is the lottery this block refuses. REDIRECT's per-step equalities
+        /// @dev selector of 29 split three ways is the lottery this block refuses. REDIRECT's per-step equalities
         /// @dev and `test_Coverage_TheRedirectedExitsPayTheirPayee` carry it; the tally above is the campaign's evidence.
         /// @dev a market CAN end fully drained; the owed pot proves money moved through the book
         /// @dev THE DELIVERED TOTAL IS THE FOURTH TERM, and it had to be added: `owed` is usually ZERO now,
@@ -1406,7 +1479,7 @@ contract AceInvariantsTest is StdInvariant, Test {
         /// @dev money moved through the book, wherever it came to rest.
         uint256 owed = read.poolOwed(mid);
         assertGt(_walkCash() + _sumClaims(mid) + owed + handler.quoteDeliveredEver(), 0, "VACUOUS: the invariants ran over an empty book");
-        /// @dev NO EXPIRY-FOLD ASSERT, AT ANY DEPTH. This hook runs after EVERY run, so `expiryFolds > 0` had to hold
+        /// @dev NO EXPIRY-SETTLE ASSERT, AT ANY DEPTH. This hook runs after EVERY run, so `forceCloseSettles > 0` had to hold
         /// @dev in all of them at once, and a 500-run sweep almost never passed it. Reach is judged as a RATE by
         /// @dev `scripts/invariant-reach-check.sh` (`make reach`, and the pre-deploy sweep). See the design record
         /// @dev, which also keeps what the deleted assert's notes still teach.

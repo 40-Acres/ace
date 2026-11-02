@@ -26,9 +26,11 @@ interface IYbGauge {
 /// @notice ORACLE-class record for YieldBasis collateral: the USD feed of the LT's own asset token, composed with share price.
 /// @notice When the collateral is the staking gauge, the gauge's LT-per-share composes in too.
 /// @notice price = feed x min(pricePerShare, preview_withdraw(1e18)) [x convertToAssets(1e18)], then framed.
+/// @notice The below-twins take pricePerShare in place of the min: a swap that dents the pool lowers the draw cap, never opens settlement or the band.
+/// @dev A deleverage band still sizes and prices its sale off `minPrice`, which a dent lowers; a creator arming one here accepts that.
 /// @dev The deployer must pass the USD feed of the LT's `ASSET_TOKEN`: the record cannot check it, and a BTC/USD feed would silently take the wrapper at par.
 /// @dev It answers in USD and the hub reads it as quote: a USD-pegged quote such as USDC is taken at par, with no quote/USD leg.
-/// @dev The answer is per share off a one-share sample at every size, for the draw cap, distress and settle; a lender covers the size it takes in kind.
+/// @dev Every answer is per share at every size, the min's off a one-share redemption sample; a lender covers the size it takes in kind.
 /// @dev Same posture as OracleRecord: the feed is the truth, no persistence layer, windows inert.
 /// @dev A reverting leg, an unfit round, or a zero or absurd word answers CLOSED (0/false).
 /// @dev A return too short to decode reverts the read: the hub's strict reads refuse it as `RecordUnreadable`, its try reads answer not-ok.
@@ -95,7 +97,8 @@ contract YbRecord is IPersistenceRecord {
     }
 
     /// @dev The composed read: every leg checked, and a reverting, unfit or absurd one answers 0.
-    function _price() internal view returns (uint256) {
+    /// @param realizable True takes the lower of the two rates; false takes the accounting rate, the redemption leg still read and checked.
+    function _price(bool realizable) internal view returns (uint256) {
         (uint256 usd,) = ChainlinkDataFeed.latest(FEED, MAX_STALENESS);
         if (usd == 0) return 0;
         uint256 pps;
@@ -105,18 +108,18 @@ contract YbRecord is IPersistenceRecord {
         } catch {
             return 0;
         }
-        /// @dev The LOWER of the two rates YieldBasis publishes, because they are not the same number.
+        /// @dev A realizable read takes the LOWER of the two rates YieldBasis publishes, because they are not the same number.
         /// @dev `pricePerShare` is accounting; a redeemer gets an imbalanced Curve exit, which pays less.
         /// @dev Their own docs name the gap the "Temporary Redemption Discount", and `preview_withdraw` quotes it.
-        /// @dev Nonreentrant upstream where `pricePerShare` is not: a locked read reverts into the catch.
-        /// @dev So a read mid-YieldBasis-operation closes the record instead of answering off accounting.
-        /// @dev `pricePerShare` is 18-dec whatever the underlying is; this leg is UNDERLYING-NATIVE.
-        /// @dev Rescaling it up is what makes the two comparable; skip it and the min is off by 1e10 on BTC.
+        /// @dev `preview_withdraw` reads live pool balances, so one swap moves it: the below-twins never take it.
+        /// @dev Nonreentrant upstream where `pricePerShare` is not: a locked read reverts into the catch and closes every answer.
+        /// @dev The below-twins still call and check it, so a read mid-operation closes them rather than answering off accounting.
+        /// @dev This leg is UNDERLYING-NATIVE where `pricePerShare` is 18-dec: skip the rescale and the min is off by 1e10 on BTC.
         try IYbLt(LT).preview_withdraw(1e18) returns (uint256 w) {
             if (w == 0) return 0;
             (bool fits, uint256 scaled) = Math.tryMul(w, WITHDRAW_SCALE);
             if (!fits) return 0; // absurd answer: closed, not a panic
-            pps = Math.min(pps, scaled);
+            if (realizable) pps = Math.min(pps, scaled);
         } catch {
             return 0;
         }
@@ -146,9 +149,9 @@ contract YbRecord is IPersistenceRecord {
         return _below(x);
     }
 
-    /// @dev The one below-test both twins answer with, so neither can drift from the other.
+    /// @dev The one below-test both twins answer with, so neither can drift from the other; it prices off the accounting rate.
     function _below(uint256 x) internal view returns (bool) {
-        uint256 p = _price();
+        uint256 p = _price(false);
         return p != 0 && p < x;
     }
 
@@ -156,18 +159,18 @@ contract YbRecord is IPersistenceRecord {
     /// @dev NOT an interface member -- no hub verb asks the recovery question, only a view does.
     function persistedAbove(address quote, address collateral, uint256 x) external view returns (bool) {
         _requirePair(quote, collateral);
-        return _price() > x; // 0 answers false
+        return _price(true) > x; // 0 answers false
     }
 
     /// @notice The current composed value, 0 when any leg is unfit to referee.
     function lastObserved(address quote, address collateral) external view returns (uint256) {
         _requirePair(quote, collateral);
-        return _price();
+        return _price(true);
     }
 
     /// @notice The windowed minimum IS the current value -- there is no window in this class.
     function minPrice(address quote, address collateral) external view returns (uint256) {
         _requirePair(quote, collateral);
-        return _price();
+        return _price(true);
     }
 }

@@ -14,7 +14,7 @@ import {RunwayHook} from "../../src/entities/launch/RunwayHook.sol";
 /// @notice The Runway hook at any address, its slot roll, its swap callback and its stored windows exposed so a row can drive them directly.
 /// @dev Its deployer is FACTORY, as the shipped hook's is; it adds no storage, so its layout is the hook's.
 contract RunwayHookHarness is RunwayHook {
-    constructor(IPoolManager poolManager_, address authorized_) RunwayHook(poolManager_, authorized_) {}
+    constructor(IPoolManager poolManager_, address strategy_) RunwayHook(poolManager_, strategy_) {}
 
     /// @dev Any address: BaseHook leaves this virtual so a test can deploy a hook off its permission bits.
     function validateHookAddress(BaseHook) internal pure override {}

@@ -70,10 +70,10 @@ contract AceGenesisParamFuzzTest is WarpClock {
     }
 
     /// @dev The lender ticket, re-spelled rather than imported: this is the brick predicate's own oracle.
-    /// @dev IT WAS `minDebt` DIVIDED ACROSS the funded ticks, because a draw could reach `minDebt` from many
+    /// @dev IT WAS `minPrincipal` DIVIDED ACROSS the funded ticks, because a draw could reach `minPrincipal` from many
     /// @dev lots. A market has one price, so the smallest lot that can carry the floor IS the floor.
-    function _minLot(uint256 minDebt) internal pure returns (uint256) {
-        return minDebt;
+    function _minLot(uint256 minPrincipal) internal pure returns (uint256) {
+        return minPrincipal;
     }
 
     /// @dev The whole config from one seed. The SEAMS are pinned; this issue is about the scalars.
@@ -112,11 +112,11 @@ contract AceGenesisParamFuzzTest is WarpClock {
         return cap > Constants.MAX_FEE_SHARE_BPS ? Constants.MAX_FEE_SHARE_BPS : cap;
     }
 
-    /// @dev The ladder floors and the coverage multiple; `minDebt` is sampled by EXPONENT, into the brick region.
+    /// @dev The ladder floors and the coverage multiple; `minPrincipal` is sampled by EXPONENT, into the brick region.
     function _drawLadder(MarketParams memory p, uint256 seed) private pure {
         p.minCoverageWad = _pick(seed, 10, 1e18, Constants.MAX_COVERAGE_WAD + 1e18);
         uint256 e = _pick(seed, 12, 0, 48);
-        p.minDebt = e == 0 ? 0 : 10 ** e + _pick(seed, 13, 0, 9);
+        p.minPrincipal = e == 0 ? 0 : 10 ** e + _pick(seed, 13, 0, 9);
         p.settleBountyBps = _pick(seed, 14, 0, Constants.MAX_SETTLE_BOUNTY_BPS + 2);
     }
 
@@ -149,7 +149,7 @@ contract AceGenesisParamFuzzTest is WarpClock {
 
     /// @notice Every config `createMarket` REJECTS is rejected by a reason string, never by an arithmetic panic.
     /// @notice An underflow, a division by zero or a bare revert deeper in the call is a rail defect, not a refusal.
-    /// @dev The `minDebt` sampler reaches 1e48 here, so the brick region is INSIDE this sweep rather than beside it.
+    /// @dev The `minPrincipal` sampler reaches 1e48 here, so the brick region is INSIDE this sweep rather than beside it.
     /// @dev `Error(string)` is 0x08c379a0 and `Panic(uint256)` is 0x4e487b71; a bare `revert()` returns nothing.
     function testFuzz_Genesis_EveryRefusalIsNamed(uint256 seed) public {
         MarketParams memory p = _draw(seed);
@@ -184,8 +184,8 @@ contract AceGenesisParamFuzzTest is WarpClock {
             vm.toString(uint256(p.minTenor)),
             "..",
             vm.toString(uint256(p.maxTenor)),
-            " minDebt=",
-            vm.toString(p.minDebt),
+            " minPrincipal=",
+            vm.toString(p.minPrincipal),
             " eps=",
             vm.toString(p.deleverageFloorEpsBps)
         );
@@ -317,7 +317,7 @@ contract AceGenesisParamFuzzTest is WarpClock {
     /// @notice The coverage gate and the five-pot solvency identity are asserted at every step of that life.
     /// @notice The payout is asserted NON-ZERO at the smallest principal the market admits, which is assertion 5.
     /// @dev The one region skipped is the one this driver cannot fund, not one the rails leave open.
-    /// @dev It funds from ONE tick, so a `minDebt` past the tick cash cap needs the 32-lot walk instead.
+    /// @dev It funds from ONE tick, so a `minPrincipal` past the tick cash cap needs the 32-lot walk instead.
     /// @dev That walk is driven at its own extreme by `AceGenesisRailGaps`, so the region is covered elsewhere.
     function testFuzz_Genesis_AnAcceptedMarketIsOperable(uint256 seed) public {
         MarketParams memory p = _draw(seed);
@@ -328,15 +328,15 @@ contract AceGenesisParamFuzzTest is WarpClock {
     }
 
     /// @dev The upper bound is the SINGLE-TICK deposit this driver makes; the lower one is now dead weight.
-    /// @dev `min debt under fee` refuses everything under two wei at genesis, so no accept can reach it.
+    /// @dev `debt floor zero` refuses everything under two wei at genesis, so no accept can reach it.
     /// @dev Kept anyway: it costs nothing and it is the assertion that catches that rail silently loosening.
     function _drivable(MarketParams memory p) private pure returns (bool) {
-        return p.minDebt >= 2 && p.minDebt <= DRIVABLE_MAX_DEBT;
+        return p.minPrincipal >= 2 && p.minPrincipal <= DRIVABLE_MAX_DEBT;
     }
 
     /// @dev Deposit, draw at the smallest legal principal, repay it whole, then draw again and settle at tenor.
     function _operate(bytes32 id, MarketParams memory p) private {
-        uint256 principal = p.minDebt;
+        uint256 principal = p.minPrincipal;
         _seedLadder(id, p, principal);
         uint256 a = _open(id, p, principal);
         _assertSolvency(id);
@@ -354,7 +354,7 @@ contract AceGenesisParamFuzzTest is WarpClock {
 
     /// @dev Two loans' worth of cash in the market, never under the derived ticket.
     function _seedLadder(bytes32 id, MarketParams memory p, uint256 principal) private {
-        uint256 lot = _minLot(p.minDebt);
+        uint256 lot = _minLot(p.minPrincipal);
         uint256 dep = 2 * principal + 1;
         if (dep < lot) dep = lot;
         usdc.mint(lender, dep);
@@ -421,7 +421,7 @@ contract AceGenesisParamFuzzTest is WarpClock {
         p.baseBps = 40;
         p.minTenor = 7 days;
         p.maxTenor = 7 days;
-        p.minDebt = 1e6;
+        p.minPrincipal = 1e6;
         p.settleBountyBps = 50;
     }
 
@@ -466,7 +466,7 @@ contract AceGenesisParamFuzzTest is WarpClock {
         assertTrue(ace.createMarket(p) != bytes32(0), "control: the probe record admits while it writes nothing");
 
         probe.setArmed(true);
-        p.minDebt = 2e6; // a fresh preimage, so MarketExists cannot be what refuses the armed run
+        p.minPrincipal = 2e6; // a fresh preimage, so MarketExists cannot be what refuses the armed run
         vm.expectRevert();
         ace.createMarket(p);
     }

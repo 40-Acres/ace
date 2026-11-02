@@ -6,7 +6,6 @@ import {PersistenceRecord} from "../utils/PersistenceRecord.sol";
 import {PocDeployConfig} from "../../src/config/Defaults.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
-import {TriggerAboveFloor} from "../../src/ace/hub/Borrower.sol";
 import {NotSettleable} from "../../src/ace/hub/Settlement.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
@@ -14,7 +13,7 @@ import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
 
 /// @title AceWindowedRecordOneLowPrint
-/// @notice The hub against a REAL windowed record when ONE full-volume bucket prints low: finalize, roll refusal, fold flip.
+/// @notice The hub against a REAL windowed record when ONE full-volume bucket prints low: what `finalize` makes of it.
 /// @notice The hub admits any windowed record.
 /// @dev The test contract is the record's writer, so each bucket is one `observe` rather than a swap.
 /// @dev Shipped truncation cap and windows; no depth feed, so the volume floor is the whole full-cap denominator.
@@ -73,6 +72,7 @@ contract AceWindowedRecordOneLowPrintTest is WarpClock {
         p.settleBountyBps = 50;
         AceFixtures.Deployment memory d = AceFixtures.deploy(p);
         (ace, pm, read, mid) = (d.ace, d.positionManager, d.read, d.id);
+        AceFixtures.installYesPolicy(ace, alice);
         quote.mint(alice, 3 * D);
         vm.startPrank(alice);
         quote.approve(address(ace), type(uint256).max);
@@ -102,21 +102,12 @@ contract AceWindowedRecordOneLowPrintTest is WarpClock {
         return record.minPrice(address(quote), address(unitTok));
     }
 
-    function _open(bool armed) internal returns (uint256 loanId) {
+    function _open() internal returns (uint256 loanId) {
         unitTok.mint(bob, U);
         vm.startPrank(bob);
         unitTok.approve(address(pm), U);
         loanId = ace.open(mid, U, D, 7 days, bob, OpenBounds(0, 0, 0));
-        if (armed) ace.setAutoRefinance(loanId, 7 days, 0, 0);
         vm.stopPrank();
-    }
-
-    /// @dev Silence for the term, then an honest ring re-warmed across expiry, so the fold reads a live record.
-    function _warmAcrossExpiry(uint256 loanId) internal {
-        uint256 expiry = read.loan(loanId).expiry;
-        _warpTo(expiry - PocDeployConfig.PERSISTENCE_WINDOW - 600);
-        _warm((PocDeployConfig.PERSISTENCE_WINDOW + 600) / INTERVAL + 1);
-        assertGe(_now(), expiry, "fixture: the ring is warm and the loan has expired");
     }
 
     /// @notice PREMISE: the low bucket prints exactly the cap's 5% step, and honest flow lifts it barely at all.
@@ -134,7 +125,7 @@ contract AceWindowedRecordOneLowPrintTest is WarpClock {
     /// @notice CONTROL: the loan opens healthy at 96% of par, and an honest ring never makes it finalizable.
     function test_Control_AnHonestRingNeverFinalizesTheHealthyLoan() public {
         _warm(40);
-        uint256 loanId = _open(false);
+        uint256 loanId = _open();
         assertApproxEqRel(read.triggerPrice(loanId), (P0 * 96) / 100, 1e12, "fixture: trigger at 96% of par");
         _warm((PocDeployConfig.PERSISTENCE_WINDOW + PocDeployConfig.PENDING_WINDOW) / INTERVAL + 2);
         vm.prank(stranger);
@@ -146,7 +137,7 @@ contract AceWindowedRecordOneLowPrintTest is WarpClock {
     /// @dev The record's below-ness is real -- every bucket since sits under the trigger -- though every input after one sat at par.
     function test_OneLowBucketMakesAHealthyLoanFinalizable() public {
         _warm(40);
-        uint256 loanId = _open(false);
+        uint256 loanId = _open();
         uint256 trig = read.triggerPrice(loanId);
         _lowBucket();
         vm.prank(stranger);
@@ -160,60 +151,5 @@ contract AceWindowedRecordOneLowPrintTest is WarpClock {
         assertGt(read.unitsOwedOf(loanId, stranger), 0, "and the stranger who printed it is credited the sliver");
     }
 
-    /// @notice CONTROL: on an honest ring the armed loan rolls at expiry.
-    function test_Control_AnHonestRingRollsTheArmedLoan() public {
-        _warm(40);
-        uint256 loanId = _open(true);
-        _warmAcrossExpiry(loanId);
-        (bool ok,,) = ace.tryContinue(loanId);
-        assertTrue(ok, "the fold admits the roll");
-        uint256 before = read.loanCount();
-        ace.forceClose(loanId);
-        assertTrue(ace.isClosed(loanId), "the parent closed");
-        assertEq(read.loanCount(), before + 1, "and a successor opened");
-    }
-
-    /// @notice ONE LOW BUCKET at expiry refuses the roll on the record leg, while the record calls the successor undistressed.
-    function test_OneLowBucketRefusesTheRollTheRecordCallsHealthy() public {
-        _warm(40);
-        uint256 loanId = _open(true);
-        _warmAcrossExpiry(loanId);
-        _lowBucket();
-        assertEq(_minPrice(), LOW, "the windowed minimum is the one low bucket");
-        (bool ok, bytes4 reason,) = ace.tryContinue(loanId);
-        assertFalse(ok, "the roll is refused");
-        assertEq(reason, TriggerAboveFloor.selector, "on the record leg: the successor's trigger clears min(price, record)");
-        uint256 over = (read.triggerPrice(loanId) * 102) / 100; // above the successor's trigger
-        assertFalse(record.persistedBelowDistress(address(quote), address(unitTok), over), "while the record calls the successor undistressed");
-    }
-
-    /// @notice KNOWN, accepted: one low bucket flips an armed fold to a settlement, with no successor written.
-    /// @dev The home roll's record leg is a one-read test; the fix belongs to the record, not the hub.
-    function test_Known_OneLowBucketFlipsAnArmedFold() public {
-        _warm(40);
-        uint256 loanId = _open(true);
-        _warmAcrossExpiry(loanId);
-        _lowBucket();
-        uint256 before = read.loanCount();
-        vm.prank(stranger);
-        ace.forceClose(loanId);
-        assertTrue(ace.isClosed(loanId), "the fold ended the loan");
-        assertEq(read.loanCount(), before, "and wrote no successor: the one-read record leg settled it");
-    }
-
-    /// @notice KNOWN: the refusal OUTLIVES the low bucket's window, because sub-reference honest flow cannot lift the head.
-    /// @dev The bucket itself has aged out; what refuses now is the truncated climb back, every step of it under the trigger.
-    function test_Known_TheRefusalOutlivesTheLowBucketsWindow() public {
-        _warm(40);
-        uint256 loanId = _open(true);
-        _warmAcrossExpiry(loanId);
-        _lowBucket();
-        _warm(PocDeployConfig.PERSISTENCE_WINDOW / INTERVAL + 2);
-        uint256 last = record.lastObserved(address(quote), address(unitTok));
-        assertLt(last, (P0 * 9600) / 10000, "PREMISE: the record's head is still low");
-        assertGt(_minPrice(), LOW, "and the windowed minimum is the recovering head, not under it");
-        (bool ok, bytes4 reason,) = ace.tryContinue(loanId);
-        assertFalse(ok, "the slow climb back still sits under the successor's trigger, so the roll stays refused");
-        assertEq(reason, TriggerAboveFloor.selector, "for the same reason");
-    }
+    // the four fold rows went with the fold: `forceClose` now settles at expiry whatever the record prints
 }

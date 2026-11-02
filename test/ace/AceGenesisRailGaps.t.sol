@@ -65,17 +65,17 @@ contract AceGenesisRailGapsTest is WarpClock {
         p.baseBps = 40;
         p.minTenor = 7 days;
         p.maxTenor = 7 days;
-        p.minDebt = 1e6;
+        p.minPrincipal = 1e6;
         p.settleBountyBps = 50;
         /// @dev Sole tenancy: genesis refuses a zero lender, and every row here means to trip a DIFFERENT rail.
         p.lender = lender; // the rig deposits as this address, so the market has to name it
         p.price = PriceFrame.priceAt(address(usdc), address(coll), 0); // and a zero PRICE is refused for the same reason
     }
 
-    /// @dev The lender ticket, re-spelled. WAS `ceil(minDebt / maxClaimTicks)`, since a draw could reach the
-    /// @dev floor from many lots; one bucket means the smallest bookable deposit IS `minDebt`.
-    function _minLot(uint256 minDebt) internal pure returns (uint256) {
-        return minDebt;
+    /// @dev The lender ticket, re-spelled. WAS `ceil(minPrincipal / maxClaimTicks)`, since a draw could reach the
+    /// @dev floor from many lots; one bucket means the smallest bookable deposit IS `minPrincipal`.
+    function _minLot(uint256 minPrincipal) internal pure returns (uint256) {
+        return minPrincipal;
     }
 
     function _reject(MarketParams memory p, string memory reason) internal {
@@ -83,32 +83,32 @@ contract AceGenesisRailGapsTest is WarpClock {
         ace.createMarket(p);
     }
 
-    /* ============ GAP 1: `minDebt` against the market's uint128 cash cap ============ */
+    /* ============ GAP 1: `minPrincipal` against the market's uint128 cash cap ============ */
 
     /// @notice A market whose smallest legal deposit beats the cash cap is REFUSED at genesis.
-    /// @notice `deposit` refuses anything under `minDebt` and `creditCash` anything over the cap.
+    /// @notice `deposit` refuses anything under `minPrincipal` and `creditCash` anything over the cap.
     /// @notice The two ends were railed separately and their RELATION was not, so both refused every amount.
     /// @dev BEFORE THE RAIL: this exact config CREATED, passed every rail, and admitted no deposit ever.
-    /// @dev A deposit at the floor reverted `CashCapped`; anything the cap allowed reverted `BelowMinDebt`.
-    /// @dev THE QUESTION IS UNCHANGED and the arithmetic is simpler: the rail once divided `minDebt` by the
-    /// @dev claim cap to get a per-tick ticket, and with one bucket the floor IS `minDebt`, compared directly.
+    /// @dev A deposit at the floor reverted `CashCapped`; anything the cap allowed reverted `BelowMinPrincipal`.
+    /// @dev THE QUESTION IS UNCHANGED and the arithmetic is simpler: the rail once divided `minPrincipal` by the
+    /// @dev claim cap to get a per-tick ticket, and with one bucket the floor IS `minPrincipal`, compared directly.
     function test_Rail_AFloorOverTheCashCapIsRefused() public {
         MarketParams memory p = _base();
-        p.minDebt = U128 + 1; // one wei past the cap
-        assertGt(_minLot(p.minDebt), U128, "fixture: the floor really does sit past the cap");
-        _reject(p, "min debt over cash cap");
+        p.minPrincipal = U128 + 1; // one wei past the cap
+        assertGt(_minLot(p.minPrincipal), U128, "fixture: the floor really does sit past the cap");
+        _reject(p, "min principal over cash cap");
 
         p = _base();
-        p.minDebt = 32 * (U128 + 1); // far past it, so the rail is not an artefact of the boundary
-        _reject(p, "min debt over cash cap");
+        p.minPrincipal = 32 * (U128 + 1); // far past it, so the rail is not an artefact of the boundary
+        _reject(p, "min principal over cash cap");
     }
 
     /// @notice CONTROL: the floor AT the cap exactly is admitted, and the deposit that size really lands.
     /// @dev So the row above is measuring the relation between the two rails and never the fixture.
     function test_Control_TheFloorAtTheCapExactlyIsAdmittedAndDeposits() public {
         MarketParams memory p = _base();
-        p.minDebt = U128;
-        assertEq(_minLot(p.minDebt), U128, "fixture: the floor is the cap exactly");
+        p.minPrincipal = U128;
+        assertEq(_minLot(p.minPrincipal), U128, "fixture: the floor is the cap exactly");
         bytes32 id = ace.createMarket(p);
 
         usdc.mint(lender, U128);
@@ -126,22 +126,22 @@ contract AceGenesisRailGapsTest is WarpClock {
     /// @dev bucket at the cap is the same extreme with nothing to fragment, and it settles covered at tenor.
     function test_Rail_TheLargestAdmittedFloorStillFundsOneMinimumLoan() public {
         MarketParams memory p = _base();
-        p.minDebt = U128;
+        p.minPrincipal = U128;
         bytes32 id = ace.createMarket(p);
 
-        usdc.mint(lender, p.minDebt);
+        usdc.mint(lender, p.minPrincipal);
         vm.startPrank(lender);
-        usdc.approve(address(ace), p.minDebt);
-        ace.deposit(id, p.minDebt);
+        usdc.approve(address(ace), p.minPrincipal);
+        ace.deposit(id, p.minPrincipal);
         vm.stopPrank();
 
         /// @dev The coverage line at the market's price, which IS the floor the loan comes to rest on,
         /// @dev plus a whole token of slack so the row is not a boundary test of the line itself.
-        uint256 units = FullMath.mulDivRoundingUp(p.minCoverageWad * p.minDebt, read.marketState(id).unitScale, T0 * 1e18) + 1e18;
+        uint256 units = FullMath.mulDivRoundingUp(p.minCoverageWad * p.minPrincipal, read.marketState(id).unitScale, T0 * 1e18) + 1e18;
         coll.mint(borrower, units);
         vm.startPrank(borrower);
         coll.approve(address(positionManager), units);
-        uint256 loanId = ace.open(id, units, p.minDebt, p.minTenor, borrower, OpenBounds(0, 0, 0));
+        uint256 loanId = ace.open(id, units, p.minPrincipal, p.minTenor, borrower, OpenBounds(0, 0, 0));
         vm.stopPrank();
         assertEq(read.claimCount(id, loanId), 1, "the draw holds one claim: there is no fragmentation left to maximise");
 
@@ -152,28 +152,29 @@ contract AceGenesisRailGapsTest is WarpClock {
         assertEq(_badDebt(), 0, "and the loan at the largest admitted floor settles covered");
     }
 
-    /* ============ GAP 2: `minDebt` against the origination fee's own rounding ============ */
+    /* ============ GAP 2: `minPrincipal` against the origination fee's own rounding ============ */
 
     /// @notice A market whose smallest admitted draw would pay the borrower NOTHING is refused at genesis.
     /// @notice The #277 rail bounds the fee's SHARE at a quarter of the draw; a share cannot bound one wei.
     /// @notice `ceil(1 * n / d)` is 1 at every rate the share rail admits, so the whole draw became fee.
-    /// @dev BEFORE THE RAIL: `minDebt == 1` was admitted, and `previewOpen(principal = 1)` reported payout 0.
+    /// @dev BEFORE THE RAIL: `minPrincipal == 1` was admitted, and `previewOpen(principal = 1)` reported payout 0.
     /// @dev The floor rate and the steepest the share rail admits are both refused, so this is not an artefact of one rate.
-    function test_Rail_AMinDebtTheFeeWouldEatIsRefused() public {
+    /// @dev `debt floor zero` now refuses 1 first (its half is zero); the fee rail behind it reaches the same bound.
+    function test_Rail_AMinPrincipalTheFeeWouldEatIsRefused() public {
         MarketParams memory p = _base();
-        p.minDebt = 1;
+        p.minPrincipal = 1;
         p.baseBps = Constants.MIN_BASE_BPS; // the cheapest legal rate, so nothing here is an extreme fee
-        _reject(p, "min debt under fee");
+        _reject(p, "debt floor zero");
 
         p = _base();
-        p.minDebt = 1;
+        p.minPrincipal = 1;
         p.baseBps = _shareRailedBaseBps(p.minTenor, p.maxTenor); // the top of the band is the SHARE rail's now, not a band of its own
-        _reject(p, "min debt under fee");
+        _reject(p, "debt floor zero");
     }
 
     /// @notice The boundary is exactly one wei wide, at EVERY rate and term the share rail admits.
-    /// @notice `minDebt == 1` always refuses and `minDebt == 2` always creates, which is what makes it a rail.
-    /// @dev Derived, not measured: `ceil(P r) < P` with `r <= 1/4` fails only at `P == 1`, so `2` is the floor.
+    /// @notice `minPrincipal == 1` always refuses and `minPrincipal == 2` always creates, which is what makes it a rail.
+    /// @dev Derived, not measured: `ceil(P r) < P` with `r <= 1/4` fails only at `P == 1`, and a positive half needs `P >= 2`.
     /// @dev The rate is drawn UNDER the share rail, or the earlier `fee bps too high` would be what refuses.
     function testFuzz_Rail_OneWeiIsRefusedAndTwoIsAdmittedAtEveryAdmissibleRate(uint256 a, uint256 b, uint256 c) public {
         MarketParams memory p = _base();
@@ -181,10 +182,10 @@ contract AceGenesisRailGapsTest is WarpClock {
         p.maxTenor = p.minTenor * uint64(bound(b, 1, 8));
         p.baseBps = bound(c, Constants.MIN_BASE_BPS, _shareRailedBaseBps(p.minTenor, p.maxTenor));
 
-        p.minDebt = 1;
-        _reject(p, "min debt under fee");
+        p.minPrincipal = 1;
+        _reject(p, "debt floor zero");
 
-        p.minDebt = 2;
+        p.minPrincipal = 2;
         assertTrue(ace.createMarket(p) != bytes32(0), "and two wei is admitted at the same rate, so the floor is exactly two");
     }
 
@@ -197,17 +198,17 @@ contract AceGenesisRailGapsTest is WarpClock {
     }
 
     /// @notice CONTROL: the smallest market the rail admits pays its smallest draw something, which is the point.
-    /// @dev REPLACES `test_Control_TwoWeiPaysOut`, which quoted a two-wei draw on a `minDebt == 1` market.
+    /// @dev REPLACES `test_Control_TwoWeiPaysOut`, which quoted a two-wei draw on a `minPrincipal == 1` market.
     /// @dev That market is now illegal outright, so its premise died with the behaviour the rail removed.
     /// @dev This asserts the same arithmetic on the smallest market that still exists, which is the live claim.
     function test_Control_TheSmallestAdmittedMarketPaysItsSmallestDrawSomething() public {
         MarketParams memory p = _base();
-        p.minDebt = 2;
+        p.minPrincipal = 2;
         p.baseBps = Constants.MIN_BASE_BPS;
         bytes32 id = ace.createMarket(p);
         _deposit(id, 1_000e6);
 
-        Borrower.Quote memory q = ace.previewOpen(id, 1e18, p.minDebt, p.minTenor, borrower, OpenBounds(0, 0, 0));
+        Borrower.Quote memory q = ace.previewOpen(id, 1e18, p.minPrincipal, p.minTenor, borrower, OpenBounds(0, 0, 0));
         assertEq(q.fee, 1, "the ceil still takes a whole wei as fee at the market minimum");
         assertGt(q.payout, 0, "but the draw the market admits now leaves the borrower something");
     }
@@ -230,7 +231,7 @@ contract AceGenesisRailGapsTest is WarpClock {
     }
 
     /// @dev A market whose quote carries ZERO decimals, so `collateralDecimals` alone IS the gap under test.
-    /// @dev `minDebt` sits above the fee floor, or the earlier `min debt under fee` rail is what would refuse.
+    /// @dev `minPrincipal` sits above the fee floor, or the earlier `min principal under fee` rail is what would refuse.
     function _gapParams(uint8 collDecimals) private returns (MarketParams memory p) {
         MockERC20 q = new MockERC20("Quote0", "Q0", 0);
         MockERC20 c = new MockERC20("Coll", "C", collDecimals);
@@ -245,7 +246,7 @@ contract AceGenesisRailGapsTest is WarpClock {
         p.price = PriceFrame.priceAtStep(TOP_TICK);
         p.record = address(gapRecord);
         p.minCoverageWad = Constants.MIN_COVERAGE_WAD;
-        p.minDebt = 1000;
+        p.minPrincipal = 1000;
         p.settleBountyBps = Constants.MAX_SETTLE_BOUNTY_BPS; // the sliver's second factor, at its own rail
     }
 

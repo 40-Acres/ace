@@ -29,7 +29,7 @@ library LaunchMarketParams {
         address lender; // sole tenancy: the one address whose cash rests here
         uint256 price; // the lender's bid, raw Q96 quote atoms per token atom
         uint256 baseBps; // the lender's rate per MIN_TENOR
-        uint256 minDebt; // the smallest ticket, in the quote's own atoms
+        uint256 minPrincipal; // the smallest ticket, in the quote's own atoms
         uint256 minCoverageWad; // WAD; caps a ticket at 1/k of the bid, and a default forfeits that whole line
     }
 
@@ -50,7 +50,7 @@ library LaunchMarketParams {
         p.baseBps = c.baseBps;
         p.minTenor = MIN_TENOR;
         p.maxTenor = MAX_TENOR;
-        p.minDebt = c.minDebt;
+        p.minPrincipal = c.minPrincipal;
         p.deleverageFloorEpsBps = 0;
         p.deleverageBandBps = 0; // bullet: nothing may be sold against a live loan
         p.deleverageTargetBps = 0;
@@ -83,7 +83,7 @@ abstract contract LaunchFixture is WarpClock {
     uint256 internal T0; // the fixture's anchor time
     uint256 internal constant ALLOC = 10_000e18; // alice's buyer allocation, landed in the account
     uint256 internal constant CASH = 1_000_000e6; // alt's resting cash
-    uint256 internal constant MIN_DEBT = 10e6;
+    uint256 internal constant MIN_PRINCIPAL = 10e6;
     uint256 internal constant COVERAGE = 1.4e18;
     uint256 internal constant BASE_BPS = 40;
     uint256 internal constant TEAM_CLIFF = 1; // schedule id: one tranche at T0 + 90 days, its cliff and duration both 89 days from the start
@@ -143,7 +143,7 @@ abstract contract LaunchFixture is WarpClock {
             lender: lender,
             price: AceFixtures.px(0.1e18, quote, address(token)),
             baseBps: BASE_BPS,
-            minDebt: MIN_DEBT,
+            minPrincipal: MIN_PRINCIPAL,
             minCoverageWad: COVERAGE
         });
     }

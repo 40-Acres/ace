@@ -20,37 +20,33 @@ struct MarketParams {
     /// @notice The ONE address that may borrow here. ZERO IS PERMISSIONLESS, which is the default.
     /// @dev NEW CREDIT ONLY: a settlement never asks, so no borrower rule can strand a matured loan.
     /// @dev AN ADDRESS, NEVER A CONTRACT TO INTERVIEW: a comparison cannot revert, run out of gas or answer a different width.
-    /// @dev That totality is load-bearing: the expiry fold settles on any refusal, so a rule that could fail would end rolls by accident.
     /// @dev THE COST: a market open to SEVERAL named borrowers is not expressible.
-    /// @dev The rule reads the title's CURRENT holder, so here any title move disarms a live armed loan and only the named holder arms.
+    /// @dev The rule reads the title's CURRENT holder, so here a loan whose title moved to anyone else cannot be extended.
     address borrower;
     /// @notice THE market's one price: quote atoms per collateral atom, raw Q96, write-once.
     /// @notice A curator's whole offer is this much, at this price, take it or leave it.
     /// @dev IT IS THE LENDER'S BID, not an oracle read and not a rate: what the lender values collateral at.
-    /// @dev The record caps what a draw may fund at, bar a home policy roll or a zero-fresh home re-term, which it judges for admissibility instead.
+    /// @dev The record caps what a draw may fund at, bar a zero-fresh re-term, which it judges for admissibility instead, as it judges an extension.
     /// @dev ALWAYS LIVE, unlike a loan's funding floor, which is zero once its claim retires.
     /// @dev Q96 RAW rather than a human WAD, so it shares one frame with the record and the venue; nothing converts at a boundary.
     /// @dev Name it through the helper; never write the literal.
     /// @dev RECORDLESS, it is bounded only by `(0, MAX_PRICE]` and the openable-ticket rail: one far over the collateral lends against atoms.
-    /// @dev No price or units rail can refuse that without refusing a real 0-decimal item worth more than `minDebt` a unit.
+    /// @dev No price or units rail can refuse that without refusing a real 0-decimal item worth more than `minPrincipal` a unit.
     uint256 price;
     uint256 fillFeeBps;
     // loan terms
     uint256 minCoverageWad; // WAD; scales debt into the trigger, so it also caps a draw at 1/k of its funding floor
     uint256 baseBps; // the LENDER's rate per minTenor; the borrower's all-in adds ACE's share on top
     uint64 minTenor;
-    /// @notice The longest term this market writes, and the whole of its maturity consent.
+    /// @notice The longest term this market writes; an extension runs a loan's own tenor from now, so never past it.
     /// @dev NO SEPARATE per-deposit horizon: on a write-once struct a second field could only advertise unfunded terms or never bind.
-    /// @dev The draw checks the term against this, and nothing checks it at a deposit.
+    /// @dev The draw checks the term against this, and an extension keeps the term drawn; nothing checks it at a deposit.
     uint64 maxTenor;
-    /// @notice An ADMISSION quantum, and it floors BOTH doors: what a draw issues and what a deposit rests.
-    /// @notice It also floors what a `deleverage` crank or a third party's repay may leave on a live loan; only its borrower may go under it.
-    /// @dev IT FLOORS UNRESERVED CASH AT BOTH LENDER DOORS, so neither opens a sub-floor band a fresh draw could not consume.
-    /// @dev Reserved cash is an armed roll's to draw: a deposit refilling it, or a withdraw leaving only it, goes under the floor.
-    /// @dev A DRAW CAN, AND THAT IS ACCEPTED: it subtracts its principal with no remainder test.
-    /// @dev Nothing is trapped in that band -- floor-or-zero always permits emptying, so a withdraw clears it.
-    /// @dev The cost is a READER's: nonzero resting cash may be depth no minimum ticket can consume.
-    uint256 minDebt;
+    /// @notice The smallest loan this market opens, and the smallest lot either lender door rests or leaves.
+    /// @notice A live loan never carries less than HALF of it (`LoanMath.debtFloor`): a repay pays it off or leaves that much.
+    /// @notice A crank whose restore would leave less closes the loan; an extension never moves the debt.
+    /// @dev A DRAW subtracts its principal with no remainder test, so resting cash under it can remain; a withdraw always empties it.
+    uint256 minPrincipal;
     // deleverage channel: band 0 is OFF, and genesis then requires the other four dials zero
     uint256 deleverageFloorEpsBps; // the keeper's whole pay; a sold unit melts (1-eps) of the record floor, less the cut on a restoring crank
     uint256 deleverageBandBps; // margin under which disposal opens: a LEVEL the record must hold below, not a decline; 0 = channel off
@@ -83,11 +79,7 @@ struct MarketState {
     /// @dev PER MARKET, unlike the lender's pooled `resting`, which spans their markets in this quote.
     /// @dev The two move together on every deposit, draw and withdraw and must never be netted.
     uint256 cash;
-    uint64 drawCount; // draws ever made here: a lender contract's change detector, bumped once per open
-    /// @notice The part of `cash` armed loans have reserved for their expiry rolls: the sum of every live `AutoPolicy.reserved`.
-    /// @dev A fresh draw sees `cash` less this; a lender's withdraw does not, so `cash` may fall under it by the lender's consent.
-    /// @dev Packed beside `drawCount`, so no field below it moves; it never exceeds `cash`'s own uint128 cap when written.
-    uint128 rollReserve;
+    uint64 drawCount; // draws and extensions made here, a lender's change detector; an extension can bump it once a second a loan, for an atom's fee
     uint256 cumulativeBackedBurns;
     uint256 netSyntheticOutflow;
     uint256 protocolRevenue; // the ONE protocol pot: the origination and deleverage cuts
@@ -136,16 +128,7 @@ struct Cfg {
     uint256 unitScale;
     address positionTitle; // the position collection
     address positionManager; // the ONE position manager, a hub immutable a library cannot read itself
-}
-
-/// @notice A continuation's two market frames plus the destination it names.
-/// @notice `cd` equals `cs` and `dst` is the loan's own market on a home roll, which is the unrouted case.
-/// @dev ONE memory pointer where three stack slots would not fit: the roll path is stack-bound without it.
-/// @dev Nested memory structs are held by reference, so building this copies three words, never two `Cfg`s.
-struct RollFrames {
-    Cfg cs; // the RETIRING market: the window and the compat rail are read from here
-    Cfg cd; // the DESTINATION: the fee, the tenor grid, the principal, the gate and the record
-    bytes32 dst;
+    uint256 policyGas; // the gas a roll-policy ask hands its callee, a hub value a library cannot read itself
 }
 
 /// @notice A terminal borrower loan. Loan ids are GLOBAL, so the loan carries its own market id.
@@ -154,7 +137,7 @@ struct Loan {
     bytes32 market;
     address borrower; // the position's CURRENT holder; moves on an PositionTitleNFT transfer (retitle)
     uint256 collateralUnits;
-    uint256 debt; // quote units; FIXED PREMIUM, nothing accrues, so a loan never drifts underwater by existing
+    uint256 debt; // quote units; FIXED PREMIUM per admitted draw, nothing accrues, so a loan never drifts underwater by existing
     uint64 openTime;
     uint64 tenor;
     uint64 expiry;
@@ -185,24 +168,9 @@ struct OpenBounds {
     uint64 deadline;
 }
 
-/// @notice A borrower's standing terms for an automatic continuation, here or in a market a keeper names.
-/// @notice `tenor == 0` IS disarmed; there is no second flag that could disagree with it.
-/// @notice Only a borrower who has named a price they will pay can be routed to a venue they did not choose.
-/// @dev `minBufferBps` bounds `(floor - trigger)/floor`, which is a RATIO, so it covers NEITHER dial on its own.
-/// @dev `Borrower._compatLeg` bounds the destination's price and coverage directly; this policy consents to neither.
-/// @dev `maxFeeBps` is a ceiling on the realized rate and moves neither, so consent here is not consent to terms.
-/// @dev A disarm stores its buffer and ceiling unvalidated; every hub reader tests the zero tenor first and never acts on them.
-/// @dev ARMED MEANS RESERVED: `reserved` is fresh cash held for this loan's expiry roll, out of every other draw.
-struct AutoPolicy {
-    uint64 tenor;
-    uint16 minBufferBps; // under 10000 while armed: a live trigger is never zero, so no gap reaches the whole floor
-    uint16 maxFeeBps; // ceiling on the REALIZED origination rate; 0 is home-only and unbounded
-    uint128 reserved; // this loan's share of its market's `rollReserve`; zeroed by every close, disarm and re-arm, shrunk by a partial repay or melt
-}
-
 /// @notice `refinanceTo` args, bundled because the flat parameter list does not compile.
 /// @dev FIELD ORDER IS THE SELECTOR: the tuple expands into the signature, so a reorder breaks routing.
-/// @dev `dst` equal to the loan's own market is exactly `refinance`.
+/// @dev `dst` equal to the loan's own market re-terms the loan there: a new loan, a new id, a fresh term.
 struct MigrateArgs {
     uint256 id;
     bytes32 dst;
@@ -211,17 +179,6 @@ struct MigrateArgs {
     OpenBounds bnd;
     uint256 withdrawUnits; // collateral to release from the SUCCESSOR; zero with no `withdrawTo` is a plain refinance
     address withdrawTo; // recipient, the caller's own choice; never the hub or the positionManager, and zero only with zero units
-}
-
-/// @notice What a caller that has ALREADY COMMITTED state established for itself, so the open it runs re-asks nothing.
-/// @notice A caller reaching an open WITHOUT one gets the whole gauntlet, exactly as every ordinary door always has.
-/// @dev NEVER put these fields on `MigrateArgs`: that struct arrives as calldata, so a caller would set `asked` itself.
-/// @dev `market` binds the answer to the cache it was read against; a destination that differs re-asks the borrower rule and the record.
-struct PreAdmitted {
-    bool asked; // the caller ran the total gauntlet: skip `_gateCheck` and take `drawCap` as read
-    bytes32 market; // the market the verdict and the cap were read against
-    uint256 drawCap; // the windowed minimum that gauntlet read, threaded rather than read a second time
-    uint256 recycle; // retiring principal a home migration funds its successor with, so the draw debits cash only for the rest
 }
 
 /// @notice The market ledger's namespaced home: one member, the id-keyed market mapping.
@@ -256,6 +213,7 @@ struct Lenders {
     mapping(address lender => mapping(address quote => LenderPools)) pools;
     mapping(address lender => mapping(address quote => LenderUnresolved)) unresolved;
     mapping(address lender => mapping(address quote => mapping(address collateral => LenderCollateral))) byCollateral; // APPENDED, so no member above moves
+    mapping(address lender => address policy) rollPolicyOf; // APPENDED: the contract a lender's extensions ask; zero consents to none
 }
 
 /// @notice The hub's named storage: the ERC-7201 roots and the accessors over them, one home.
@@ -328,16 +286,11 @@ struct LoanBook {
     /// @dev Unrelated grants; they must never share a mapping or a setter.
     mapping(address => mapping(address => bool)) creditOperator;
     mapping(address => uint256) creditOperatorNonce;
-    /// @dev The refundable half of the lender fee, withheld at open and settled at close.
+    /// @dev The refundable half of the lender fee, withheld at open or paid in by an extension, and settled at close.
     /// @dev Never enters the lender's pools, so a share price never prices revenue the term has not earned.
     mapping(uint256 => uint256) feeEscrowOf;
-    /// @dev APPENDED at index 6: an append moves no existing offset, unlike an insertion.
-    /// @dev Carried forward to the continuation, which re-arms only where spare cash past the reserve covers its own roll need.
-    mapping(uint256 => AutoPolicy) autoPolicyOf;
-    mapping(uint256 => mapping(address => uint256)) unitsOwed; // APPENDED at index 7: collateral a claimant may pull
-    mapping(uint256 => mapping(address => uint256)) quoteOwed; // APPENDED at index 8: quote a claimant may pull
-    mapping(uint256 => Shortfall) shortfallOf; // APPENDED at index 9: written only when a settlement came up short
-    /// @dev APPENDED at index 10: credit orders, keyed by the SAME global counter as loans.
-    /// @dev So an id names a loan or an order and never both, which is what lets every loan verb fail closed on one.
-    mapping(uint256 => Order) orders;
+    mapping(uint256 => mapping(address => uint256)) unitsOwed; // index 6: collateral a claimant may pull
+    mapping(uint256 => mapping(address => uint256)) quoteOwed; // index 7: quote a claimant may pull
+    mapping(uint256 => Shortfall) shortfallOf; // index 8: written only when a settlement came up short
+    mapping(uint256 => Order) orders; // index 9: credit orders on the loans' own counter, so an id names a loan or an order, never both
 }

@@ -72,7 +72,7 @@ contract AceDeleverageCutFragmentationTest is WarpClock {
     uint256 internal constant CUT = 500;
     uint256 internal constant THETA = 7100; // trigger at 71% of the price: in band, and the cut-charging restore fits the secured base
     uint256 internal constant DEBT = 10_000; // whole quote, which is atoms: the quote has no decimals
-    uint256 internal constant MIN_DEBT = 100; // far under DEBT, so the minDebt room never binds across the run
+    uint256 internal constant MIN_PRINCIPAL = 100; // far under DEBT, so the minPrincipal room never binds across the run
     uint256 internal constant FRAGMENT = 19; // ceil(1e4 / CUT) - 1: the largest proceeds whose cut floors to zero
     uint256 internal constant CRANKS = 20;
 
@@ -87,7 +87,7 @@ contract AceDeleverageCutFragmentationTest is WarpClock {
         MarketParams memory p = AceFixtures.marketParams(address(q), address(c));
         p.price = ps;
         p.record = address(record);
-        p.minDebt = MIN_DEBT;
+        p.minPrincipal = MIN_PRINCIPAL;
         p.deleverageFloorEpsBps = ProtocolPolicy.DELEVERAGE_FLOOR_EPS_BPS;
         p.deleverageBandBps = BAND;
         p.deleverageTargetBps = TARGET;

@@ -7,6 +7,7 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {MigratorParameters} from "../../src/interfaces/ILaunchAuction.sol";
 import {RunwayHook} from "../../src/entities/launch/RunwayHook.sol";
+import {IInitializerHook} from "../../vendor/launcher/IInitializerHook.sol";
 
 /// @notice The salt that lands a Runway hook, deployed by `deployer`, at an address carrying exactly the before-initialize and before-swap bits.
 /// @dev HookMiner re-hashes the creation code every try; this hashes it once, so a fixture can mine in every setUp.
@@ -31,7 +32,10 @@ library RunwaySalt {
 /// @notice A settable stand-in for the LBP strategy, for the UNIT rows: what the factory reads, and a distribution that pulls as the real one does.
 /// @dev It is its own auction factory: the oracle names the auction the next distribution registers, unless a row points it elsewhere.
 /// @dev The knobs make it misbehave one way at a time: pull short, hand some back, register another token, or name another auction.
+/// @dev Like the deployed strategy, it refuses a registration whose hook's authorized() does not name it, before it pulls anything.
 contract MockRunwayStrategy {
+    error InvalidHook(address hook); // the deployed strategy's refusal of a hook that does not authorize it
+
     mapping(address => MigratorParameters) internal _params;
     address public positionManager; // the PositionManager the factory reads the PoolManager from
     address public nextAuction; // the auction the next distribution registers
@@ -43,6 +47,7 @@ contract MockRunwayStrategy {
     uint256 public lastAmount;
     bytes32 public lastSalt;
     uint256 public distributions;
+    address public protocolFeeController; // as its own auction factory: nonzero would charge the auction a fee
 
     constructor(address posm) {
         positionManager = posm;
@@ -68,10 +73,16 @@ contract MockRunwayStrategy {
         (shortBy, giveBack, registerAs) = (short, back, asToken);
     }
 
+    function setFeeController(address controller) external {
+        protocolFeeController = controller;
+    }
+
     function initializeDistribution(address token, uint256 amount, bytes calldata configData, bytes32 salt) external {
+        (MigratorParameters memory m,) = abi.decode(configData, (MigratorParameters, bytes));
+        address hook = m.poolParameters.hook;
+        if (IInitializerHook(hook).authorized() != address(this)) revert InvalidHook(hook);
         IERC20(token).transferFrom(msg.sender, address(this), amount - shortBy);
         if (giveBack != 0) IERC20(token).transfer(msg.sender, giveBack);
-        (MigratorParameters memory m,) = abi.decode(configData, (MigratorParameters, bytes));
         m.token = registerAs == address(0) ? token : registerAs;
         _params[nextAuction] = m;
         (lastConfig, lastAmount, lastSalt) = (configData, amount, salt);

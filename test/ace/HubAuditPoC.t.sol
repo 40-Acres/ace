@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
-import {InsufficientCash, LoanClosed, RollUnbacked} from "../../src/ace/hub/Borrower.sol";
+import {BelowDebtFloor, InsufficientCash, LoanClosed} from "../../src/ace/hub/Borrower.sol";
 import {MarketParams, OpenBounds, Order} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {PositionTitleNFT} from "../../src/ace/positions/PositionTitleNFT.sol";
@@ -14,6 +14,7 @@ import {MockBlacklistERC20} from "../mocks/MockBlacklistERC20.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
+import {_extended} from "../utils/Extended.sol";
 
 /// @title HubAuditPoC
 /// @notice The PoC rows of the 2026-10-18 hub audit suite (`docs/ai/audit/findings/hub-audit-suite-2026-10-18.md`), main `58da8e3c`.
@@ -42,7 +43,7 @@ contract HubAuditPoC is WarpClock {
     uint64 internal constant TEN7 = 7 days;
     uint256 internal constant P = 50_000e6;
     uint256 internal constant UNITS = 100_000e18; // trigger at 0.7 of par: a 30% cushion at the draw
-    uint256 internal constant MIN_DEBT = 10e6;
+    uint256 internal constant MIN_PRINCIPAL = 10e6;
 
     function setUp() public {
         _warpTo(1_000_000);
@@ -74,7 +75,7 @@ contract HubAuditPoC is WarpClock {
         p.maxTenor = TEN7;
         p.settleBountyBps = 50;
         p.minCoverageWad = 1.4e18;
-        p.minDebt = MIN_DEBT;
+        p.minPrincipal = MIN_PRINCIPAL;
         p.inventoryAsk = true;
         p.fillFeeBps = 25;
     }
@@ -95,9 +96,15 @@ contract HubAuditPoC is WarpClock {
         vm.stopPrank();
     }
 
-    function _arm(uint256 loanId) internal {
-        vm.prank(read.loan(loanId).borrower);
-        ace.setAutoRefinance(loanId, TEN7, 0, 0);
+    /// @dev The holder's own extension, its fee funded at the quote.
+    function _extendAsHolder(uint256 loanId) internal {
+        address holder = read.loan(loanId).borrower;
+        (,, uint256 fee) = ace.tryExtend(loanId, 0, "", holder);
+        usdc.mint(holder, fee);
+        vm.startPrank(holder);
+        usdc.approve(address(ace), fee);
+        ace.extend(loanId, 0, "");
+        vm.stopPrank();
     }
 
     /// @dev Settle by persistent distress, then stand at the second the pot's ask opens.
@@ -155,43 +162,38 @@ contract HubAuditPoC is WarpClock {
     }
 
     /* ================================================================== */
-    /*  Row B: a stranger's fill of a third party's order disarms the fold  */
+    /*  Row B: a stranger's fill of a third party's order refuses no extension */
     /* ================================================================== */
 
-    /// @dev A maker's order for exactly the market's spare cash, resting beside the armed loan.
+    /// @dev A maker's order for exactly the market's resting cash, beside the loan.
     function _orderForTheSpare() internal returns (uint256 oid, uint256 spare) {
-        spare = ace.drawableOf(id);
+        spare = ace.restingOf(id);
         uint256 par = ace.idToMarketParams(id).price;
         vm.prank(maker);
         oid = ace.postOrder(id, spare, par, par, 0, TEN7, 0);
     }
 
-    /// @notice CONTROL: with the spare cash untouched, the fold rolls the armed loan and its successor is born ARMED.
-    function test_B1_Control_TheFoldReArmsTheSuccessorWhenSpareCashRests() public {
+    /// @notice CONTROL: with the resting cash untouched, the borrower's extension lands in place on the lender's yes.
+    function test_B1_Control_TheExtensionLandsWhenSpareCashRests() public {
+        AceFixtures.installYesPolicy(ace, alice);
         uint256 loanId = _open(id, borrower, P);
-        _arm(loanId);
         _orderForTheSpare(); // posted, never filled
-        _warpTo(read.loan(loanId).expiry);
-        vm.prank(keeper);
-        ace.forceClose(loanId);
-        uint256 newId = read.loanCount();
-        assertFalse(ace.isClosed(newId), "the loan rolled into a live successor");
-        (uint64 t,,) = read.autoPolicyOf(newId);
-        assertEq(t, TEN7, "the successor is armed");
-        assertGt(read.reservedOf(newId), 0, "and holds its own reservation");
+        uint64 x = read.loan(loanId).expiry;
+        _warpTo(uint256(x) - 1);
+        _extendAsHolder(loanId);
+        assertTrue(_extended(read, loanId, x), "the loan extended in place");
     }
 
-    /// @notice A stranger fills the maker's order in the fold's block: the MAKER pays the fee, the stranger gas, and the successor is born DISARMED.
-    /// @notice The roll itself lands (armed means reserved held), so the borrower's chain silently stops one term later.
-    /// @dev The documented levers are the lender's withdraw and a stranger's own open or arm; a fill costs the stranger nothing but gas.
-    function test_B2_AStrangersFillOfAnotherMakersOrderLeavesTheSuccessorDisarmed() public {
+    /// @notice A stranger fills the maker's order for every resting atom in the extension's block: the MAKER pays the fee, the stranger gas.
+    /// @notice Resting cash never enters an extension, so the drain changes nothing: the loan still extends on the lender's yes.
+    function test_B2_AStrangersFillOfAnotherMakersOrderCannotRefuseTheExtension() public {
+        AceFixtures.installYesPolicy(ace, alice);
         uint256 loanId = _open(id, borrower, P);
-        _arm(loanId);
-        uint256 rr = read.rollReserve(id);
         (uint256 oid, uint256 spare) = _orderForTheSpare();
-        assertGt(spare, 0, "PREMISE: spare cash rests past the reserve");
+        assertGt(spare, 0, "PREMISE: cash rests beside the loan");
 
-        _warpTo(read.loan(loanId).expiry);
+        uint64 x = read.loan(loanId).expiry;
+        _warpTo(uint256(x) - 1);
         Order memory o = ace.orderOf(oid);
         uint256 before = usdc.balanceOf(stranger);
         vm.prank(stranger);
@@ -199,42 +201,23 @@ contract HubAuditPoC is WarpClock {
         ace.fillOrder(oid, spare, o.collateralUnits);
         uint256 gasUsed = g0 - gasleft();
         assertEq(usdc.balanceOf(stranger), before, "the stranger paid no quote: the maker's loan paid the fee");
-        assertEq(ace.drawableOf(id), 0, "the spare cash is gone");
-        assertEq(read.rollReserve(id), rr, "and the reserve is intact");
-        (bool ok,,) = ace.tryContinue(loanId);
-        assertTrue(ok, "the roll is still admissible: the reservation did its job");
+        assertEq(ace.restingOf(id), 0, "the resting cash is gone");
+        (bool ok, bytes4 why,) = ace.tryExtend(loanId, 0, "", borrower);
+        assertTrue(ok, "the borrower's extension is still admissible");
+        assertEq(why, bytes4(0), "the drain gave it no reason to refuse");
 
-        vm.prank(keeper);
-        ace.forceClose(loanId);
-        uint256 newId = read.loanCount();
-        assertFalse(ace.isClosed(newId), "the loan rolled");
-        (uint64 t,,) = read.autoPolicyOf(newId);
-        assertEq(t, 0, "but the successor is born DISARMED");
-        assertEq(read.reservedOf(newId), 0, "holding no reservation");
+        uint256 n = read.loanCount();
+        _extendAsHolder(loanId);
+        assertTrue(_extended(read, loanId, x), "the borrower extended the loan in place");
+        assertEq(read.loanCount(), n, "and wrote no successor");
+        assertEq(read.invPotOf(id, loanId), 0, "nor any pot: the stranger's drain bought no settlement");
         emit log_named_uint("stranger's fill gas", gasUsed);
     }
 
     /* ================================================================== */
-    /*  Row C: the lens reports a retired loan as armed forever            */
+    /*  Row C is DELETED: it pinned the lens's raw read of a retired       */
+    /*  loan's auto-extend policy, and no such policy exists               */
     /* ================================================================== */
-
-    /// @notice After the fold rolls an armed loan, `AceLens.autoPolicyOf(oldId)` still answers the old tenor: the stale entry is read raw.
-    /// @notice The lens NatSpec says a sponsor enumerates the armed set from it; every HUB reader gates on `closedAt` first.
-    function test_C1_TheLensReportsARolledLoanArmed() public {
-        uint256 loanId = _open(id, borrower, P);
-        _arm(loanId);
-        _warpTo(read.loan(loanId).expiry);
-        vm.prank(keeper);
-        ace.forceClose(loanId);
-        assertTrue(ace.isClosed(loanId), "PREMISE: the old loan is retired");
-
-        (uint64 t,,) = lens.autoPolicyOf(loanId);
-        assertEq(t, TEN7, "the lens still reports the retired loan armed");
-        assertEq(lens.reservedOf(loanId), 0, "while its reservation is zero");
-        (bool ok, bytes4 reason,) = ace.tryContinue(loanId);
-        assertFalse(ok, "and the hub refuses to continue it");
-        assertEq(reason, LoanClosed.selector, "because it is closed, which the lens's armed answer never says");
-    }
 
     /* ================================================================== */
     /*  Row D: a refused piggyback sweep stamps the clock anyway           */
@@ -312,21 +295,16 @@ contract HubAuditPoC is WarpClock {
     /*  Row G: a stranger's zero repay is admitted and moves nothing       */
     /* ================================================================== */
 
-    /// @notice `repay(id, 0)` from any address lands on a loan at or over `minDebt`: a zero pull, a zero melt, two events, and no field moves.
+    /// @notice `repay(id, 0)` from any address lands on a loan at or over `minPrincipal`: a zero pull, a zero melt, two events, and no field moves.
     function test_G1_AStrangersZeroRepayLandsAndMovesNothing() public {
         uint256 loanId = _open(id, borrower, P);
-        _arm(loanId);
         uint256 debt0 = read.debtOf(loanId);
-        uint256 reserved0 = read.reservedOf(loanId);
-        uint256 rr0 = read.rollReserve(id);
         (uint256 resting0, uint256 lent0, uint256 owed0) = read.poolOf(id);
 
         vm.prank(stranger);
         ace.repay(loanId, 0);
 
         assertEq(read.debtOf(loanId), debt0, "debt unchanged");
-        assertEq(read.reservedOf(loanId), reserved0, "the loan's share unchanged");
-        assertEq(read.rollReserve(id), rr0, "the market's reserve unchanged");
         (uint256 resting1, uint256 lent1, uint256 owed1) = read.poolOf(id);
         assertEq(resting1, resting0, "resting unchanged");
         assertEq(lent1, lent0, "lent unchanged");
@@ -335,214 +313,46 @@ contract HubAuditPoC is WarpClock {
     }
 
     /* ================================================================== */
-    /*  Row F: the recommended lender posture disarms every successor      */
+    /*  Row F is DELETED: it pinned the reserve-keeping lender posture,    */
+    /*  and there is no reserve to keep                                    */
     /* ================================================================== */
 
-    /// @notice `withdraw`'s NatSpec tells a lender to cap at `drawableOf`; at exactly that posture the fold ROLLS, then disarms the successor.
-    /// @notice The successor needs `rollNeed(P) > rollNeed(D)` of UNRESERVED cash on top of the roll's draw, and there is none; the re-arm reverts.
-    /// @dev "Armed means reserved" holds for ONE roll; the chain ends after it unless the lender leaves a cushion no NatSpec names.
-    function test_F1_TheRecommendedLenderPostureDisarmsTheSuccessorAndRefusesTheReArm() public {
-        uint256 loanId = _open(id, borrower, P);
-        _arm(loanId);
-        uint256 spare = ace.drawableOf(id);
-        vm.prank(alice);
-        ace.withdraw(id, spare, alice, 0); // the documented posture: keep exactly the reserve
-        assertEq(ace.restingOf(id), read.rollReserve(id), "PREMISE: the lender rests exactly the roll reserve");
-        assertEq(ace.drawableOf(id), 0, "PREMISE: nothing is drawable");
-
-        _warpTo(read.loan(loanId).expiry);
-        (bool ok,,) = ace.tryContinue(loanId);
-        assertTrue(ok, "the armed roll is admissible: its reservation backs it");
-        vm.prank(keeper);
-        ace.forceClose(loanId);
-        uint256 newId = read.loanCount();
-        assertFalse(ace.isClosed(newId), "the loan rolled once");
-        (uint64 t,,) = read.autoPolicyOf(newId);
-        assertEq(t, 0, "and its successor is born DISARMED");
-        assertEq(ace.restingOf(id), 0, "the roll drew the whole reserve: the market rests nothing");
-
-        vm.prank(borrower);
-        vm.expectRevert(RollUnbacked.selector);
-        ace.setAutoRefinance(newId, TEN7, 0, 0);
-    }
-
     /* ================================================================== */
-    /*  Row H: a one-transaction drain disarms a victim's successor         */
+    /*  Row H is DELETED: it pinned that a one-transaction drain could not */
+    /*  settle a victim's armed fold, and `forceClose` now always settles  */
     /* ================================================================== */
 
-    /// @notice ONE multicall: open a loan for every unreserved atom, fold the victim, repay; the victim rolls DISARMED for ~0.24% of the free cash.
-    /// @notice The escrow half of the origination fee refunds whole in the same block (`remaining == tenor`), so only the tick and protocol legs are spent.
-    /// @dev Sharpens the disclosed `_carry` disarm: no lender, no maker, no second block, and a cost flat in the market's free cash.
-    function test_H1_AOneTransactionDrainFoldAndRepayDisarmsTheVictimForAQuarterPercentOfFreeCash() public {
-        uint256 victim = _open(id, borrower, P);
-        _arm(victim);
-        uint256 free = ace.drawableOf(id);
-        assertGt(free, 0, "PREMISE: free cash rests past the reserve");
-        _warpTo(read.loan(victim).expiry);
-
-        coll.mint(stranger, 4 * UNITS); // the drain is ~3x the victim's loan, so it posts ~3x the collateral
-        usdc.mint(stranger, free); // enough to repay the drain's whole debt
-        vm.startPrank(stranger);
-        coll.approve(address(pm), 4 * UNITS);
-        usdc.approve(address(ace), type(uint256).max);
-        uint256 drainId = read.loanCount() + 1;
-        bytes[] memory legs = new bytes[](3);
-        legs[0] = abi.encodeCall(Ace.open, (id, 4 * UNITS, free, TEN7, stranger, OpenBounds(0, 0, 0)));
-        legs[1] = abi.encodeCall(Ace.forceClose, (victim));
-        legs[2] = abi.encodeCall(Ace.repay, (drainId, free));
-        uint256 quote0 = usdc.balanceOf(stranger);
-        ace.multicall(legs);
-        vm.stopPrank();
-
-        assertTrue(ace.isClosed(drainId), "the drain loan is closed in the same transaction");
-        uint256 successor = drainId + 1;
-        assertFalse(ace.isClosed(successor), "the victim rolled into a live successor");
-        (uint64 t,,) = read.autoPolicyOf(successor);
-        assertEq(t, 0, "born DISARMED");
-
-        // the griefer's net cost: what it paid in less the escrow refund credited back to it
-        (, uint256 refund) = ace.owedOf(drainId, stranger);
-        uint256 spent = quote0 - usdc.balanceOf(stranger) - refund;
-        emit log_named_uint("griefer net cost (quote atoms)", spent);
-        emit log_named_uint("free cash drained (quote atoms)", free);
-        assertLt(spent * 10_000, free * 30, "the net cost is under 0.30% of the free cash it drained");
-        // the control: the identical fold with the free cash untouched re-arms (row B1)
-    }
-
     /* ================================================================== */
-    /*  Row I: a one-atom-claim pot is a permanent unsold pot              */
+    /*  Row I: a minimum ticket cannot be repaid to one atom               */
     /* ================================================================== */
 
-    /// @notice A minimum ticket repaid to one atom and left to expire settles into a pot worth ONE quote atom; `unsoldPots` rises by one for good.
-    /// @notice The counter has no size floor, and the one party who can make a pot arbitrarily small is the one who pays almost nothing for it.
-    /// @dev It costs the fee on `minDebt` (0.044 USDC at 40 bps/7d); the lender clears it by `redeemInKind`, or anyone for two quote atoms after the hold.
-    function test_I1_AOneAtomClaimPotRaisesUnsoldPotsForTheCostOfAMinimumTicket() public {
-        uint256 loanId = _open(id, borrower, MIN_DEBT);
-        uint256 fee = read.loan(loanId).lastFee;
-        usdc.mint(borrower, MIN_DEBT);
+    /// @notice The one-atom repay that once made a one-atom unsold pot for the cost of a minimum ticket is refused.
+    /// @notice No live loan sits under `minPrincipal`, the borrower's own repay included, so the pot can no longer be made small.
+    function test_I1_TheOneAtomRepayIsRefused_SoAMinimumTicketMakesNoDustPot() public {
+        uint256 loanId = _open(id, borrower, MIN_PRINCIPAL);
+        (uint256 resting0, uint256 lent0, uint256 owed0) = read.poolOf(id);
+        usdc.mint(borrower, MIN_PRINCIPAL);
+        uint256 bal0 = usdc.balanceOf(borrower);
         vm.startPrank(borrower);
-        usdc.approve(address(ace), MIN_DEBT);
-        ace.repay(loanId, MIN_DEBT - 1); // only the borrower may leave (0, minDebt)
+        usdc.approve(address(ace), MIN_PRINCIPAL);
+        vm.expectRevert(BelowDebtFloor.selector);
+        ace.repay(loanId, MIN_PRINCIPAL - 1);
         vm.stopPrank();
-        assertEq(read.debtOf(loanId), 1, "PREMISE: one atom of debt is left");
-
-        _warpTo(read.loan(loanId).expiry + MarketInitWindow.rollWindow(TEN7) + 1);
-        vm.prank(stranger);
-        ace.settleExpired(loanId);
-        uint256 pot = read.invPotOf(id, loanId);
-        assertGt(pot, 0, "the one-atom claim converted into a pot");
-        assertLe(lens.inventoryMark(id, loanId), 1, "worth at most one quote atom at the ask");
-        assertEq(_unsold(), 1, "and it counts as an UNSOLD pot");
-        emit log_named_uint("griefer cost: origination fee (quote atoms)", fee);
-        emit log_named_uint("pot (collateral atoms)", pot);
+        assertEq(read.debtOf(loanId), MIN_PRINCIPAL, "the debt is unchanged");
+        (uint256 resting1, uint256 lent1, uint256 owed1) = read.poolOf(id);
+        assertEq(resting1, resting0, "resting unchanged");
+        assertEq(lent1, lent0, "lent unchanged");
+        assertEq(owed1, owed0, "owed unchanged");
+        assertEq(usdc.balanceOf(borrower), bal0, "and no quote left the borrower");
     }
 
     /* ================================================================== */
-    /*  Row J: dust-armed loans hold a market's cash reserved for a tenor  */
+    /*  Row J is DELETED: it priced dust-armed loans holding a market's    */
+    /*  cash reserved, and nothing holds cash for a loan                   */
     /* ================================================================== */
 
-    /// @dev One leg: open the minimum ticket, repay it to one atom, arm (reserving `minDebt - 1`), take the collateral back down to the one-atom line.
-    function _dustArmLeg(address who) internal returns (uint256 loanId, bool armed) {
-        coll.mint(who, UNITS);
-        usdc.mint(who, MIN_DEBT);
-        vm.startPrank(who);
-        coll.approve(address(pm), UNITS);
-        usdc.approve(address(ace), type(uint256).max);
-        loanId = ace.open(id, UNITS, MIN_DEBT, TEN7, who, OpenBounds(0, 0, 0));
-        ace.repay(loanId, MIN_DEBT - 1); // only the borrower may leave (0, minDebt)
-        if (ace.drawableOf(id) >= MIN_DEBT - 1) {
-            ace.setAutoRefinance(loanId, TEN7, 0, 0); // reserves rollNeed(1) == minDebt - 1
-            armed = true;
-        }
-        uint256 spare = lens.withdrawableUnits(id, loanId);
-        ace.withdrawCollateral(loanId, spare, who); // everything above the one-atom coverage line comes back
-        vm.stopPrank();
-    }
-
-    /// @notice A griefer repeats the minimum-ticket leg until the market's whole resting cash is drawn or reserved: `drawableOf` reads zero for a tenor.
-    /// @notice The drawn half lands in the lender's `owed`, recyclable; the RESERVED half nothing releases before the fold, the lender included.
-    /// @notice A leg costs one fee on `minDebt` (the escrow is earned at the fold, never refunded) plus gas and a few atoms of collateral.
-    /// @dev Y-10's floor accepted `minDebt - 1` idle per armed loan; this row prices the many-loan form against the market's lendable cash.
-    function test_J1_DustArmedLoansHoldHalfTheMarketReservedForATenorAtTheCostOfTheirFees() public {
-        // a small market: alice keeps 100 minimum tickets of cash resting
-        uint256 keep = 100 * MIN_DEBT;
-        uint256 out = ace.restingOf(id) - keep; // hoisted: a call in the argument list would eat the prank
-        vm.prank(alice);
-        ace.withdraw(id, out, alice, 0);
-        assertEq(ace.restingOf(id), keep, "PREMISE: 100 minimum tickets rest");
-        address griefer = address(0x6E1EF);
-
-        uint256 legs;
-        uint256 armedLegs;
-        uint256 fees;
-        while (ace.drawableOf(id) >= MIN_DEBT) {
-            (uint256 loanId, bool armed) = _dustArmLeg(griefer);
-            fees += read.loan(loanId).lastFee;
-            legs++;
-            if (armed) armedLegs++;
-        }
-        assertLt(ace.drawableOf(id), MIN_DEBT, "nothing a minimum ticket could draw is left");
-        uint256 reserved = read.rollReserve(id);
-        assertGe(reserved, (keep * 45) / 100, "close to half the cash is RESERVED behind one-atom loans");
-        assertEq(reserved, armedLegs * (MIN_DEBT - 1), "each armed leg reserved exactly minDebt - 1");
-
-        // an honest borrower is refused, and the lender cannot free the reserved half
-        coll.mint(borrower, UNITS);
-        vm.startPrank(borrower);
-        coll.approve(address(pm), UNITS);
-        vm.expectRevert(InsufficientCash.selector);
-        ace.open(id, UNITS, MIN_DEBT, TEN7, borrower, OpenBounds(0, 0, 0));
-        vm.stopPrank();
-        (,, uint256 owed) = read.poolOf(id);
-        assertGe(owed, legs * (MIN_DEBT - 1), "the drawn half sits in the lender's owed, recyclable by collect and deposit");
-        emit log_named_uint("legs", legs);
-        emit log_named_uint("armed legs", armedLegs);
-        emit log_named_uint("reserved (quote atoms)", reserved);
-        emit log_named_uint("griefer fees paid (quote atoms)", fees);
-
-        // the lock lasts the tenor: at expiry the fold cannot roll a one-atom loan, and only the settlement releases the share
-        _warpTo(read.loan(1).expiry); // the first leg's loan is id 1: nothing opened before it in this row
-        vm.prank(keeper);
-        ace.forceClose(1);
-        assertEq(read.rollReserve(id), reserved - (MIN_DEBT - 1), "the fold settled the one-atom loan and released exactly its share");
-    }
-
     /* ================================================================== */
-    /*  Row K: the counter to both dust levers is a one-atom payoff         */
+    /*  Row K is DELETED: it countered the one-atom dust loan with a       */
+    /*  stranger's payoff, and no repay can make that loan any more        */
     /* ================================================================== */
-
-    /// @notice Only the borrower may repay into `(0, minDebt)`, but a FULL payoff is open to anyone: a stranger pays the one atom a dust-armed loan still owes.
-    /// @notice `closeClean` then frees the `minDebt - 1` reservation and credits the collateral to the borrower, so no pot is born and the count never moves.
-    /// @dev The cheap, capital-free forms of rows I1 and J1 are therefore pre-emptable by any keeper for one quote atom plus a closing repay's gas.
-    function test_K1_AStrangersOneAtomPayoffFreesTheDustArmedReserveAndLeavesNoPot() public {
-        address griefer = address(0x6E1EF);
-        (uint256 loanId, bool armed) = _dustArmLeg(griefer);
-        assertTrue(armed, "PREMISE: the leg armed");
-        assertEq(read.debtOf(loanId), 1, "PREMISE: one atom of debt");
-        uint256 rr0 = read.rollReserve(id);
-        assertEq(rr0, MIN_DEBT - 1, "PREMISE: minDebt - 1 is reserved behind it");
-        assertEq(_unsold(), 0, "PREMISE: no pot yet");
-
-        usdc.mint(stranger, 1);
-        vm.startPrank(stranger);
-        usdc.approve(address(ace), 1);
-        ace.repay(loanId, 1); // a full payoff: the (0, minDebt) rail does not apply to a repay that leaves zero
-        vm.stopPrank();
-
-        assertTrue(ace.isClosed(loanId), "the loan closed clean");
-        assertEq(read.rollReserve(id), 0, "and its reservation is released at once");
-        assertEq(read.invPotOf(id, loanId), 0, "no pot: the collateral went to the borrower's credit");
-        assertEq(_unsold(), 0, "so the unsold count never moved");
-        (uint256 units,) = ace.owedOf(loanId, griefer);
-        assertGt(units, 0, "the griefer's remaining atoms are credited to the griefer");
-        assertEq(ace.drawableOf(id), ace.restingOf(id) - 0, "every atom of resting cash is drawable again");
-    }
-}
-
-/// @dev `MarketInit.autoRefinanceWindow` is internal; the row re-spells `settleExpired`'s wait off the hub's own constants.
-library MarketInitWindow {
-    function rollWindow(uint64 tenor) internal pure returns (uint64) {
-        uint64 w = tenor / 5;
-        return w < 2 hours ? w : 2 hours;
-    }
 }

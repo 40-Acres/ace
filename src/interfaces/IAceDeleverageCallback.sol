@@ -8,7 +8,7 @@ pragma solidity 0.8.36;
 /// @dev Mid-callback THIS loan reads under-collateralized: units gone, debt not yet melted.
 interface IAceDeleverageCallback {
     /// @param unitsSold Collateral units already transferred to the keeper.
-    /// @param quoteOwed The floor at FULL size; refusing a tail lowers the pull pro-rata on what filled.
+    /// @param quoteOwed The floor at FULL size; on a restore a refused tail lowers the pull pro-rata; a closing sale must fill whole or the crank reverts.
     /// @param data Opaque routing payload the keeper passed to `deleverage`.
     function onAceDeleverage(uint256 unitsSold, uint256 quoteOwed, bytes calldata data) external;
 }

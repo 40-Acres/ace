@@ -69,6 +69,9 @@ contract MockLenderOps {
     function lenderUnresolved(address, address) external pure returns (uint256 unsoldPots, uint256 settledPots) {
         return (0, 0);
     }
+
+    /// @dev The vault's constructor names itself its own roll policy; this mock lends nothing, so it records nothing.
+    function setRollPolicy(address) external pure {}
 }
 
 /// @notice The attacker: it deposits, and prices the vault from inside its own send hook.

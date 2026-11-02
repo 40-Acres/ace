@@ -9,11 +9,13 @@ import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {InitializerHook} from "../../vendor/launcher/InitializerHook.sol";
+import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
+import {IInitializerHook} from "../../vendor/launcher/IInitializerHook.sol";
 import {LaunchTokenFactory} from "../../src/entities/launch/LaunchTokenFactory.sol";
 import {RunwayHook} from "../../src/entities/launch/RunwayHook.sol";
 import {RunwayFixture} from "./RunwayFixture.sol";
-import {RunwaySalt} from "./RunwayMocks.sol";
+import {MigratorParameters} from "../../src/interfaces/ILaunchAuction.sol";
+import {MockRunwayStrategy, RunwaySalt} from "./RunwayMocks.sol";
 
 /// @title RunwayHookTest
 /// @notice The Runway hook against a local v4 PoolManager: the one pool a launch recorded opens for the strategy, and nothing else opens at all.
@@ -74,8 +76,30 @@ contract RunwayHookTest is RunwayFixture {
     /// @notice The factory made the hook: the hook names it, the strategy as its one initializer, and the strategy's PoolManager.
     function test_TheFactoryMadeTheHook() public view {
         assertEq(address(hook.FACTORY()), address(factory), "the hook names another factory");
-        assertEq(hook.authorized(), address(strat), "the hook admits another initializer");
+        assertEq(hook.STRATEGY(), address(strat), "the hook admits another initializer");
         assertEq(address(hook.poolManager()), address(manager), "the hook is on another PoolManager");
+    }
+
+    /// @notice authorized() names the strategy only inside the factory's own launch: the launch registers, and a registration outside it is refused.
+    /// @notice The stand-in strategy refuses as the deployed one does, so the launch landing is the inside leg.
+    function test_AuthorizedNamesTheStrategyOnlyInsideALaunch() public {
+        assertEq(hook.authorized(), address(0), "the hook authorizes a registration before any launch");
+        assertFalse(factory.launching(), "the factory reads launching outside a launch");
+        _launch();
+        assertEq(hook.authorized(), address(0), "the hook still authorizes a registration after the launch");
+        assertFalse(factory.launching(), "the launching flag outlived the launch");
+        MigratorParameters memory m;
+        m.poolParameters.hook = address(hook);
+        vm.expectRevert(abi.encodeWithSelector(MockRunwayStrategy.InvalidHook.selector, address(hook)));
+        strat.initializeDistribution(address(usdc), 0, abi.encode(m, bytes("")), bytes32(0));
+    }
+
+    /// @notice The hook answers ERC-165 for the InitializerHook interface the strategy checks, and for ERC-165 itself, and nothing else.
+    function test_TheHookAnswersTheInitializerHookInterface() public view {
+        assertTrue(hook.supportsInterface(type(IInitializerHook).interfaceId), "the InitializerHook interface");
+        assertTrue(hook.supportsInterface(type(IERC165).interfaceId), "ERC-165");
+        assertFalse(hook.supportsInterface(0xffffffff), "the ERC-165 invalid id");
+        assertFalse(hook.supportsInterface(IHooks.beforeSwap.selector), "an unrelated id");
     }
 
     /// @notice A salt that does not land the hook on its two bits is refused by the hook's own address check, so no factory deploys without one.
@@ -115,7 +139,7 @@ contract RunwayHookTest is RunwayFixture {
     function test_AStrangerCannotOpenTheRecordedPool() public {
         Made memory m = _launch();
         vm.prank(stranger);
-        vm.expectRevert(_refused(abi.encodeWithSelector(InitializerHook.InvalidInitializer.selector, stranger, address(strat))));
+        vm.expectRevert(_refused(abi.encodeWithSelector(RunwayHook.InvalidInitializer.selector, stranger, address(strat))));
         manager.initialize(m.key, PRICE);
         assertEq(_sqrtP(m.key), 0, "the stranger's pool opened");
         strat.openPool(m.key, PRICE);

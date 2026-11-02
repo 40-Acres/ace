@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
-import {Borrower, BelowMinDebt, OpenExpired, TenorOutOfRange} from "../../src/ace/hub/Borrower.sol";
+import {Borrower, BelowMinPrincipal, OpenExpired, TenorOutOfRange} from "../../src/ace/hub/Borrower.sol";
 import {Cfg, MarketParams, OpenBounds, Order} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {ProtocolPolicy} from "../../src/config/Defaults.sol";
@@ -95,7 +95,7 @@ abstract contract AceOrderFixture is WarpClock {
     }
 
     function _minDebt() internal view returns (uint256) {
-        return ace.idToMarketParams(id).minDebt;
+        return ace.idToMarketParams(id).minPrincipal;
     }
 
     /// @dev The funding floor the walk WOULD produce for these terms, read off the hub's own preview.
@@ -425,7 +425,7 @@ contract AceOrderFillRailTest is AceOrderFixture {
             _fill(orderId, pOut, pOut == o.principal ? o.collateralUnits : _proRata(o, pOut));
 
             Order memory rest = ace.orderOf(orderId);
-            assertTrue(rest.principal == 0 || rest.principal >= floorDebt, "a remainder is zero or above minDebt");
+            assertTrue(rest.principal == 0 || rest.principal >= floorDebt, "a remainder is zero or above minPrincipal");
             assertTrue(rest.principal == 0 || rest.principal >= rest.minFillPrincipal, "and never under the maker's own floor");
         }
     }
@@ -504,7 +504,7 @@ contract AceOrderPostRailTest is AceOrderFixture {
         ace.postOrder(id, P, LIQ, LIQ_HIGH, P + 1, TEN, _far());
     }
 
-    /// @notice A fragmentation floor under the market's dust floor advertises a fill the hub then refuses with BelowMinDebt.
+    /// @notice A fragmentation floor under the market's dust floor advertises a fill the hub then refuses with BelowMinPrincipal.
     function testRevert_post_MinFillBelowMinDebt() public {
         uint256 tooSmall = _minDebt() - 1;
 
@@ -528,7 +528,7 @@ contract AceOrderPostRailTest is AceOrderFixture {
         uint256 tooSmall = _minDebt() - 1;
 
         vm.prank(maker);
-        vm.expectRevert(BelowMinDebt.selector);
+        vm.expectRevert(BelowMinPrincipal.selector);
         ace.postOrder(id, tooSmall, LIQ, LIQ_HIGH, tooSmall, TEN, _far());
     }
 
@@ -546,7 +546,7 @@ contract AceOrderPostRailTest is AceOrderFixture {
         ace.postOrder(id, P, LIQ, LIQ_HIGH, MINFILL, TEN - 1, _far());
     }
 
-    /// @notice THE SENTINEL, and it is a WRITE: `minFillPrincipal == 0` resolves to `minDebt` and the RESOLVED value stores.
+    /// @notice THE SENTINEL, and it is a WRITE: `minFillPrincipal == 0` resolves to `minPrincipal` and the RESOLVED value stores.
     /// @dev The shape `open` already uses for `tenor == 0`, so no read site ever branches on a sentinel.
     /// @dev It must resolve BEFORE the derivation, which divides the principal by it to bound the fill count.
     function test_post_ZeroMinFillResolvesToMinDebt_AndStoresTheResolvedValue() public {

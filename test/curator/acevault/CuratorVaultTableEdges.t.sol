@@ -179,18 +179,18 @@ contract CuratorVaultTableEdgesTest is AceVaultRig {
     /// @notice The coverage multiple is admitted at both of genesis's ends, and refused one atom past either.
     function test_DeployRail_CoverageEnds() public {
         Listing[] memory none = new Listing[](0);
-        new CuratorVault(_cfg(), MIN_DEBT, Constants.MIN_COVERAGE_WAD, TIMELOCK, none, "C", "C");
-        new CuratorVault(_cfg(), MIN_DEBT, Constants.MAX_COVERAGE_WAD, TIMELOCK, none, "C", "C");
+        new CuratorVault(_cfg(), MIN_PRINCIPAL, Constants.MIN_COVERAGE_WAD, TIMELOCK, none, "C", "C");
+        new CuratorVault(_cfg(), MIN_PRINCIPAL, Constants.MAX_COVERAGE_WAD, TIMELOCK, none, "C", "C");
         vm.expectRevert(CuratorVault.BadTerms.selector);
-        new CuratorVault(_cfg(), MIN_DEBT, Constants.MIN_COVERAGE_WAD - 1, TIMELOCK, none, "C", "C");
+        new CuratorVault(_cfg(), MIN_PRINCIPAL, Constants.MIN_COVERAGE_WAD - 1, TIMELOCK, none, "C", "C");
         vm.expectRevert(CuratorVault.BadTerms.selector);
-        new CuratorVault(_cfg(), MIN_DEBT, Constants.MAX_COVERAGE_WAD + 1, TIMELOCK, none, "C", "C");
+        new CuratorVault(_cfg(), MIN_PRINCIPAL, Constants.MAX_COVERAGE_WAD + 1, TIMELOCK, none, "C", "C");
     }
 
-    /// @notice The minDebt fits a uint128, the width the roll record stores a need in.
+    /// @notice The minPrincipal fits a uint128, the width the roll record stores a need in.
     function test_DeployRail_MinDebtWidth() public {
         Listing[] memory none = new Listing[](0);
-        assertEq(new CuratorVault(_cfg(), type(uint128).max, COVERAGE, TIMELOCK, none, "C", "C").MIN_DEBT(), type(uint128).max, "the widest is admitted");
+        assertEq(new CuratorVault(_cfg(), type(uint128).max, COVERAGE, TIMELOCK, none, "C", "C").MIN_PRINCIPAL(), type(uint128).max, "the widest is admitted");
         vm.expectRevert(CuratorVault.BadTerms.selector);
         new CuratorVault(_cfg(), uint256(type(uint128).max) + 1, COVERAGE, TIMELOCK, none, "C", "C");
     }
@@ -198,15 +198,16 @@ contract CuratorVaultTableEdgesTest is AceVaultRig {
     /// @notice A deploy listing is checked as a submitted row is: a bad one refuses the deploy.
     function test_DeployRail_AListedRowMeetsTheRails() public {
         vm.expectRevert(CuratorVault.BadRow.selector);
-        new CuratorVault(_cfg(), MIN_DEBT, COVERAGE, TIMELOCK, _listing(address(coll), _row(address(0), 1)), "C", "C");
+        new CuratorVault(_cfg(), MIN_PRINCIPAL, COVERAGE, TIMELOCK, _listing(address(coll), _row(address(0), 1)), "C", "C");
         vm.expectRevert(CuratorVault.BadRow.selector);
-        new CuratorVault(_cfg(), MIN_DEBT, COVERAGE, TIMELOCK, _listing(address(other), _row(address(record), 1)), "C", "C");
+        new CuratorVault(_cfg(), MIN_PRINCIPAL, COVERAGE, TIMELOCK, _listing(address(other), _row(address(record), 1)), "C", "C");
     }
 
-    /// @notice A minDebt so small the fee rounds up to all of it is refused with its row: a one-atom floor never lends.
+    /// @notice A one-atom minPrincipal, whose fee would round up to all of it, is refused at the terms: its debt floor, half of it, is zero.
+    /// @dev The `< 2` terms mirror fires before the row's fee mirror, which `feeFundable` leaves unreachable from two atoms up.
     function test_DeployRail_AFeeThatRoundsToTheWholeFloorIsRefused() public {
         Row memory row = _row(address(record), type(uint192).max);
-        vm.expectRevert(CuratorVault.BadRow.selector);
+        vm.expectRevert(CuratorVault.BadTerms.selector);
         new CuratorVault(_cfg(), 1, COVERAGE, TIMELOCK, _listing(address(coll), row), "C", "C");
         CuratorVault v = new CuratorVault(_cfg(), 2, COVERAGE, TIMELOCK, _listing(address(coll), row), "C", "C");
         assertEq(v.rowOf(address(coll)).record, address(record), "two atoms leave the fee under the floor");
@@ -218,7 +219,7 @@ contract CuratorVaultTableEdgesTest is AceVaultRig {
     function test_AnUnsoldPotTakesCapRoomUntilItSells() public {
         vm.prank(guardian);
         vault.submitCap(address(coll), 2_000e6);
-        uint256 loanId = _borrow(MIN_TENOR, false);
+        uint256 loanId = _borrow(MIN_TENOR);
         _warpAtLeastTo(_expiry(loanId));
         vm.prank(stranger);
         ace.forceClose(loanId);
@@ -231,7 +232,7 @@ contract CuratorVaultTableEdgesTest is AceVaultRig {
         vm.startPrank(bob);
         coll.approve(address(vault), UNITS);
         vm.expectRevert(AceVaultFlows.OverCap.selector);
-        vault.borrow(_req(UNITS, PRINCIPAL, MIN_TENOR, false), "", "");
+        vault.borrow(_req(UNITS, PRINCIPAL, MIN_TENOR), "", "");
         vm.stopPrank();
         _warpBy(1 hours);
         usdc.mint(stranger, 10_000e6);
@@ -241,7 +242,7 @@ contract CuratorVaultTableEdgesTest is AceVaultRig {
         vm.stopPrank();
         (, unsold) = ace.lenderByCollateral(address(vault), address(usdc), address(coll));
         assertEq(unsold, 0, "premise: the pot sold whole");
-        uint256 id2 = _borrowAs(bob, UNITS, PRINCIPAL, MIN_TENOR, false);
+        uint256 id2 = _borrowAs(bob, UNITS, PRINCIPAL, MIN_TENOR);
         assertTrue(ace.isLiveLoan(id2), "the sold pot gave its room back");
     }
 }

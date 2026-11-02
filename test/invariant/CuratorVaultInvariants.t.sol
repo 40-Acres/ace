@@ -12,7 +12,7 @@ import {CuratorVaultHandler} from "./CuratorVaultHandler.sol";
 /// @notice R2. The vault holds exactly the requests' escrow plus the donated shares.
 /// @notice L1. Nothing the vault funds rests in its market between calls.
 /// @notice L4. The holds nest: heldReq within exitable within idle, heldReq within the requests' worth, lendable the rest and none draining.
-/// @notice R4. An instant exit while lending never pays into what the requests hold, and no exit or claim leaves idle under the roll hold.
+/// @notice R4. An instant exit while lending never pays into what the requests hold.
 /// @notice R5. A claim never pays past exitable or under its minimum; under the drain nothing is lendable.
 /// @notice R6. The drain answers its keys, and a lapse lands past the lease and nowhere else.
 /// @notice And: the last holders leave nothing behind, the pile gate holds, the fee-free gap moves only by loss, and no verb panics.
@@ -144,7 +144,6 @@ contract CuratorVaultInvariantsTest is StdInvariant, Test {
     /// @notice R4, R5 and R6, and the zero-valued and vault-owned doors.
     function _invariant_latches() internal view {
         assertFalse(handler.heldTakenByAnExit(), "R4: an instant exit while lending took cash held for requests");
-        assertFalse(handler.payUnderRollHold(), "R4: an exit or a claim left idle under the roll hold");
         assertFalse(handler.claimPastExitable(), "R5: a claim paid past exitable cash");
         assertFalse(handler.claimUnderMin(), "R5: a claim paid under its own minimum");
         assertFalse(handler.drainLeftLendable(), "R5: a drain switched on left cash lendable");

@@ -77,7 +77,7 @@ contract AceVaultMidCallTest is AceVaultRig {
         MockPersistenceRecord r = _record(address(peek), 2e18);
         Listing[] memory l = new Listing[](1);
         l[0] = Listing({collateral: address(peek), row: _row(address(r), type(uint192).max)});
-        pv = new CuratorVault(_cfg(), MIN_DEBT, COVERAGE, TIMELOCK, l, "Peek", "PEEK");
+        pv = new CuratorVault(_cfg(), MIN_PRINCIPAL, COVERAGE, TIMELOCK, l, "Peek", "PEEK");
         usdc.mint(alice, LP_CASH);
         vm.startPrank(alice);
         usdc.approve(address(pv), LP_CASH);
@@ -92,7 +92,7 @@ contract AceVaultMidCallTest is AceVaultRig {
         uint256 exit0 = pv.maxWithdraw(alice);
         assertGt(lend0, 0, "premise: the vault can lend");
         peek.mint(borrower, UNITS);
-        BorrowRequest memory q = _req(UNITS, PRINCIPAL, MIN_TENOR, false);
+        BorrowRequest memory q = _req(UNITS, PRINCIPAL, MIN_TENOR);
         q.collateral = address(peek);
         vm.startPrank(borrower);
         peek.approve(address(pv), UNITS);

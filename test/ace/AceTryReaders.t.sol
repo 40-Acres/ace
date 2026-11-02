@@ -17,7 +17,7 @@ contract RecordStateProbe {
 
 /// @title AceTryReaders
 /// @notice Borrower's non-reverting record reader, pinned directly: a sick source is an ANSWER (false).
-/// @notice Never a revert, because the expiry fold's settle branch must survive every oracle state.
+/// @notice Never a revert, because the lens's `recordStateOf` reads it and a display must render every oracle state.
 contract AceTryReadersTest is Test {
     address internal constant QUOTE = address(0x0A);
     address internal constant COLL = address(0x0B);
@@ -54,7 +54,7 @@ contract AceTryReadersTest is Test {
 
     /// @notice A source that ANSWERS badly is not a source that REVERTS, and try/catch only covers the second.
     /// @dev The decode runs in Borrower's own frame after a successful staticcall, so no catch clause sees it.
-    /// @dev Written RED against the try/catch form: these are the fail-closed contract owed to the fold.
+    /// @dev Written RED against the try/catch form: these are the fail-closed contract its readers are owed.
     function test_TryPersistedPrice_AnswersFalse_WhenTheRecordAnswersEmpty() public {
         MockRevertingRecord rec = new MockRevertingRecord(QUOTE, COLL);
         rec.setAnswerMode(1);
@@ -75,7 +75,7 @@ contract AceTryReadersTest is Test {
     // ============ what must NOT change under the hardening ============
 
     /// @notice An OVER-LONG answer is accepted today and must stay accepted.
-    /// @dev Tightening to `== 32` would SILENTLY settle loans with a wider-word source.
+    /// @dev Tightening to `== 32` would SILENTLY read a wider-word source as unreadable.
     function test_TryPersistedPrice_AcceptsAnOverLongAnswer() public {
         MockRevertingRecord rec = new MockRevertingRecord(QUOTE, COLL);
         rec.setAnswerMode(3);

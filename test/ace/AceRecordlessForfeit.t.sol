@@ -5,7 +5,6 @@ import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {PriceFrame} from "../utils/PriceFrame.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
 import {MarketParams, MarketState, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
@@ -20,7 +19,8 @@ error LoanClosed(); // the hub's own: a retired loan is refused by name, which i
 /// @notice The borrower keeps only what sits ABOVE that line; everything under it converts to the claims' pots.
 /// @notice A record-backed market is untouched and still credits everything above the claims' own need.
 /// @dev WHY THE CLASS SPLIT: with no record there is no early seizure, so the lender eats the whole drawdown; the coverage pays for that.
-/// @dev The one act left to the lender is refusing an armed roll at its fold, which reaches this same bound.
+/// @dev The one act left to the lender is refusing an extension, which leaves the loan to `forceClose` and this same bound.
+/// @dev Every settlement here is `forceClose`, whose keeper sliver comes off the lot first; a row naming a split reads it off the keeper's credit.
 /// @dev THE LINE IS TAKEN FROM THE SHIPPED LENS, never re-derived here: `withdrawableUnits` is
 /// @dev `collateralUnits - coverageLine` on a live loan, so the line is a subtraction and not a second formula.
 /// @dev That matters -- a test that re-implements the bound it checks admits the wrong form along with the right one.
@@ -45,7 +45,7 @@ contract AceRecordlessForfeitTest is WarpClock {
     int24 internal constant SPACING = 60;
     uint256 internal constant TICKS = 4; // few enough that a pro-rata split reads by hand
     uint256 internal constant PER_TICK = 5_000_000; // the old per-rung lot; the rigs rest a multiple of it as one balance
-    uint256 internal constant PRINCIPAL = 11_000_000; // over the fixture's 10e6 minDebt; two full ticks and part of a third
+    uint256 internal constant PRINCIPAL = 11_000_000; // over the fixture's 10e6 minPrincipal; two full ticks and part of a third
     uint256 internal constant COLL = 10_000e18;
     uint64 internal constant TEN7 = 7 days;
     uint256 internal constant WIDE_TICKS = 32; // the fixture's `maxClaimTicks`, which is the shipped ceiling too
@@ -81,9 +81,9 @@ contract AceRecordlessForfeitTest is WarpClock {
         assertGt(units, line, "fixture: the loan must sit ABOVE its line for the two rules to differ");
         assertGt(line, lens.collateralNeeded(mid, loanId), "fixture: the line must exceed need, or there is no coverage");
 
-        _settleUnpaid(loanId);
+        _settle(loanId);
 
-        assertEq(read.unitsOwedOf(loanId, borrower), units - line, "the borrower keeps exactly the units above the line");
+        assertEq(read.unitsOwedOf(loanId, borrower), units - _sliver(loanId) - line, "the borrower keeps exactly the units above the line, less the sliver");
     }
 
     /// @notice The claims receive the WHOLE coverage line, not merely what they needed at their own ticks.
@@ -95,7 +95,7 @@ contract AceRecordlessForfeitTest is WarpClock {
         /// @dev TOTAL forfeit satisfies too -- the lens clamps `withdrawableUnits` to zero on the line.
         assertGt(units, line, "fixture: the loan must sit above its line for the bound to be the subject");
 
-        _settleUnpaid(loanId);
+        _settle(loanId);
 
         assertEq(_potOf(loanId), line, "the pots hold the whole line");
     }
@@ -107,7 +107,7 @@ contract AceRecordlessForfeitTest is WarpClock {
         uint256 loanId = _ladderLoan();
         (uint256 units,) = _unitsAndLine(loanId);
 
-        _settleUnpaid(loanId);
+        _settle(loanId);
 
         uint256 owned = read.unitsOwedOf(loanId, borrower) + read.unitsOwedOf(loanId, keeper) + _potOf(loanId);
         assertEq(owned, units, "units left custody that no ledger entry names");
@@ -140,7 +140,7 @@ contract AceRecordlessForfeitTest is WarpClock {
         uint256 excess = line - need;
         assertGt(excess, 0, "fixture: there must be a real excess over need for this row to mean anything");
 
-        _settleUnpaid(loanId);
+        _settle(loanId);
 
         assertEq(_potOf(loanId), need + excess, "the pot took its need and the whole excess, to the wei");
     }
@@ -151,7 +151,7 @@ contract AceRecordlessForfeitTest is WarpClock {
         uint256 loanId = _ladderLoan();
         uint256 burnsBefore = read.marketState(mid).cumulativeBackedBurns;
 
-        _settleUnpaid(loanId);
+        _settle(loanId);
 
         uint256 delta = read.marketState(mid).cumulativeBackedBurns - burnsBefore;
         assertEq(delta, _potOf(loanId), "backed burns and pots must move together");
@@ -161,7 +161,7 @@ contract AceRecordlessForfeitTest is WarpClock {
     /// @dev Recorded because bad debt becomes near-unreachable here: a zero means the coverage absorbed it, not health.
     function test_ACoveredForfeitWritesNoBadDebt() public {
         uint256 loanId = _ladderLoan();
-        _settleUnpaid(loanId);
+        _settle(loanId);
 
         (uint256 shortUnits, uint256 shortQuote) = read.shortfallOf(loanId);
         assertEq(shortUnits, 0, "a covered forfeit records no shortfall");
@@ -180,7 +180,7 @@ contract AceRecordlessForfeitTest is WarpClock {
         (, uint256 line) = _unitsAndLine(loanId);
         uint256 need = lens.collateralNeeded(mid, loanId);
 
-        _settleUnpaid(loanId);
+        _settle(loanId);
 
         assertEq(_potOf(loanId) - need, line - need, "the pots gained the whole excess, residue included");
     }
@@ -192,7 +192,7 @@ contract AceRecordlessForfeitTest is WarpClock {
         uint256 loanId = _ladderLoan();
         (uint256 units,) = _unitsAndLine(loanId);
 
-        _settleUnpaid(loanId);
+        _settle(loanId);
 
         uint256 owned = read.unitsOwedOf(loanId, borrower) + read.unitsOwedOf(loanId, keeper) + _potOf(loanId);
         assertEq(owned, units, "an atom went missing where an atom is worth thousands of quote");
@@ -206,7 +206,7 @@ contract AceRecordlessForfeitTest is WarpClock {
         (, uint256 line) = _unitsAndLine(loanId);
         assertEq(read.claimCount(mid, loanId), 1, "fixture: the loan really holds its claim");
 
-        _settleUnpaid(loanId);
+        _settle(loanId);
 
         assertEq(read.invPotOf(mid, loanId), line, "the pot holds the whole line");
     }
@@ -228,7 +228,7 @@ contract AceRecordlessForfeitTest is WarpClock {
         rec.setMinPrice(type(uint256).max); // no draw cap: the control is about the residual, not admission
 
         /// @dev THE TOTAL IS KEPT AND THE SHAPE IS GONE: it rested `PER_TICK` at each of `TICKS` rungs, and
-        /// @dev `PER_TICK` sits UNDER the deposit floor now -- which is `minDebt` itself, not a fraction of it.
+        /// @dev `PER_TICK` sits UNDER the deposit floor now -- which is `minPrincipal` itself, not a fraction of it.
         uint256 total = PER_TICK * TICKS;
         q.mint(alice, total);
         vm.startPrank(alice);
@@ -246,11 +246,12 @@ contract AceRecordlessForfeitTest is WarpClock {
         uint256 units = d.read.loan(loanId).collateralUnits;
         uint256 need = l2.collateralNeeded(d.id, loanId);
 
-        _warpTo(d.read.loan(loanId).expiry + MarketInit.autoRefinanceWindow(d.read.loan(loanId).tenor));
+        _warpTo(d.read.loan(loanId).expiry);
         vm.prank(keeper);
-        d.ace.settleExpired(loanId);
+        d.ace.forceClose(loanId);
 
-        assertEq(d.read.unitsOwedOf(loanId, borrower), units - need, "a record-backed borrower still keeps everything above need");
+        uint256 sliver = d.read.unitsOwedOf(loanId, keeper);
+        assertEq(d.read.unitsOwedOf(loanId, borrower), units - sliver - need, "a record-backed borrower still keeps everything above need, less the sliver");
     }
 
     /* ===================== the arms the first pass did not reach ===================== */
@@ -261,7 +262,7 @@ contract AceRecordlessForfeitTest is WarpClock {
     function test_APartialRepayShrinksTheLineAndTheBorrowerKeepsMore() public {
         uint256 loanId = _ladderLoan();
         (uint256 units, uint256 lineBefore) = _unitsAndLine(loanId);
-        uint256 pay = read.debtOf(loanId) / 2;
+        uint256 pay = read.debtOf(loanId) - ace.idToMarketParams(mid).minPrincipal; // down to the floor, the most a partial repay may take
 
         usdc.mint(borrower, pay);
         vm.startPrank(borrower);
@@ -275,11 +276,11 @@ contract AceRecordlessForfeitTest is WarpClock {
         assertGt(line, need, "fixture: coverage must still exceed need after the repay");
         assertGt(lens.withdrawableUnits(mid, loanId), 0, "fixture: the loan must still sit above its line");
 
-        _settleUnpaid(loanId);
+        _settle(loanId);
 
-        assertEq(read.unitsOwedOf(loanId, borrower), units - line, "the bound priced the PRINCIPAL, not the live debt");
+        assertEq(read.unitsOwedOf(loanId, borrower), units - _sliver(loanId) - line, "the bound priced the PRINCIPAL, not the live debt");
         assertEq(_potOf(loanId), line, "the pots hold the POST-REPAY line");
-        assertEq(read.unitsOwedOf(loanId, borrower) + _potOf(loanId), units, "units left custody that no ledger entry names");
+        assertEq(read.unitsOwedOf(loanId, borrower) + _sliver(loanId) + _potOf(loanId), units, "units left custody that no ledger entry names");
     }
 
     /// @notice ON THE LINE, THE PAID DOOR'S SLIVER MAKES THE UNITS CAP BIND: the borrower is credited nothing at all.
@@ -324,10 +325,10 @@ contract AceRecordlessForfeitTest is WarpClock {
         uint256 need = _need(loanId);
         assertGt(line, need, "fixture: there is a real excess over need at this size");
 
-        _settleUnpaid(loanId);
+        _settle(loanId);
 
         assertEq(_potOf(loanId), line, "the pot holds the whole line, residue included");
-        assertEq(read.unitsOwedOf(loanId, borrower) + _potOf(loanId), units, "units left custody that no ledger entry names");
+        assertEq(read.unitsOwedOf(loanId, borrower) + _sliver(loanId) + _potOf(loanId), units, "units left custody that no ledger entry names");
     }
 
     /// @notice LR-9 OVER THE FORFEIT ARM: backed burns net of outflow equals the inventory, before AND after an exit.
@@ -338,7 +339,7 @@ contract AceRecordlessForfeitTest is WarpClock {
         uint256 loanId = _ladderLoan();
         uint256 claimAtTop = read.claimOf(mid, loanId);
 
-        _settleUnpaid(loanId);
+        _settle(loanId);
 
         uint256 inv = _potOf(loanId);
         assertGt(inv, 0, "fixture: the forfeit must leave inventory to reconcile");
@@ -379,10 +380,10 @@ contract AceRecordlessForfeitTest is WarpClock {
         assertGt(read.loan(loanId).closedAt, 0, "A ZERO-DEBT LOAN STAYED OPEN: settlement can now meet a loan with no claims");
         assertEq(lens.collateralNeeded(mid, loanId), 0, "fixture: a retired claim set needs nothing");
 
-        _warpTo(read.loan(loanId).expiry + MarketInit.autoRefinanceWindow(read.loan(loanId).tenor));
+        _warpTo(read.loan(loanId).expiry);
         vm.prank(keeper);
         vm.expectRevert(LoanClosed.selector);
-        ace.settleExpired(loanId);
+        ace.forceClose(loanId);
     }
 
     /* =================================== helpers =================================== */
@@ -410,11 +411,16 @@ contract AceRecordlessForfeitTest is WarpClock {
         return read.invPotOf(mid, loanId);
     }
 
-    /// @dev The unpaid backstop: no sliver, so the arithmetic is the bound and nothing else.
-    function _settleUnpaid(uint256 loanId) internal {
-        _warpTo(read.loan(loanId).expiry + MarketInit.autoRefinanceWindow(read.loan(loanId).tenor));
+    /// @dev `forceClose` at expiry by the keeper: the sliver it credits comes off the lot before the bound, and may floor to zero.
+    function _settle(uint256 loanId) internal {
+        _warpTo(read.loan(loanId).expiry);
         vm.prank(keeper);
-        ace.settleExpired(loanId);
+        ace.forceClose(loanId);
+    }
+
+    /// @dev The keeper's sliver on a settled loan.
+    function _sliver(uint256 loanId) internal view returns (uint256) {
+        return read.unitsOwedOf(loanId, keeper);
     }
 
     /// @dev Rebuilds the market at a different collateral decimal, so the spread's flooring can be pressed.

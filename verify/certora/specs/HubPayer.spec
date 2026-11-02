@@ -3,7 +3,8 @@
 // Users approve the custodian, and the custodian pulls from whatever payer the hub names: PositionManager.spec proves
 // it obeys the hub (O40). This is the hub's half -- every `pull` the hub makes names the verb's caller (`open`, an
 // order's maker at `postOrder`) or the hub itself (`openWithPermit2` after its permit, deleverage's refund). A carried
-// open (a fill, a refinance, a roll) pulls nothing. A pull naming anyone else would drain a third party's approval.
+// open (a fill, a refinance) pulls nothing, and an extension pulls no collateral. A pull naming anyone else would drain a
+// third party's approval.
 //
 // THE CUSTODIAN IS `PullRecorder`, which records every payer it is named. A SIGNATURE SUMMARY IS NOT ENOUGH: under
 // via-IR the permit open's and the deleverage refund's `pull` calls are unresolved, and a `_.pull` summary matched

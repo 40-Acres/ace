@@ -74,7 +74,7 @@ contract AceP7OrderConservationTest is WarpClock {
 
     /// @notice Up to six fills of fuzzed size and collateral against one order; the conservation laws hold after each.
     function testFuzz_OrderFills_ConserveEscrowAndStayInsideTheBand(uint256[6] memory pSeeds, uint256[6] memory uSeeds, uint256 minFillSeed) public {
-        uint256 minFill = bound(minFillSeed, ace.idToMarketParams(mid).minDebt, P / 2);
+        uint256 minFill = bound(minFillSeed, ace.idToMarketParams(mid).minPrincipal, P / 2);
         vm.prank(maker);
         uint256 orderId = ace.postOrder(mid, P, LIQ_LOW, LIQ_HIGH, minFill, TEN, 0);
         uint256 escrow0 = pm.collateralOf(orderId);

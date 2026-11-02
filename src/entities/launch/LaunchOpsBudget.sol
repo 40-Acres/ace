@@ -29,13 +29,13 @@ contract LaunchVestingWallet is VestingWalletUpgradeable {
 /// @notice Settlement clones an OpenZeppelin VestingWallet for the operator, from launchBy over a year, and sends it the ops tokens and the share.
 /// @notice It then sweeps the auction's unsold tokens in and burns every launch token left here; the split is fixed for good.
 /// @notice It owns the launch's LP and collects its fees without moving liquidity: the currency to the operator at once, the token side burned.
-/// @dev Live is the pool's price being set. The hook admits only the strategy, for this key, by launchBy; settlement waits until the key has closed.
-/// @dev Failed is the WHOLE reserve here with no pool: the strategy's recovery returns it, and no launch token is liquid before launchBy.
+/// @dev Live is the pool's price being set. Only the launch's own registration may name the hook, and its key opens only by launchBy, then closes.
+/// @dev Failed is the WHOLE reserve here with no pool: the strategy's recovery returns it, and no other distribution can register the key.
 /// @dev Past launchBy, tokens vest; if migrate waits until a holder can donate the reserve, that donation latches failure first.
 /// @dev Only this budget may sweep the unsold tokens, and it does so after reading live or failed, so they can never latch a failure.
 /// @dev The team's share of the raise is senior to the cut, CUT_BPS of it; each is capped at what is left, and currency past both goes to the bids.
 /// @dev WHAT A BID SPENT, which the auction never stores, is recomputed from its persistent state with its own exit arithmetic; each bid is refunded once.
-/// @dev A clone of one implementation; its args are its launch, read by `terms`. The implementation has none, so its verbs revert.
+/// @dev A clone of one implementation; its args are its launch, read by `terms`. The implementation is no clone, so `terms` fails to decode.
 contract LaunchOpsBudget is ReentrancyGuardTransient {
     using PoolIdLibrary for PoolKey;
     using SafeERC20 for IERC20;

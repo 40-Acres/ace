@@ -57,7 +57,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
         VaultConfig memory cfg = _cfg(5001);
         Listing[] memory l = _listing(); // built first: it deploys a record, and that call would spend the expectation
         vm.expectRevert(AceVault.PerfFeeOutOfBounds.selector);
-        new CuratorVault(cfg, RIG_MIN_DEBT, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, "Curator", "cVLT");
+        new CuratorVault(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, "Curator", "cVLT");
     }
 
     /// @notice A ZERO CURATOR IS REFUSED AT CONSTRUCTION: on a fee vault the first chargeable collection would mint to it and revert.
@@ -67,7 +67,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
         cfg.curator = address(0);
         Listing[] memory l = _listing();
         vm.expectRevert(AceVault.ZeroCurator.selector);
-        new CuratorVault(cfg, RIG_MIN_DEBT, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, "Curator", "cVLT");
+        new CuratorVault(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, "Curator", "cVLT");
     }
 
     /// @dev A crank with nothing to sweep is a NO-OP, not a refusal: there is no batch shape left to get wrong.

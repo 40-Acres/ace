@@ -257,11 +257,11 @@ contract LockAccountPinsTest is LaunchFixture {
         OpenBounds memory b = _noBounds();
         c = new bytes[](22);
         c[0] = abi.encodeWithSignature("multicall(bytes[])", new bytes[](0));
-        c[1] = abi.encodeWithSignature("refinance(uint256,uint256,uint64,(uint256,uint256,uint64))", uint256(1), uint256(1), WEEK, b);
+        c[1] = abi.encodeWithSignature("extend(uint256,uint256,bytes)", uint256(1), uint256(0), "");
         c[2] = abi.encodeWithSignature(
             "refinanceTo((uint256,bytes32,uint256,uint64,(uint256,uint256,uint64),uint256,address))", MigrateArgs(1, id, 1, WEEK, b, 0, address(0))
         );
-        c[3] = abi.encodeWithSignature("setAutoRefinance(uint256,uint64,uint16,uint16)", uint256(1), WEEK, uint16(0), uint16(0));
+        c[3] = abi.encodeWithSignature("extendWithPermit2(uint256,uint256,bytes,bytes)", uint256(1), uint256(0), "", "");
         c[4] = abi.encodeWithSignature("setCreditOperator(address,bool)", stranger, true);
         c[5] = abi.encodeWithSignature(
             "setCreditOperatorWithSig(address,address,bool,uint256,uint256,bytes)", address(acct), stranger, true, uint256(0), uint256(0), ""

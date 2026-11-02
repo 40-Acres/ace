@@ -243,11 +243,15 @@ contract AcePositionTransferTest is Test {
         vm.expectRevert(NotBorrower.selector);
         ace.withdrawCollateral(id, 1e18, seller);
         vm.expectRevert(NotBorrower.selector);
-        ace.setAutoRefinance(id, 0, 300, 0);
+        ace.extend(id, 0, "");
         vm.stopPrank();
 
+        AceFixtures.installYesPolicy(ace, alice); // so the new holder's extension is refused by nothing but its caller leg
+        usdc.mint(buyer, FEE_FLOAT);
+        vm.warp(vm.getBlockTimestamp() + 1 days); // past the open second, which an extension adds nothing in
         vm.startPrank(buyer);
-        ace.setAutoRefinance(id, 0, 300, 0);
+        usdc.approve(address(ace), FEE_FLOAT);
+        ace.extend(id, 0, "");
         ace.withdrawCollateral(id, 1e18, buyer);
         vm.stopPrank();
         assertEq(read.loan(id).collateralUnits, COLL - 1e18, "the new holder exercised the withdraw right");
@@ -257,16 +261,12 @@ contract AcePositionTransferTest is Test {
 
     function test_M3_LoanKeyedStateRidesThePosition_AndTheEventShowsIt() public {
         uint256 id = _open(seller);
-        vm.prank(seller);
-        ace.setAutoRefinance(id, 0, 300, 0);
 
         uint256 principal = read.principalOf(id);
         uint256 escrowed = read.feeEscrowOf(id);
-        (, uint16 buffer,) = read.autoPolicyOf(id);
         /// @dev A carry assertion on a zero subject is 0 == 0, so pin each one nonzero before the transfer.
         assertGt(escrowed, 0, "fixture: the position carries a live fee escrow to ride along");
         assertGt(principal, 0, "fixture: the principal is a real number to ride");
-        assertGt(buffer, 0, "fixture: the armed buffer floor is a real number to ride");
 
         vm.expectEmit(true, true, true, true, address(ace));
         emit Retitled(id, seller, buyer, escrowed);
@@ -274,8 +274,6 @@ contract AcePositionTransferTest is Test {
 
         assertEq(read.principalOf(id), principal, "principal rides");
         assertEq(read.feeEscrowOf(id), escrowed, "the fee escrow rides -- the buyer owns the refund now");
-        (, uint16 buffer2,) = read.autoPolicyOf(id);
-        assertEq(buffer2, buffer, "the armed continuation's buffer floor rides");
     }
 
     // ---- M5: self-transfer is inert ----

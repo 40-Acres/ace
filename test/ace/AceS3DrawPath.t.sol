@@ -4,9 +4,8 @@ pragma solidity 0.8.36;
 import {WarpClock} from "../utils/WarpClock.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
-import {InsufficientCash} from "../../src/ace/hub/Borrower.sol";
 import {FillOverCollateralized} from "../../src/ace/hub/Orders.sol";
-import {MarketParams, OpenBounds, Order} from "../../src/ace/hub/Types.sol";
+import {MarketParams, MigrateArgs, OpenBounds, Order} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
@@ -14,12 +13,9 @@ import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
 
 /// @title AceS3ZeroFreshDeficit
-/// @notice Audit run 2026-10-03-251533, phase 3, F1: a draw that takes NO fresh cash is refused in a lender-made reserve deficit.
-/// @notice `cashAdmits(M, 0, 0)` reduces to `rollReserve <= cash`, so a zero-fresh home refinance refuses while another loan's reservation exceeds cash.
-/// @notice It would move neither number, so the refusal protects no reservation.
-/// @notice `drawableOf` reads zero in both the admitted and the refused state, so the subtractive spelling cannot tell them apart.
-/// @dev The sibling `arm` fix (a re-arm needing no more lands in a deficit) never reached the draw's own cash leg.
-/// @dev RULED, not fixed (B1): the refusal stands, decided by other loans' reservations, pinned KNOWN below; the control and premises stay.
+/// @notice Audit run 2026-10-03-251533, phase 3, F1: a draw that takes NO fresh cash was refused in a lender-made reserve deficit.
+/// @notice The roll reservation is DELETED, so the cash test is resting cash against the fresh draw alone: a zero-fresh refinance always lands.
+/// @dev The two premise rows went with `drawableOf` and the deficit they measured; the control and the former KNOWN row remain.
 contract AceS3ZeroFreshDeficitTest is WarpClock {
     Ace internal ace;
     AceReader internal read;
@@ -29,7 +25,7 @@ contract AceS3ZeroFreshDeficitTest is WarpClock {
     bytes32 internal id;
 
     address internal alice = address(0xA11CE); // the market's one lender
-    address internal armedBorrower = address(0xA4ED); // arms a home roll; its reservation is what the lender goes under
+    address internal otherBorrower = address(0xA4ED); // holds the other loan the lender's cash funded
     address internal bob = address(0xB0B); // an unarmed borrower who only wants to re-term at the same principal
 
     uint64 internal constant TEN7 = 7 days;
@@ -69,68 +65,42 @@ contract AceS3ZeroFreshDeficitTest is WarpClock {
         vm.stopPrank();
     }
 
-    /// @dev Alice funds both loans and the armed loan's reservation; the armed one is 7 days, bob's is 28 so his refund covers a 7-day fee.
-    function _book() internal returns (uint256 armedId, uint256 bobId, uint256 rr) {
+    /// @dev Alice funds both loans; the other one is 7 days, bob's is 28 so his refund covers a 7-day fee.
+    /// @dev Alice names an always-yes roll policy: a same-market re-term reuses the claim only on its yes, which is these rows' premise.
+    function _book() internal returns (uint256 otherId, uint256 bobId) {
         _deposit(3 * P);
-        armedId = _open(armedBorrower, TEN7);
-        vm.prank(armedBorrower);
-        ace.setAutoRefinance(armedId, TEN7, 0, 0);
+        AceFixtures.installYesPolicy(ace, alice);
+        otherId = _open(otherBorrower, TEN7);
         bobId = _open(bob, TEN28);
-        rr = read.rollReserve(id);
-        assertGt(rr, 0, "PREMISE: the armed loan reserved");
     }
 
-    /// @dev The lender takes the market down to exactly `keep`: her own consent, always open at or under the reserve.
+    /// @dev The lender takes the market down to exactly `keep`: her own consent, always open.
     function _withdrawTo(uint256 keep) internal {
-        uint256 out = ace.restingOf(id) - keep; // hoisted: a call in the argument list eats the prank
+        uint256 out = keep == 0 ? type(uint256).max : ace.restingOf(id) - keep; // hoisted: a call in the argument list eats the prank
         vm.prank(alice);
         ace.withdraw(id, out, alice, 0);
         assertEq(ace.restingOf(id), keep, "fixture: the market rests exactly what the row asks");
     }
 
-    /// @notice CONTROL: with exactly the reserve resting, bob's refinance at his old debt lands, and moves neither cash nor reserve.
-    function test_Control_AZeroFreshRefinanceLandsWithExactlyTheReserveResting() public {
-        (, uint256 bobId, uint256 rr) = _book();
-        _withdrawTo(rr);
-        assertEq(ace.drawableOf(id), 0, "PREMISE: nothing is drawable");
+    /// @notice CONTROL: with cash resting, bob's refinance at his old debt lands and draws none of it.
+    function test_Control_AZeroFreshRefinanceLandsAndDrawsNothing() public {
+        (, uint256 bobId) = _book();
+        uint256 cash = ace.restingOf(id);
         vm.prank(bob);
-        uint256 newId = ace.refinance(bobId, P, TEN7, OpenBounds(0, 0, 0));
+        uint256 newId = ace.refinanceTo(MigrateArgs(bobId, id, P, TEN7, OpenBounds(0, 0, 0), 0, address(0)));
         assertEq(read.debtOf(newId), P, "the successor carries the old debt");
-        assertEq(ace.restingOf(id), rr, "the refinance drew no fresh cash");
-        assertEq(read.rollReserve(id), rr, "and touched no reservation");
+        assertEq(ace.restingOf(id), cash, "the refinance drew no fresh cash");
     }
 
-    /// @notice PREMISE: the subtractive spelling reads zero at the reserve and one atom under it, so it cannot tell the two states apart.
-    function test_Premise_DrawableOfReadsZeroOnBothSidesOfTheReserve() public {
-        (,, uint256 rr) = _book();
-        _withdrawTo(rr);
-        assertEq(ace.drawableOf(id), 0, "at exactly the reserve, nothing is drawable");
-        _withdrawTo(rr - 1);
-        assertEq(ace.drawableOf(id), 0, "one atom under it, drawableOf still reads zero, not a deficit");
-    }
-
-    /// @notice PREMISE: a lender who refills the deficit exactly, resting no unreserved cash at all, makes the same refinance land.
-    /// @dev So the refusal turns on the deficit alone, never on there being cash a zero-fresh draw could use.
-    function test_Premise_RefillingTheDeficitExactlyAdmitsIt() public {
-        (, uint256 bobId, uint256 rr) = _book();
+    /// @notice Was KNOWN, ruled (B1): a zero-fresh refinance refused in a lender-made deficit. With nothing reserved it lands at ZERO cash.
+    /// @dev The cash test is resting cash against the fresh draw, and the fresh draw is zero, so no other loan can refuse it.
+    function test_AZeroFreshRefinanceLandsBesideAnotherLoanAtZeroCash() public {
+        (, uint256 bobId) = _book();
         _withdrawTo(0);
-        _deposit(rr); // a refill within the deficit is admitted under the minimum lot
-        assertEq(ace.drawableOf(id), 0, "PREMISE: still nothing drawable");
         vm.prank(bob);
-        uint256 newId = ace.refinance(bobId, P, TEN7, OpenBounds(0, 0, 0));
-        assertEq(read.debtOf(newId), P, "it lands once cash covers the OTHER loan's reservation");
-        assertEq(ace.restingOf(id), rr, "and still draws nothing");
-    }
-
-    /// @notice KNOWN, ruled (B1): in a lender-made deficit a zero-fresh refinance refuses `InsufficientCash`, one atom under the reserve.
-    /// @dev Was the run's RED row. The refusal turns on the OTHER loan's reservation, not on a lender act: it is no clean lender veto.
-    /// @dev An armed borrower disarming lifts it, and a re-terming armed loan releases its own share before the cash test.
-    function test_Known_AZeroFreshRefinanceInADeficitRefusesOnOtherLoansReservations() public {
-        (, uint256 bobId, uint256 rr) = _book();
-        _withdrawTo(rr - 1);
-        vm.prank(bob);
-        vm.expectRevert(InsufficientCash.selector);
-        ace.refinance(bobId, P, TEN7, OpenBounds(0, 0, 0));
+        uint256 newId = ace.refinanceTo(MigrateArgs(bobId, id, P, TEN7, OpenBounds(0, 0, 0), 0, address(0)));
+        assertEq(read.debtOf(newId), P, "it lands with nothing resting");
+        assertEq(ace.restingOf(id), 0, "and draws nothing");
     }
 }
 

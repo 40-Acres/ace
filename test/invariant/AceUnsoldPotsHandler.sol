@@ -3,8 +3,9 @@ pragma solidity 0.8.36;
 
 import {AceAskDecimalsHandler} from "./AceAskDecimalsHandler.sol";
 import {Loan} from "../../src/ace/hub/Types.sol";
-import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
 import {AceInventoryLens} from "../../src/ace/lens/AceInventoryLens.sol";
+import {AceFixtures} from "../utils/AceFixtures.sol";
+import {_extended} from "../utils/Extended.sol";
 
 /// @title AceUnsoldPotsHandler
 /// @notice The ask-decimals walk with every settle door and every emptying verb, each action measured against the unsold-pot count.
@@ -21,10 +22,8 @@ contract AceUnsoldPotsHandler is AceAskDecimalsHandler {
     uint256 public pairCleared; // actions that took it from nonzero back to zero
     uint256 public emptyPotBuys; // buys of a closed loan whose pot was empty, made while another pot was counted
     uint256 public clearingBuys; // buys sized at the lens's clearing budget, or over it
-    uint256 public rollsLanded; // armed loans that rolled at expiry rather than settling, found as an untracked successor id
-    uint256 public armsLanded;
+    uint256 public extendsLanded; // loans the holder extended in cash before expiry rather than letting settle: same id, expiry moved, no pot
     uint256 public finalizesLanded;
-    uint256 public settleExpiredsLanded;
     uint256 public isolatedMoves; // actions that moved one collateral's split while another's stood nonzero and unchanged
 
     bool public stepLawBroken; // an action moved the count by other than (pots filled - pots emptied)
@@ -50,7 +49,9 @@ contract AceUnsoldPotsHandler is AceAskDecimalsHandler {
     }
 
     /// @notice Subjects for every verb, pre-snapshot: three live loans per market for the settle doors, one clean close for the empty buy.
+    /// @notice The pair's lender names an always-yes roll policy AFTER the parent's baseline settled its pots, so a holder's extension lands.
     constructor() {
+        AceFixtures.installYesPolicy(ace, lender);
         for (uint256 k; k < _loanIds.length; k++) {
             _listed[_loanIds[k]] = true;
         }
@@ -133,7 +134,7 @@ contract AceUnsoldPotsHandler is AceAskDecimalsHandler {
         (, s) = ace.lenderUnresolved(lender, address(usdc));
     }
 
-    /// @notice The loans this pair has SETTLED, read raw: closed with debt still booked, since a clean close and a roll both zero it.
+    /// @notice The loans this pair has SETTLED, read raw: closed with debt still booked, since a clean close zeroes it and an extension closes nothing.
     /// @dev It counts settlements and reads no pot, so it matches the pots ever filled only while every settlement leaves one.
     function settledLoans() public view returns (uint256 c) {
         uint256 n = read.loanCount();
@@ -204,7 +205,7 @@ contract AceUnsoldPotsHandler is AceAskDecimalsHandler {
         _latchIsolation(s);
     }
 
-    /// @dev An id the hub issued that no handler verb opened is a roll's successor: track it so the walk can settle it later.
+    /// @dev An id the hub issued that no handler verb opened: none is, since an extension keeps its id, but one that were is tracked for the walk.
     function _adopt(uint256 id) internal {
         _listed[id] = true;
         Loan memory l = read.loan(id);
@@ -212,7 +213,6 @@ contract AceUnsoldPotsHandler is AceAskDecimalsHandler {
         if (i == N) return;
         _loanIds.push(id);
         marketIndexOf[id] = i;
-        rollsLanded++;
     }
 
     // ---- the parent's verbs, tracked ----
@@ -262,20 +262,6 @@ contract AceUnsoldPotsHandler is AceAskDecimalsHandler {
         records[i].setBelow(false);
     }
 
-    /// @notice The unpaid backstop: past expiry and the loan's roll window, anyone settles it, armed or not.
-    function tSettleExpired(uint256 loanSeed) external tracked("settleExpired") {
-        _bump("settleExpired");
-        uint256 loanId = _pick(loanSeed, true);
-        if (loanId == 0) return;
-        Loan memory l = read.loan(loanId);
-        _warpAtLeastTo(uint256(l.expiry) + MarketInit.autoRefinanceWindow(l.tenor));
-        vm.prank(keeper);
-        try ace.settleExpired(loanId) {
-            settlesLanded++;
-            settleExpiredsLanded++;
-        } catch {}
-    }
-
     /// @notice A stranger clears a pot at the lens's clearing budget, or over it; either must empty the pot.
     function tEmptyWhole(uint256 loanSeed, uint256 modeSeed) external tracked("emptyWhole") {
         _bump("emptyWhole");
@@ -294,7 +280,7 @@ contract AceUnsoldPotsHandler is AceAskDecimalsHandler {
         if ((!ok || read.invPotOf(m, loanId) != 0) && !clearingBudgetMissed) (clearingBudgetMissed, missLoan, missBudget) = (true, loanId, budget);
     }
 
-    /// @notice A buy on a closed loan whose pot is already empty (emptied, clean-closed or rolled): it must take no other pot's count.
+    /// @notice A buy on a closed loan whose pot is already empty (emptied or clean-closed): it must take no other pot's count.
     function tBuyEmpty(uint256 loanSeed, uint256 budgetSeed) external tracked("buyEmpty") {
         _bump("buyEmpty");
         uint256 loanId = _pickEmpty(loanSeed);
@@ -304,35 +290,24 @@ contract AceUnsoldPotsHandler is AceAskDecimalsHandler {
         if (ok && counted) emptyPotBuys++;
     }
 
-    /// @notice The borrower arms a live loan to roll at expiry, so a later `forceClose` may continue it rather than settle it.
-    function tArmRoll(uint256 loanSeed) external tracked("armRoll") {
-        _bump("armRoll");
-        uint256 loanId = _pick(loanSeed, true);
-        if (loanId == 0) return;
-        vm.prank(borrower);
-        try ace.setAutoRefinance(loanId, read.loan(loanId).tenor, 0, 0) {
-            armsLanded++;
-        } catch {}
-    }
-
-    /// @notice Arm a live loan and crank it at expiry in one step, so the roll branch, which writes no pot, lands in the walk.
-    /// @dev `tArmRoll` alone rarely meets a `forceClose` on the same loan at expiry inside one depth-32 sequence.
-    function tRollAtExpiry(uint256 loanSeed) external tracked("rollAtExpiry") {
-        _bump("rollAtExpiry");
+    /// @notice The holder extends a live loan in cash in its term's last second, so an extension, which writes no pot, lands in the walk.
+    /// @dev The same id moves in place, its lender's yes standing, so the loan is detected live with its expiry moved.
+    /// @dev A pick already at or past its expiry refuses `LoanMatured`, and the action returns with nothing landed.
+    function tExtendBeforeExpiry(uint256 loanSeed) external tracked("extendBeforeExpiry") {
+        _bump("extendBeforeExpiry");
         uint256 loanId = _pick(loanSeed, true);
         if (loanId == 0) return;
         Loan memory l = read.loan(loanId);
-        vm.prank(borrower);
-        try ace.setAutoRefinance(loanId, l.tenor, 0, 0) {
-            armsLanded++;
-        } catch {
-            return;
-        }
-        _warpAtLeastTo(l.expiry);
-        vm.prank(keeper);
-        try ace.forceClose(loanId) {
-            settlesLanded++;
+        _warpAtLeastTo(uint256(l.expiry) - 1);
+        (bool ok,, uint256 fee) = ace.tryExtend(loanId, 0, "", borrower);
+        if (!ok) return;
+        usdc.mint(borrower, fee);
+        vm.startPrank(borrower);
+        usdc.approve(address(ace), fee);
+        try ace.extend(loanId, 0, "") {
+            if (_extended(read, loanId, l.expiry)) extendsLanded++;
         } catch {}
+        vm.stopPrank();
     }
 
     // ---- shared ----

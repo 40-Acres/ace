@@ -265,7 +265,7 @@ contract CuratorVaultQueueFeeTest is CuratorVaultBase {
         VaultConfig memory cfg = _cfg(v.MAX_PERF_FEE_BPS() + 1);
         Listing[] memory l = _listing(); // BEFORE the expectation: building the row's record is a call
         vm.expectRevert(AceVault.PerfFeeOutOfBounds.selector);
-        new CuratorVault(cfg, RIG_MIN_DEBT, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, "Over", "cOVR");
+        new CuratorVault(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, "Over", "cOVR");
     }
 
     /// @notice A COLLECTION NEVER LOWERS THE HIGH-WATER while anyone holds a share, across rises, losses, requests and claims.

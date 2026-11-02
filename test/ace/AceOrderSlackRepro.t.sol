@@ -30,7 +30,7 @@ abstract contract AceOrderSlackBase is WarpClock {
     uint256 internal constant Q96 = 1 << 96;
     uint256 internal constant K = 1.4e18;
 
-    /// @dev One market and its two tokens; each row builds its own, since price, k and minDebt are write-once.
+    /// @dev One market and its two tokens; each row builds its own, since price, k and minPrincipal are write-once.
     struct Rig {
         AceFixtures.Deployment d;
         MockERC20 quote;
@@ -42,13 +42,13 @@ abstract contract AceOrderSlackBase is WarpClock {
     }
 
     /// @dev A fresh recordless market at `price`, its lender's ladder rested, the maker funded and approved.
-    function _rig(uint8 qd, uint8 cd, uint256 price, uint256 minDebt, uint256 ladder) internal returns (Rig memory r) {
+    function _rig(uint8 qd, uint8 cd, uint256 price, uint256 minPrincipal, uint256 ladder) internal returns (Rig memory r) {
         r.quote = new MockERC20("Quote", "Q", qd);
         r.coll = new MockERC20("Collateral", "C", cd);
         MarketParams memory p = AceFixtures.marketParams(address(r.quote), address(r.coll));
         p.price = price;
         p.minCoverageWad = K;
-        p.minDebt = minDebt;
+        p.minPrincipal = minPrincipal;
         r.d = AceFixtures.deploy(p);
 
         r.quote.mint(AceFixtures.LENDER, ladder);
@@ -311,7 +311,7 @@ contract AceOrderSlackFuzzTest is AceOrderSlackBase {
         uint8 cd;
         uint256 price;
         uint256 low;
-        uint256 minDebt;
+        uint256 minPrincipal;
         uint256 principal;
         uint256 minFill;
     }
@@ -357,7 +357,7 @@ contract AceOrderSlackFuzzTest is AceOrderSlackBase {
         emit log_named_uint("band low end", s.low);
         emit log_named_uint("principal", s.principal);
         emit log_named_uint("minFill", s.minFill);
-        Rig memory r = _rig(s.qd, s.cd, s.price, s.minDebt, 2 * s.principal);
+        Rig memory r = _rig(s.qd, s.cd, s.price, s.minPrincipal, 2 * s.principal);
         uint256 orderId = _post(r, s.principal, s.low, s.low, s.minFill);
 
         for (uint256 k; k < 4; k++) {
@@ -380,9 +380,9 @@ contract AceOrderSlackFuzzTest is AceOrderSlackBase {
         s.price = AceFixtures.px(bound(priceSeed, 1e16, 1e22), address(q), address(cl));
         s.low = lowSeed % 2 == 0 ? s.price : bound(lowSeed >> 1, s.price / 2, s.price);
         uint256 one = 10 ** s.qd;
-        s.minDebt = 100 * one;
-        s.principal = bound(principalSeed, s.minDebt, 1_000_000 * one);
-        s.minFill = bound(minFillSeed, s.minDebt, s.principal);
+        s.minPrincipal = 100 * one;
+        s.principal = bound(principalSeed, s.minPrincipal, 1_000_000 * one);
+        s.minFill = bound(minFillSeed, s.minPrincipal, s.principal);
     }
 
     /// @dev A legal principal: `minFill` on odd draws, else anywhere legal; a sub-floor remainder is folded into the fill.

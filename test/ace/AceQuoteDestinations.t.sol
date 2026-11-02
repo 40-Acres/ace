@@ -4,8 +4,9 @@ pragma solidity 0.8.36;
 import {Test} from "forge-std/Test.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
-import {MarketParams, MarketState, OpenBounds} from "../../src/ace/hub/Types.sol";
+import {MarketParams, MarketState, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
+import {RefinanceMath} from "../utils/RefinanceMath.sol";
 import {MockBlockableERC20} from "../mocks/MockBlockableERC20.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {MockStakeVault} from "../mocks/MockStakeVault.sol";
@@ -15,10 +16,10 @@ import {DeleverageCrank} from "../utils/DeleverageCrank.sol";
 
 /// @title AceQuoteDestinations
 /// @notice The QUOTE leg has the same fixed-destination shape the collateral leg had.
-/// @notice A deleverage residual, a close's escrow refund and a policy-door or fold migration's net-out are credited.
+/// @notice A deleverage residual and a close's escrow refund are credited.
 /// @dev Credited, so the verb completes and the claimant names the address that receives; USDC's blocklist is the instance.
 /// @dev A BORROWER's own refinance pays its net out in the call, as `open` pays: a refused borrower is refused their own request.
-/// @dev That borrower can still refinance at a zero net out, and an armed roll still credits, so nothing is bricked.
+/// @dev That borrower can still refinance at a zero net out, so nothing is bricked.
 contract AceQuoteDestinationsTest is WarpClock, DeleverageCrank {
     Ace internal ace;
     AceReader internal read;
@@ -141,7 +142,7 @@ contract AceQuoteDestinationsTest is WarpClock, DeleverageCrank {
         uint256 units = read.loan(loanId).collateralUnits;
         vm.prank(borrower);
         vm.expectRevert(bytes("blocked"));
-        ace.refinance(loanId, 6_000e6, tenor, OpenBounds(0, 0, 0));
+        ace.refinanceTo(MigrateArgs(loanId, d.id, 6_000e6, tenor, OpenBounds(0, 0, 0), 0, address(0)));
 
         assertEq(read.loan(loanId).closedAt, 0, "the old loan is still open");
         assertEq(read.debtOf(loanId), debt, "with its debt untouched");
@@ -158,48 +159,16 @@ contract AceQuoteDestinationsTest is WarpClock, DeleverageCrank {
         _warpTo(t0 + HOLD);
         MarketParams memory p = ace.idToMarketParams(d.id);
         uint256 owedOld = read.debtOf(loanId) - read.earlyExitRefund(loanId);
-        uint256 principal = LoanMath.principalForOwed(owedOld, p.minTenor, p.baseBps, p.minTenor);
+        uint256 principal = RefinanceMath.principalForOwed(owedOld, p.minTenor, p.baseBps, p.minTenor);
         uint256 wallet = quote.balanceOf(borrower);
         vm.prank(borrower);
-        uint256 newId = ace.refinance(loanId, principal, p.minTenor, OpenBounds(0, 0, 0));
+        uint256 newId = ace.refinanceTo(MigrateArgs(loanId, d.id, principal, p.minTenor, OpenBounds(0, 0, 0), 0, address(0)));
 
         assertGt(read.debtOf(newId), 0, "the successor is live");
         assertTrue(read.loan(loanId).closedAt != 0, "and the old loan retired into it");
         assertEq(quote.balanceOf(borrower), wallet, "no cash moved to the refused borrower");
         (, uint256 owed) = ace.owedOf(loanId, borrower);
         assertEq(owed, 0, "and nothing was booked for a later claim");
-    }
-
-    /// @notice An ARMED roll still credits a refused borrower's net out, so a quote's refusal never stops a continuation.
-    /// @dev The real net out comes from the `minDebt` floor: the borrower repaid under it, so the roll draws AT it.
-    function test_PolicyRoll_NetPayoutStillCreditedWhenTheQuoteRefusesTheBorrower() public {
-        MarketParams memory p = _base();
-        p.minDebt = 4_000e6; // under the 4,500 loan, so a partial repay can leave the debt below the floor
-        AceFixtures.Deployment memory d = _deploy(p);
-        uint256 loanId = _open(d);
-        _warpTo(uint256(read.loan(loanId).expiry) - 1);
-
-        quote.mint(borrower, 1_000e6);
-        vm.startPrank(borrower);
-        quote.approve(address(ace), 1_000e6);
-        ace.repay(loanId, 1_000e6); // under the floor by the borrower's own hand
-        ace.setAutoRefinance(loanId, p.minTenor, 0, 0);
-        vm.stopPrank();
-        assertLt(read.debtOf(loanId), p.minDebt, "fixture: the debt sits under the floor, so the roll draws at it");
-        quote.setBlocked(borrower, true);
-
-        uint256 wallet = quote.balanceOf(borrower);
-        vm.prank(alice);
-        uint256 newId = ace.refinanceByPolicy(loanId);
-
-        assertEq(read.debtOf(newId), p.minDebt, "the roll completed, at the floor");
-        (, uint256 owed) = ace.owedOf(loanId, borrower);
-        assertGt(owed, 0, "and the floored surplus is credited against the retiring loan");
-        assertEq(quote.balanceOf(borrower), wallet, "nothing was pushed at the refused borrower");
-
-        vm.prank(borrower);
-        ace.claimOwed(loanId, haven);
-        assertEq(quote.balanceOf(haven), owed, "paid out to the address the claimant names");
     }
 
     // ============ the global-pause form, which no chosen destination escapes ============

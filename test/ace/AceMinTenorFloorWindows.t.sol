@@ -3,8 +3,6 @@ pragma solidity 0.8.36;
 
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace, InventoryHeld} from "../../src/ace/hub/Ace.sol";
-import {HomeRollExclusive, OutsideRefinanceWindow} from "../../src/ace/hub/Borrower.sol";
-import {RollWindowOpen} from "../../src/ace/hub/Settlement.sol";
 import {Constants} from "../../src/ace/hub/Constants.sol";
 import {MarketInit} from "../../src/ace/hub/MarketInit.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
@@ -16,9 +14,10 @@ import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
 
 /// @title AceMinTenorFloorWindows
-/// @notice The genesis tenor floor's PROMISE, asked of the verbs rather than of the window helpers' return values.
-/// @notice Two flat markets at exactly `MIN_TENOR_FLOOR`, differing only in rate and lender, so a stranger has somewhere to route.
-/// @dev `AceGenesisRails` pins the rail, `AceWindowHelperLiterals` the helpers' values; this suite pins what each window DOES there.
+/// @notice The genesis tenor floor's PROMISE, asked of the verbs rather than of the hold helper's return value.
+/// @notice Two flat markets at exactly `MIN_TENOR_FLOOR`, differing only in rate and lender.
+/// @notice The pre-expiry roll window, the backstop's wait and the fold went with their verbs; the inventory hold remains.
+/// @dev `AceGenesisRails` pins the rail; this suite pins what the hold DOES there.
 /// @dev Instants are named against the loan's own expiry or `closedAt`, never against a literal tenor.
 /// @dev Issue #522; the settle-and-buy guarantee is #370's.
 contract AceMinTenorFloorWindowsTest is WarpClock {
@@ -43,8 +42,6 @@ contract AceMinTenorFloorWindowsTest is WarpClock {
     uint256 internal constant COLL = 400_000e18;
     uint256 internal constant TOP = 1_000_000e6;
     uint256 internal constant BUDGET = 1_000e6; // a partial fill: the rows ask whether the ask is OPEN, not what it clears
-    uint16 internal constant BUF = 500; // routing consent needs a risk distance
-    uint16 internal constant FEE_CAP = 200; // nonzero, so a keeper may name the destination
 
     function setUp() public {
         _warpTo(1_000_000);
@@ -65,7 +62,7 @@ contract AceMinTenorFloorWindowsTest is WarpClock {
 
     // ---- fixture ----
 
-    /// @dev Shared record and downside dials, so the two markets differ only where a routed roll is allowed to differ.
+    /// @dev Shared record and downside dials, so the two markets differ only in rate and lender.
     function _params(uint256 baseBps, address lender_) internal view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(record);
@@ -95,80 +92,7 @@ contract AceMinTenorFloorWindowsTest is WarpClock {
         assertEq(read.loan(loanId).expiry, _now() + FLOOR, "fixture: the loan runs one floor-length term");
     }
 
-    /// @dev Arm at the floor tenor with routing consent, so both the home roll and a stranger's route are live questions.
-    function _arm(uint256 loanId) internal {
-        vm.prank(borrower);
-        ace.setAutoRefinance(loanId, FLOOR, BUF, FEE_CAP);
-    }
-
-    // ---- the roll window, before expiry ----
-
-    /// @notice THE ROLL WINDOW OPENS BEFORE EXPIRY, AND ITS FIRST SECOND IS THE INCUMBENT'S ALONE.
-    /// @notice At that instant the home roll is admissible and a stranger's route is refused by name, through the real door.
-    /// @dev One second earlier the home roll is itself outside the window, so the edge is the window's and not the fixture's.
-    /// @dev A zero window would put that first instant AT expiry, which the premise refuses before any door is asked.
-    function test_Floor_TheRollWindowOpensBeforeExpiryAndLeadsWithTheIncumbent() public {
-        uint256 loanId = _open();
-        _arm(loanId);
-        uint256 expiry = read.loan(loanId).expiry;
-        uint256 opens = expiry - MarketInit.autoRefinanceWindow(FLOOR);
-        assertLt(opens, expiry, "at the floor the roll window must open strictly before expiry");
-
-        _warpTo(opens - 1);
-        (bool ok, bytes4 reason,) = ace.tryContinueTo(loanId, home);
-        assertFalse(ok, "one second before the window the home roll is refused");
-        assertEq(reason, OutsideRefinanceWindow.selector, "by the window's own name");
-
-        _warpTo(opens);
-        (ok,,) = ace.tryContinueTo(loanId, home);
-        assertTrue(ok, "at the window's first second the incumbent's own roll is admissible");
-        vm.prank(rivalLender);
-        vm.expectRevert(HomeRollExclusive.selector);
-        ace.refinanceByPolicyTo(loanId, rival);
-    }
-
-    /// @notice THE LAST SECOND BEFORE EXPIRY IS OPEN TO A STRANGER'S ROUTE, and that is what a NONZERO `homeRollHold` buys.
-    /// @notice The hold is the window's TRAILING share: a stranger is refused until `expiry - homeRollHold`, then admitted.
-    /// @dev So a zero hold does not cost the incumbent its prefix; it runs the prefix to expiry and leaves the stranger no second.
-    /// @dev Named at `expiry - 1` rather than off `homeRollHold`, so the row states the promise and not the formula.
-    function test_Floor_AStrangerMayRouteInTheLastSecondBeforeExpiry() public {
-        uint256 loanId = _open();
-        _arm(loanId);
-        _warpTo(uint256(read.loan(loanId).expiry) - 1);
-
-        vm.prank(rivalLender);
-        uint256 newId = ace.refinanceByPolicyTo(loanId, rival);
-        assertEq(read.loan(newId).market, rival, "the successor sits in the stranger's market");
-        assertEq(read.debtOf(loanId), 0, "and the retiring loan was rolled, not settled");
-        assertEq(read.loan(newId).expiry, _now() + FLOOR, "with a whole fresh floor-length term");
-    }
-
-    // ---- the roll window, after expiry ----
-
-    /// @notice THE UNPAID BACKSTOP WAITS OUT A NONZERO WINDOW PAST EXPIRY, so the armed roll owns the expiry second.
-    /// @notice A zero window would let `settleExpired` end a floor-tenor loan in the very second its roll falls due.
-    /// @dev The window is the LOAN's own, `autoRefinanceWindow(L.tenor)`; the loan here runs the floor tenor.
-    function test_Floor_TheBackstopCannotSettleInTheExpirySecond() public {
-        uint256 loanId = _open();
-        _arm(loanId);
-        uint256 expiry = read.loan(loanId).expiry;
-        uint256 w = MarketInit.autoRefinanceWindow(FLOOR);
-
-        _warpTo(expiry);
-        vm.prank(keeper);
-        vm.expectRevert(RollWindowOpen.selector);
-        ace.settleExpired(loanId);
-
-        _warpTo(expiry + w - 1);
-        vm.prank(keeper);
-        vm.expectRevert(RollWindowOpen.selector);
-        ace.settleExpired(loanId);
-
-        _warpTo(expiry + w);
-        vm.prank(keeper);
-        ace.settleExpired(loanId);
-        assertTrue(ace.isClosed(loanId), "once the window has run, the backstop settles");
-    }
+    // the backstop-second and the fold-extension rows went with `settleExpired` and the fold; AceExtendCash pins single-term extension
 
     // ---- the inventory hold ----
 

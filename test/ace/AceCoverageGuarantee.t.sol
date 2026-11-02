@@ -11,6 +11,7 @@ import {PriceFrame} from "../utils/PriceFrame.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {Constants} from "../../src/ace/hub/Constants.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
@@ -59,6 +60,7 @@ contract AceCoverageGuaranteeTest is Test {
     uint256 internal tLo; // THIS MARKET PRICE; it was the lowest of three seeded rungs
     uint256 internal tMid;
     uint256 internal tHi;
+    uint256 internal minDebtAsk; // nonzero: the next market's floor, clamped to [2, the default]; a dust row's debt must clear it
 
     uint8 internal constant DEF_C = 18; // the pair the fixed-point legs below keep
     uint8 internal constant DEF_Q = 6;
@@ -102,7 +104,7 @@ contract AceCoverageGuaranteeTest is Test {
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(coll));
         p.record = address(record);
         p.minCoverageWad = k;
-        p.minDebt = perTick / MIN_DEBT_DIVISOR;
+        p.minPrincipal = minDebtAsk == 0 ? perTick / MIN_DEBT_DIVISOR : Math.min(Math.max(minDebtAsk, 2), perTick / MIN_DEBT_DIVISOR);
         p.price = tLo;
 
         AceFixtures.Deployment memory d = AceFixtures.deploy(p);
@@ -212,10 +214,10 @@ contract AceCoverageGuaranteeTest is Test {
             (int24 lo, int24 mid, int24 hi) = _ticks(tickSeed, spanSeed);
             id = _market(k, cd, qd, lo, mid, hi);
         }
-        uint256 minDebt = ace.idToMarketParams(id).minDebt;
-        uint256 units = bound(unitsSeed, _unitsFor(k, minDebt), _unitsFor(k, 20_000 * minDebt));
+        uint256 minPrincipal = ace.idToMarketParams(id).minPrincipal;
+        uint256 units = bound(unitsSeed, _unitsFor(k, minPrincipal), _unitsFor(k, 20_000 * minPrincipal));
         uint256 principal = (_maxDebtAt(k, units) * pct) / 100;
-        vm.assume(principal >= minDebt && principal <= 3 * perTick);
+        vm.assume(principal >= minPrincipal && principal <= 3 * perTick);
 
         _assertAdmittedLoanIsCovered(id, k, units, principal);
     }
@@ -272,7 +274,11 @@ contract AceCoverageGuaranteeTest is Test {
         uint256 k = bound(kSeed, Constants.MIN_COVERAGE_WAD, Constants.MAX_COVERAGE_WAD);
         (uint8 cd, uint8 qd) = _decimals(decSeed);
         (int24 lo, int24 mid, int24 hi) = _ticks(tickSeed, spanSeed);
+        /// @dev No repay leaves a live loan under `minPrincipal`, so the dust decades are reached through a floor that admits them.
+        uint256 target = 1 << bound(dustSeed, 0, 120); // 1 wei .. ~1.3e36 of residual debt
+        minDebtAsk = target;
         bytes32 id = _market(k, cd, qd, lo, mid, hi);
+        minDebtAsk = 0;
 
         uint256 principal = 2 * perTick + perTick / 2; // WAS sized to span three seeded rungs; it is one draw now
         uint256 units = _unitsFor(k, principal) * 2; // cushion, so the draw is admitted at any price the seed picks
@@ -285,19 +291,19 @@ contract AceCoverageGuaranteeTest is Test {
         /// @dev grew with the count. A draw holds ONE claim, so the premise is simply that it funded at all.
         assertEq(_liveTicks(id, loanId), 1, "fixture: the draw funded, and a draw holds exactly one claim");
 
-        _meltTo(loanId, 1 << bound(dustSeed, 0, 120)); // 1 wei .. ~1.3e36 of residual debt
+        _meltTo(loanId, Math.max(target, ace.idToMarketParams(id).minPrincipal));
         uint256 held = _drainToHubLine(loanId, 1);
         assertLe(lens.collateralNeeded(id, loanId), held, "a loan on the hub's withdrawal line still covers settlement");
 
         vm.warp(read.loan(loanId).expiry + 1);
         ace.forceClose(loanId);
-        assertTrue(read.loan(loanId).closedAt != 0, "fixture: the expiry fold must actually settle the loan");
+        assertTrue(read.loan(loanId).closedAt != 0, "fixture: `forceClose` must actually settle the loan");
         (uint256 short,) = read.shortfallOf(loanId);
         assertEq(short, 0, "a loan settled off the withdrawal line must leave its lenders whole");
     }
 
-    /// @dev Repay down to `target`, the route into the dust window that needs no melt channel wired.
-    /// @dev A no-op when the debt is already at or under it, so the whole dust range stays reachable.
+    /// @dev Repay down to `target`, which must clear the market's `minPrincipal`; no melt channel needs wiring.
+    /// @dev A no-op when the debt is already at or under it.
     function _meltTo(uint256 loanId, uint256 target) internal {
         uint256 debt = read.loan(loanId).debt;
         if (debt <= target) return;

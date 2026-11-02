@@ -12,22 +12,15 @@ import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {IPersistenceRecord} from "../../src/interfaces/IPersistenceRecord.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
-
-interface IAceAuto {
-    function setAutoRefinance(uint256 id, uint64 tenor, uint16 minBufferBps, uint16 maxFeeBps) external;
-}
-
-interface IAceTry {
-    function tryContinue(uint256 id) external view returns (bool ok, bytes4 reason, uint256 principal);
-}
+import {_extended} from "../utils/Extended.sol";
 
 interface IAceClosed {
     function isClosed(uint256 id) external view returns (bool);
 }
 
 /// @notice A record that answers while its target loan is live and REFUSES once the hub closes it.
-/// @dev The fold's predicate reads it through `tryPersistedPrice`, a raw staticcall that ABSORBS a refusal.
-/// @dev `_closeForRefinance` writes `closedAt` inside the same call, so any later read gets the refusal instead.
+/// @dev The extension's predicate reads it through `tryRecordState`, a raw staticcall that ABSORBS a refusal.
+/// @dev Any read taken after a write of `closedAt` in the same call would get the refusal instead.
 /// @dev The sibling of the same shape through the GATE; a guarantee scoped to one dependency covers neither.
 contract SelfSickeningRecord is IPersistenceRecord {
     IAceClosed public immutable ACE;
@@ -79,8 +72,8 @@ contract SelfSickeningRecord is IPersistenceRecord {
 
 /// @title AceP9Grief
 /// @notice Unit 9 (the griefer) proofs. Every test here is EXPECTED TO PASS; the G-numbers are measurements.
-/// @notice G1: a RECORD that moves mid-fold cannot put a loan beyond every settlement verb; the fold reads it once.
-/// @notice G1b/G1c: the borrower's disarm and a third party's repay, and what each one costs the party holding it.
+/// @notice G1: a RECORD that moves mid-call cannot put a loan beyond every verb; the extension reads it before any write.
+/// @notice G1c: a third party's repay, and what it costs the party holding it.
 /// @notice G2: one wei of custody shortfall bricks every collateral-moving verb on that TOKEN, in every market.
 /// @notice G3: the sizing #235 asks for -- what the unbudgeted watermark retighten costs at the genesis spacing floor.
 /// @dev Findings: docs/ai/audit/runs/2026-08-31-23b79e/phase9-griefer.md
@@ -119,64 +112,41 @@ contract AceP9GriefTest is WarpClock {
         MarketParams memory q = ace.idToMarketParams(d.id);
         q.record = address(record);
         mid = ace.createMarket(q);
+        AceFixtures.installYesPolicy(ace, alice);
     }
 
-    /* ============ G1: what the fold COMMITS to, the fold's body must be able to complete ============ */
+    /* ============ G1: a record read before any write cannot strand the loan ============ */
 
-    /// @notice The fold's predicate admits and the successor's draw takes that same answer rather than re-reading.
+    /// @notice The extension's predicate asks the record before any write, and on the lender's yes it lands, closing nothing, so the record never sickens.
     /// @notice `finalize` is shut here by the record answering `persistedBelow == false`, so `forceClose` is the verb that must land.
-    /// @dev A record whose next answer would refuse must not be able to reach a next answer inside the committed roll.
-    function test_G1_RecordVaryingAcrossTheFold_TheFoldStillReachesATerminalState() public {
-        uint256 loanId = _armedLoan();
-        record.setTarget(loanId); // armed AFTER every entry verb, so genesis and the open saw an unconditional answer
+    /// @dev `forceClose` settles the same loan: settlement asks the record nothing after `closedAt` is written.
+    function test_G1_RecordVaryingAcrossTheExtension_TheLoanStillReachesATerminalState() public {
+        uint256 loanId = _loan();
+        record.setTarget(loanId); // targeted AFTER every entry verb, so genesis and the open saw an unconditional answer
 
-        _warpTo(read.loan(loanId).expiry + 1);
-        (bool ok,,) = IAceTry(address(ace)).tryContinue(loanId);
-        assertTrue(ok, "fixture: the fold's predicate must admit, or the committed roll is never reached");
+        uint64 x = read.loan(loanId).expiry;
+        _warpTo(uint256(x) - 1);
+        (bool ok,,) = ace.tryExtend(loanId, 0, "", borrower);
+        assertTrue(ok, "fixture: the extension's predicate must admit, or the extension is never reached");
 
-        bool settled;
-        vm.startPrank(keeper);
-        try ace.finalize(loanId) {
-            settled = true;
-        } catch (bytes memory err) {
-            emit log_named_bytes("finalize   reverted with", err);
-        }
-        try ace.forceClose(loanId) {
-            settled = true;
-        } catch (bytes memory err) {
-            emit log_named_bytes("forceClose reverted with", err);
-        }
-        vm.stopPrank();
-
-        assertTrue(settled, "SETTLEMENT UNREACHABLE: the record moved mid-fold and no verb resolves the loan");
-    }
-
-    /// @notice The disarm is the BORROWER's alone, and it routes an armed loan to the settle branch.
-    /// @notice A lender holding the adverse side of that loan cannot reach the policy at all.
-    /// @dev The disarm reads no market config and calls nothing external, so no dependency can refuse it.
-    function test_G1b_OnlyTheBorrowerMayDisarm_AndTheDisarmRoutesAnArmedLoanToSettle() public {
-        uint256 loanId = _armedLoan();
-        record.setTarget(loanId);
-        _warpTo(read.loan(loanId).expiry + 1);
-
-        // a lender cannot reach it: the policy is the borrower's alone
-        vm.prank(alice);
-        vm.expectRevert();
-        IAceAuto(address(ace)).setAutoRefinance(loanId, 0, 0, 0);
-
+        uint256 snap = vm.snapshotState();
         vm.prank(borrower);
-        IAceAuto(address(ace)).setAutoRefinance(loanId, 0, 0, 0); // a pure storage write, on the borrower's own loan
+        ace.extend(loanId, 0, "");
+        assertTrue(_extended(read, loanId, x), "on the lender's yes the extension lands in place, closing nothing");
+        record.minPrice(address(usdc), address(coll)); // reverts if the record sickened: the loan it watches never closed
 
+        vm.revertToState(snap);
+        _warpTo(x);
         vm.prank(keeper);
         ace.forceClose(loanId);
-        assertTrue(ace.isClosed(loanId), "a disarmed policy routes the crank to the settle branch and it runs");
+        assertTrue(ace.isClosed(loanId), "forceClose settles the same loan, the record sickening only after the close");
     }
 
-    /// @notice A third party may close an armed, expired loan by repaying it, and this measures the price.
+    /// @notice A third party may close an expired loan by repaying it, and this measures the price.
     /// @notice The price is the WHOLE outstanding debt, and the whole position goes back to the borrower.
     /// @dev `Borrower.repay` reads only `closedAt`, so anyone may pay it: the tree's only measurement of that price.
-    function test_G1c_AThirdPartyRepayClosesAnArmedExpiredLoan_AndThePriceIsTheWholeDebt() public {
-        uint256 loanId = _armedLoan();
+    function test_G1c_AThirdPartyRepayClosesAnExpiredLoan_AndThePriceIsTheWholeDebt() public {
+        uint256 loanId = _loan();
         record.setTarget(loanId);
         _warpTo(read.loan(loanId).expiry + 1);
 
@@ -187,7 +157,7 @@ contract AceP9GriefTest is WarpClock {
         ace.repay(loanId, debt);
         vm.stopPrank();
 
-        assertTrue(ace.isClosed(loanId), "a full repay closes an armed loan the crank would otherwise have rolled");
+        assertTrue(ace.isClosed(loanId), "a full repay closes an expired loan forceClose would otherwise have settled");
         (uint256 unitsToBorrower,) = ace.owedOf(loanId, borrower);
         emit log_named_uint("price of the close, fronted by a lender  (USDC)", debt);
         emit log_named_uint("collateral handed to the borrower       (atoms)", unitsToBorrower);
@@ -237,7 +207,8 @@ contract AceP9GriefTest is WarpClock {
 
     /* ================================= fixtures ================================= */
 
-    function _armedLoan() internal returns (uint256 loanId) {
+    /// @dev The extension's fee rides the borrower's allowance, out of the principal the open paid.
+    function _loan() internal returns (uint256 loanId) {
         usdc.mint(alice, DEPOSIT * 4);
         vm.startPrank(alice);
         usdc.approve(address(ace), type(uint256).max);
@@ -247,8 +218,8 @@ contract AceP9GriefTest is WarpClock {
         coll.mint(borrower, COLL);
         vm.startPrank(borrower);
         coll.approve(address(pm), COLL);
+        usdc.approve(address(ace), type(uint256).max);
         loanId = ace.open(mid, COLL, PRINCIPAL, 0, borrower, OFF);
-        IAceAuto(address(ace)).setAutoRefinance(loanId, 7 days, 0, 0);
         vm.stopPrank();
     }
 

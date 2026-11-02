@@ -15,7 +15,7 @@
 
 methods {
     function FullMath.mulDiv(uint256 a, uint256 b, uint256 d) internal returns (uint256) => fmDown(a, b, d);
-    function FullMath.mulDivRoundingUp(uint256 a, uint256 b, uint256 d) internal returns (uint256) => fmUp(a, b, d);
+    // NO SUMMARY for mulDivRoundingUp: via-IR inlines it, so one cannot bind and requesting it fails the run. Its body runs on the mulDiv above; see HubLoans.spec.
     function Math.mulDiv(uint256 x, uint256 y, uint256 d) internal returns (uint256) => ozPlain(x, y, d);
     function Math.mulDiv(uint256 x, uint256 y, uint256 d, Math.Rounding r) internal returns (uint256) => ozRounded(x, y, d, r);
     function Mul512.gt512(uint256 a, uint256 b, uint256 c, uint256 d) internal returns (bool) => gt512Ghost(a, b, c, d);
@@ -27,7 +27,6 @@ methods {
 }
 
 persistent ghost fmDown(uint256, uint256, uint256) returns uint256;
-persistent ghost fmUp(uint256, uint256, uint256) returns uint256;
 persistent ghost ozPlain(uint256, uint256, uint256) returns uint256;
 persistent ghost ozFloor(uint256, uint256, uint256) returns uint256;
 persistent ghost ozCeil(uint256, uint256, uint256) returns uint256;

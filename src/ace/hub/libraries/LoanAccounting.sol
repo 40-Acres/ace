@@ -4,6 +4,7 @@ pragma solidity 0.8.36;
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Borrower} from "../Borrower.sol";
+import {LoanMath} from "./LoanMath.sol";
 
 import {Cfg, LenderCollateral, Loan, LoanBook, Market, Storage} from "../Types.sol";
 
@@ -38,13 +39,13 @@ library LoanAccounting {
     }
 
     /// @dev Loan-scoped melt: retire the loan's one claim by `amount`, exactly and with no remainder.
-    /// @dev Repaid principal is the lender's money, never resting cash; only a home migration recycles part of it, below.
+    /// @dev Repaid principal is the lender's money, never resting cash; only an own-market refinance its policy admits recycles part of it, below.
     /// @dev NAV-NEUTRAL, and a vault depends on it: `lent` falls by what `owed` rises by, so a repayment moves no share price and is claimable at once.
     function meltLoan(Market storage M, uint256 loanId, uint256 amount) internal {
         meltRecycling(M, loanId, amount, 0);
     }
 
-    /// @dev The melt with `recycle` of the retired claim kept back from `owed`: a home migration funds its successor with it.
+    /// @dev The melt with `recycle` of the retired claim kept back from `owed`: an own-market refinance its policy admits funds its successor with it.
     /// @dev The successor's draw then debits `cash` only for its principal less `recycle`, so the lender's pools net to zero.
     /// @dev Until that draw lands the pools read short by `recycle` and the split by the whole melt, mid-body, where the guarded views refuse.
     function meltRecycling(Market storage M, uint256 loanId, uint256 amount, uint256 recycle) internal {
@@ -74,7 +75,7 @@ library LoanAccounting {
         return M.claim[loanId];
     }
 
-    /// @dev Collateral units the live claim needs at the market's price. ONE CEIL, on the whole claim.
+    /// @dev Collateral units the live claim needs at the market's price. ONE CEIL.
     /// @dev The ceiling excess it leaves is ONE ATOM, which is the coverage line's epsilon over `requiredAt`.
     /// @dev Read by settlement and the sale's reserve; `Settlement._finalizeLoanFor` and `AceLens.collateralNeeded` repeat this ceil and must match.
     function collateralNeeded(Market storage M, Cfg memory c, uint256 loanId) internal view returns (uint256) {
@@ -94,8 +95,7 @@ library LoanAccounting {
     /// @dev The keeper sliver, IN-KIND and sized off DEBT, never collateral: a title transfer risks no capital.
     /// @dev Converted at the loan's OWN FUNDING FLOOR, so settlement acquires no oracle or staleness branch.
     /// @dev A zero floor (nothing funded) yields a zero sliver rather than a division -- the right answer.
-    /// @dev ONE formula for both forceClose branches, so the crank's pay never turns on which one ran.
-    /// @dev A PAID settlement takes it off the top before paying claims, so the sale's reserve must carry it too.
+    /// @dev Every settlement takes it off the top before paying claims, so the sale's reserve must carry it too.
     function sliverUnits(LoanBook storage B, Market storage M, Cfg memory c, uint256 id, uint256 units) internal view returns (uint256) {
         uint256 floorPrice = fundingFloor(M, c, id);
         /// @dev `debt * bps` stays plain: bps caps at 200, so that pair cannot reach a word on any admissible debt.
@@ -114,7 +114,7 @@ library LoanAccounting {
 
     /// @dev The units a disposal may size against: the debt-securing portion, less what settlement must keep.
     /// @dev The CAP stays bare `requiredAt` -- the line's slack secures no debt, and capping on it would sell MORE.
-    /// @dev The KEEP is the live claims plus the keeper sliver, which a paid settlement takes off the top before them.
+    /// @dev The KEEP is the live claims plus the keeper sliver, which settlement takes off the top before them.
     /// @dev That keep is the RECORD-BACKED shape's: a recordless settlement takes the coverage line, which this would under-reserve.
     /// @dev Genesis refuses a deleverage band with no record, and this function is the decline channel's alone, so the two never meet.
     /// @dev Both keep terms fall with the debt, so today's value bounds every post-sale value and no re-check is owed.
@@ -134,12 +134,36 @@ library LoanAccounting {
     function earnFeeEscrowProRata(LoanBook storage B, Market storage M, uint256 id) internal {
         uint256 e = B.feeEscrowOf[id];
         if (e == 0) return;
-        Loan storage L = B.loans[id];
-        uint256 remaining = Math.saturatingSub(L.expiry, block.timestamp);
-        uint256 refund = L.tenor == 0 ? 0 : FullMath.mulDiv(e, remaining, L.tenor);
-        refund = Math.min(refund, e); // a rolled-free term can never out-refund the pot
+        uint256 refund = unearned(B.loans[id], e);
         B.feeEscrowOf[id] = refund;
         _earn(M, id, e - refund);
+    }
+
+    /// @notice The share of `e` this loan's term has not yet earned: THE one spelling of the pro-rata refund.
+    /// @dev Floored against the borrower, and never more than `e`, so a re-anchored term cannot out-refund the pot.
+    /// @dev The fee escrow refunds by it at a close, a refinance and an extension's re-spread alike.
+    function unearned(Loan storage L, uint256 e) internal view returns (uint256) {
+        uint256 tenor = L.tenor;
+        if (tenor == 0) return 0;
+        return Math.min(FullMath.mulDiv(e, Math.saturatingSub(L.expiry, block.timestamp), tenor), e);
+    }
+
+    /// @notice An extension's escrow step: earn the fee escrow on the OLD schedule, then re-anchor the term at now over the loan's own tenor.
+    /// @notice The new term runs from now to now plus the tenor, which never moves, so `openTime + tenor == expiry` still holds.
+    /// @dev BEFORE the fee is booked, so what stays in escrow and the new escrow cut both earn over the new term alone.
+    function respread(LoanBook storage B, Market storage M, uint256 id) internal {
+        earnFeeEscrowProRata(B, M, id);
+        Loan storage L = B.loans[id];
+        uint64 t = uint64(block.timestamp);
+        (L.openTime, L.expiry) = (t, t + L.tenor);
+    }
+
+    /// @notice Book an extension's cash fee: the protocol cut to revenue, the tick cut to `owed` and the escrow cut to the escrow.
+    /// @dev Storage only: the caller pulls the fee after this. The debt is never written: an extension changes the term alone.
+    function bookExtensionFee(LoanBook storage B, Market storage M, uint256 id, uint256 fee) internal {
+        accrueProtocolFee(M, LoanMath.protocolCut(fee));
+        creditLenderShare(M, id, LoanMath.tickCut(fee));
+        B.feeEscrowOf[id] += LoanMath.escrowCut(fee);
     }
 
     /// @dev Settlement earns the whole fee escrow: the lender bore the outcome, so none of it is refundable.

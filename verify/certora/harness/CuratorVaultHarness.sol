@@ -11,13 +11,13 @@ import {CuratorVault, Listing, VaultConfig} from "../../../src/curator/CuratorVa
 contract CuratorVaultHarness is CuratorVault {
     constructor(
         VaultConfig memory cfg,
-        uint256 minDebt,
+        uint256 minPrincipal,
         uint256 coverageWad,
         uint64 timelock,
         Listing[] memory listings,
         string memory name_,
         string memory symbol_
-    ) CuratorVault(cfg, minDebt, coverageWad, timelock, listings, name_, symbol_) {}
+    ) CuratorVault(cfg, minPrincipal, coverageWad, timelock, listings, name_, symbol_) {}
 
     /// @notice When the deferred pile finishes vesting.
     function vestMaturity() external view returns (uint64) {

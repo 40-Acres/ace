@@ -95,6 +95,19 @@ contract AceRecipientRailsHandler is WarpClock {
         return loanIds.length == 0 ? type(uint256).max : loanIds[seed % loanIds.length];
     }
 
+    /// @dev The first live, unexpired loan from the seed's slot on, wrapping once; none when every loan is closed or matured.
+    function _unexpiredLoan(uint256 seed) internal view returns (uint256) {
+        uint256 n = loanIds.length;
+        uint256 chain = vm.getBlockTimestamp(); // the runner moves the chain between calls; the clock lags it
+        uint256 t = chain > _now() ? chain : _now();
+        for (uint256 k; k < n; k++) {
+            uint256 id = loanIds[(seed % n + k) % n];
+            Loan memory l = read.loan(id);
+            if (l.closedAt == 0 && t < l.expiry) return id;
+        }
+        return type(uint256).max;
+    }
+
     function loanCount() external view returns (uint256) {
         return loanIds.length;
     }
@@ -275,8 +288,9 @@ contract AceRecipientRailsHandler is WarpClock {
     }
 
     /// @dev One seed in three sheds nothing; one in seven names no recipient either, which is the plain roll.
+    /// @dev Picks a live, unexpired loan: from expiry a refinance refuses `LoanMatured` before any recipient leg.
     function refinanceTo(uint256 loanSeed, uint256 unitSeed, uint256 toSeed) external {
-        uint256 id = _loan(loanSeed);
+        uint256 id = _unexpiredLoan(loanSeed);
         if (id == type(uint256).max) return;
         Loan memory l = read.loan(id);
         address to = unitSeed % 7 == 0 ? address(0) : _to(toSeed, l.borrower);

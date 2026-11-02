@@ -221,7 +221,7 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
     // ---- the cash bound ----
 
     /// @notice EXITABLE CASH THE REQUESTS DO NOT HOLD BOUNDS AN EXIT: the max views stop there, the max asks pay, and one wei past refuses.
-    /// @dev No request and no armed loan stand, so the bound is the whole of idle.
+    /// @dev No request stands, so the bound is the whole of idle.
     function test_Instant_TheFreePotBoundsTheExitAndTheMaxViewsAreExact() public {
         CuratorVault v = _instantVault(FEE);
         _lpDeposit(v, alice, 10_000e6);
@@ -231,7 +231,7 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
         (uint256 exitable, uint256 heldReq) = v.holds();
         uint256 free = exitable - heldReq;
         assertEq(heldReq, 0, "PREMISE: no request holds cash");
-        assertEq(free, v.idle(), "PREMISE: with no request and no armed loan the bound is all of idle");
+        assertEq(free, v.idle(), "PREMISE: with no request the bound is all of idle");
         assertLt(free, v.previewRedeem(v.balanceOf(alice)), "PREMISE: alice is worth more than the bound");
         assertEq(v.maxWithdraw(alice), free, "maxWithdraw is not the bound");
         assertEq(v.maxRedeem(alice), Math.mulDiv(free, _quoteSupply(v), v.totalAssets() + 1), "maxRedeem is not the bound in shares");

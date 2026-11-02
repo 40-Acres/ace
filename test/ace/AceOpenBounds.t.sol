@@ -973,7 +973,7 @@ contract AceOpenBoundsTest is WarpClock {
 
     /// @notice WITNESS: at every rung a market issues, the all-in fee is STRICTLY under the smallest
     /// @notice principal that market issues, so `fee > principal` is unreachable and the payout is non-zero.
-    /// @dev The RAILS establish that -- genesis `min debt under fee` plus the `feeFundable` share ceiling.
+    /// @dev The RAILS establish that -- genesis `min principal under fee` plus the `feeFundable` share ceiling.
     /// @dev `_payoutCheck` only DEFENDS it, which is why this witness lives beside the guard's own tests.
     function test_witness_OriginationFeeIsStrictlyUnderPrincipalAtEveryAdmissibleOpen() public {
         MarketParams memory p = _gridParams(103); // the all-in ceiling this grid admits
@@ -984,20 +984,20 @@ contract AceOpenBoundsTest is WarpClock {
         /// @dev The fee is monotone in the tenor, so the ends bound the interior and the midpoint is a witness.
         uint64[3] memory terms = [p.minTenor, (p.minTenor + p.maxTenor) / 2, p.maxTenor];
         for (uint256 i; i < terms.length; i++) {
-            uint256 termFee = LoanMath.originationFee(p.minDebt, terms[i], p.baseBps, p.minTenor);
-            assertLt(termFee, p.minDebt, "the fee is under the smallest principal, at every admissible term");
+            uint256 termFee = LoanMath.originationFee(p.minPrincipal, terms[i], p.baseBps, p.minTenor);
+            assertLt(termFee, p.minPrincipal, "the fee is under the smallest principal, at every admissible term");
         }
 
         _seedGrid(gid, p.maxTenor, 5_000e6);
-        uint256 fee = LoanMath.originationFee(p.minDebt, p.maxTenor, p.baseBps, p.minTenor);
+        uint256 fee = LoanMath.originationFee(p.minPrincipal, p.maxTenor, p.baseBps, p.minTenor);
 
         _fundBorrower(bob);
         uint256 bal = usdc.balanceOf(bob);
         vm.prank(bob);
-        uint256 loanId = ace.open(gid, COLL, p.minDebt, p.maxTenor, bob, _bounds(0, 0, 0));
+        uint256 loanId = ace.open(gid, COLL, p.minPrincipal, p.maxTenor, bob, _bounds(0, 0, 0));
 
         assertEq(read.loan(loanId).lastFee, fee, "the hub charged the fee this witness computed");
-        assertEq(usdc.balanceOf(bob) - bal, p.minDebt - fee, "and paid out principal less that fee");
+        assertEq(usdc.balanceOf(bob) - bal, p.minPrincipal - fee, "and paid out principal less that fee");
         assertGt(usdc.balanceOf(bob) - bal, 0, "the hardest admissible open still pays something out");
     }
 
@@ -1011,7 +1011,7 @@ contract AceOpenBoundsTest is WarpClock {
         _seedGrid(gid, p.maxTenor, 12_000e6);
 
         uint256[] memory principals = new uint256[](3);
-        (principals[0], principals[1], principals[2]) = (p.minDebt, p.minDebt + 1, 1_000e6);
+        (principals[0], principals[1], principals[2]) = (p.minPrincipal, p.minPrincipal + 1, 1_000e6);
         uint64[] memory tenors = new uint64[](2);
         (tenors[0], tenors[1]) = (p.minTenor, p.maxTenor);
 
@@ -1037,7 +1037,7 @@ contract AceOpenBoundsTest is WarpClock {
     /// @dev Pure math on the market's own params, so it reaches principals no test ladder could fund.
     function testFuzz_control_OverFeeClauseIsInertAtEveryAdmissibleDraw(uint256 principal, uint64 tenor) public view {
         MarketParams memory p = ace.idToMarketParams(id);
-        principal = bound(principal, p.minDebt, type(uint128).max);
+        principal = bound(principal, p.minPrincipal, type(uint128).max);
         tenor = uint64(bound(uint256(tenor), p.minTenor, p.maxTenor));
         assertLt(LoanMath.originationFee(principal, tenor, p.baseBps, p.minTenor), principal, "fee strictly under principal");
     }

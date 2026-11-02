@@ -31,7 +31,7 @@ contract AceSplitOrderHandler is WarpClock, DeleverageCrank {
 
     uint256 internal constant K = 1.4e18;
     uint256 internal constant S = 1 << 96;
-    uint256 internal constant MIN_DEBT = 1_000e6; // the quote is 6-decimal: one thousand per minimum ticket
+    uint256 internal constant MIN_PRINCIPAL = 1_000e6; // the quote is 6-decimal: one thousand per minimum ticket
     uint256 internal constant MAX_ORDERS = 8; // the O(orders) invariants bound on it
     uint256 internal constant MAX_LOANS = 24; // the loan picker's bound
     uint256 internal constant BAND_BPS = 3000; // the PoC deleverage dials
@@ -62,7 +62,7 @@ contract AceSplitOrderHandler is WarpClock, DeleverageCrank {
     uint256 public ordersPosted;
     uint256 public splittablePosted; // posted with principal at least two minimum fills
     uint256 public wholeOnlyPosted; // posted with principal under two minimum fills
-    uint256 public sentinelPosted; // posted with a zero minFill, which resolves to minDebt and buys the largest slack
+    uint256 public sentinelPosted; // posted with a zero minFill, which resolves to minPrincipal and buys the largest slack
     uint256 public capFills; // fills that landed at the pro-rata cap
     uint256 public partialCapFills; // of those, ones that left principal behind: the split branch itself
     uint256 public minFillCapFills; // of those, ones of exactly the maker's floor: where the per-fill slack is thinnest
@@ -91,7 +91,7 @@ contract AceSplitOrderHandler is WarpClock, DeleverageCrank {
         p.price = price;
         p.record = address(record);
         p.minCoverageWad = K;
-        p.minDebt = MIN_DEBT;
+        p.minPrincipal = MIN_PRINCIPAL;
         p.deleverageFloorEpsBps = ProtocolPolicy.DELEVERAGE_FLOOR_EPS_BPS;
         p.deleverageBandBps = BAND_BPS;
         p.deleverageTargetBps = TARGET_BPS;
@@ -104,7 +104,7 @@ contract AceSplitOrderHandler is WarpClock, DeleverageCrank {
         coll.mint(MAKER, type(uint128).max);
         vm.prank(MAKER);
         coll.approve(address(positionManager), type(uint256).max);
-        _deposit(100 * MIN_DEBT);
+        _deposit(100 * MIN_PRINCIPAL);
 
         _baseline();
     }
@@ -113,7 +113,7 @@ contract AceSplitOrderHandler is WarpClock, DeleverageCrank {
     /// @dev UNGUARDED: if the split branch is dead the campaign must fail to build rather than tally a healthy zero.
     function _baseline() internal {
         vm.prank(MAKER);
-        uint256 orderId = ace.postOrder(id, 10 * MIN_DEBT, price, price, 5 * MIN_DEBT / 2, 0, 0);
+        uint256 orderId = ace.postOrder(id, 10 * MIN_PRINCIPAL, price, price, 5 * MIN_PRINCIPAL / 2, 0, 0);
         _trackOrder(orderId);
         Order memory o = ace.orderOf(orderId);
         uint256 cap = FullMath.mulDiv(o.collateralUnits, o.minFillPrincipal, o.principal);
@@ -270,13 +270,13 @@ contract AceSplitOrderHandler is WarpClock, DeleverageCrank {
     function postOrder(uint256 principalSeed, uint256 minFillSeed, uint256 lowSeed, uint256 shapeSeed) external {
         _bump("postOrder");
         if (_orderIds.length >= MAX_ORDERS) return;
-        uint256 d = bound(principalSeed, 2 * MIN_DEBT, 100 * MIN_DEBT);
+        uint256 d = bound(principalSeed, 2 * MIN_PRINCIPAL, 100 * MIN_PRINCIPAL);
         uint256 shape = shapeSeed % 8;
         uint256 m;
         if (shape == 0) m = 0;
         else if (shape == 1) m = d;
         else if (shape == 2) m = bound(minFillSeed, d / 2 + 1, d);
-        else m = bound(minFillSeed, MIN_DEBT, d / 2);
+        else m = bound(minFillSeed, MIN_PRINCIPAL, d / 2);
         uint256 low = lowSeed % 2 == 0 ? price : bound(lowSeed >> 1, (price * 9) / 10, price);
         vm.prank(MAKER);
         try ace.postOrder(id, d, low, price, m, 0, 0) returns (uint256 orderId) {

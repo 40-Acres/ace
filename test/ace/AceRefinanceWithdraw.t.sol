@@ -16,6 +16,7 @@ import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {MockStakeVault} from "../mocks/MockStakeVault.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
+import {_extended} from "../utils/Extended.sol";
 import {IAceRefinance, MigrateArgs} from "../utils/RebateHarness.sol";
 
 /// @title AceRefinanceWithdraw
@@ -84,6 +85,7 @@ abstract contract AceRefinanceWithdrawFixture is WarpClock {
         fin = IAceRefinance(address(ace));
         _seed(flat, T_MID, LADDER);
         usdc.mint(borrower, 1_000_000e6);
+        AceFixtures.installYesPolicy(ace, alice); // an own-market re-term reuses the claim only on the lender's yes
     }
 
     /// @dev A fresh market on its OWN record, so one test can move its price without touching another's.
@@ -422,38 +424,32 @@ contract AceRefinanceWithdrawDestinationTest is AceRefinanceWithdrawFixture {
     /// @dev Coverage is IDENTICAL in both markets here, so only `maxClaimTicks` can decide, and it decides by 28 wei.
 }
 
-/// @notice The two paths that build `MigrateArgs` THEMSELVES, and so can never carry a caller's withdrawal.
+/// @notice The extension's path, which takes no `MigrateArgs` at all, and so can never carry a caller's withdrawal.
 contract AceRefinanceWithdrawPolicyPathTest is AceRefinanceWithdrawFixture {
     uint256 internal constant COLL_R = 12_000e18;
-    address internal keeper = address(0xCEE9);
 
     function setUp() public {
         _boot();
     }
 
-    /// @notice `Settlement._roll` passes `0, address(0)` structurally, so an expiry roll releases NOTHING to anyone.
-    /// @notice The keeper's bounty is CREDITED out of custody, never transferred, so no vault balance moves at all.
-    /// @dev The sliver is derived from what the roll credited, not recomputed, so this cannot drift from the bounty formula.
-    /// @dev The guard is against a future `MigrateArgs` field being wired through `_roll` with a caller-supplied value.
-    function test_AnExpiryRollShedsTheBountySliverAndNotOneUnitMore() public {
-        uint256 oldId = _open(flat, COLL_R, P);
-        vm.prank(borrower);
-        ace.setAutoRefinance(oldId, TENOR, 0, 0);
-        _warpTo(uint256(read.loan(oldId).expiry) + 1);
+    /// @notice An extension has no withdrawal leg and pays no sliver, so it releases NOTHING to anyone and leaves the lot whole.
+    function test_AnExtensionReleasesNotOneUnit() public {
+        uint256 loanId = _open(flat, COLL_R, P);
+        uint64 x = read.loan(loanId).expiry;
+        _warpTo(uint256(x) - 1);
         uint256 count = read.loanCount();
+        (,, uint256 fee) = ace.tryExtend(loanId, 0, "", borrower);
+        usdc.mint(borrower, fee);
+        vm.startPrank(borrower);
+        usdc.approve(address(ace), fee);
+        ace.extend(loanId, 0, "");
+        vm.stopPrank();
 
-        vm.prank(keeper);
-        ace.forceClose(oldId);
-
-        uint256 newId = read.loanCount();
-        assertEq(newId, count + 1, "fixture: the roll continued rather than settling");
-        uint256 sliver = read.unitsOwedOf(oldId, keeper);
-        assertGt(sliver, 0, "fixture: the crank earned a real bounty");
-
-        assertEq(read.loan(newId).collateralUnits, COLL_R - sliver, "the successor holds the lot less the bounty, to the wei");
-        assertEq(pm.collateralOf(newId), read.loan(newId).collateralUnits, "and the loan record agrees with custody");
-        assertEq(vault.balanceOf(keeper), 0, "the bounty is credited, never transferred");
-        assertEq(vault.balanceOf(sink), 0, "and no release reached any other address");
+        assertTrue(_extended(read, loanId, x), "fixture: the borrower extended rather than the loan settling");
+        assertEq(read.loanCount(), count, "in place");
+        assertEq(read.loan(loanId).collateralUnits, COLL_R, "the loan holds the whole lot, to the wei");
+        assertEq(pm.collateralOf(loanId), read.loan(loanId).collateralUnits, "and the loan record agrees with custody");
+        assertEq(vault.balanceOf(sink), 0, "no release reached any address");
         assertEq(vault.balanceOf(borrower), 0, "not even the borrower's own");
     }
 }

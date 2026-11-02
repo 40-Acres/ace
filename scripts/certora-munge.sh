@@ -15,8 +15,9 @@
 #   - a storage-pointer library call reads and writes the CALLER's storage either way, with the same msg.sender,
 #     msg.value and address(this), and a revert unwinds the same state;
 #   - the one real difference is MEMORY: an external call copies a memory argument, an internal one passes a
-#     reference, so a callee's write to a memory argument would leak back. Exactly two such writes exist
-#     (Orders.post sets `a.tenor`, Borrower.arm sets `ap.reserved`) and neither caller reads the argument again;
+#     reference, so a callee's write to a memory argument would leak back. One library entry point writes one:
+#     Orders.post sets `a.tenor`, and its caller never reads the argument again: Ace's `postOrder` builds its own
+#     `PostArgs` and returns at once. `Borrower.refinance` reads its `MigrateArgs` and writes none of it;
 #   - gas differs, and the prover already treats gasleft() as arbitrary, so that only adds behaviours.
 # A NEW memory-argument write in a library, or a caller that reads one back, voids that argument: re-check it.
 #

@@ -5,32 +5,34 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IAceDeleverageCallback} from "../../interfaces/IAceDeleverageCallback.sol";
-import {Borrower, NoRecordPrice} from "./Borrower.sol";
+import {Borrower, LoanMatured, NoRecordPrice} from "./Borrower.sol";
+import {Settlement} from "./Settlement.sol";
 import {LoanAccounting} from "./libraries/LoanAccounting.sol";
+import {LoanMath} from "./libraries/LoanMath.sol";
 import {Transfers} from "./libraries/Transfers.sol";
 import {Cfg, Loan, LoanBook, Market} from "./Types.sol";
 import {IPositionManager} from "../../interfaces/IPositionManager.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 
 error LoanClosed(); // the loan is retired: no sale verb touches it
-error LoanMatured(); // the tenor has run out: the expiry fold owns the loan, no sale touches it
 error Distressed(); // persistent distress: the settlement machine owns the loan, deleverage stands down
 error DeleverageDisabled(); // the market's deleverage band is zero
 error NotInBand(); // margin not persistently below the band: nothing to deleverage
 error DeleverageStopped(); // margin below the per-market stop floor: title-transfer settlement owns the loan
+error CloseUnfilled(); // a closing sale filled short: it retires the whole debt or nothing
 
 /* ========================================================================= */
 /*  TABLE OF CONTENTS                                                        */
 /*  1. DELEVERAGE  sell into the band, above the stop                        */
-/*  2. DISPOSAL    sizing, the waterfall, and the shared sale core           */
+/*  2. DISPOSAL    sizing, the close, the waterfall, the sale core           */
 /* ========================================================================= */
 
 /// @title Deleverage
 /// @notice Selling collateral against a LIVE loan to restore margin once the record proves the band.
-/// @notice A sale here is a TRADE. When a loan ends instead, title moves and that is `Settlement`.
+/// @notice A sale here is a TRADE: a restore, or a close that retires the whole debt and closes the loan clean. Title moves only in `Settlement`.
 /// @dev Disposal is KEEPER-ROUTED: ACE ships no venue, releases the units, then validates the proceeds.
 /// @dev The floor is the record's windowed minimum, less `deleverageFloorEpsBps`, and it is the price the sale was sized at.
-/// @dev A sale never takes a live loan's debt under `minDebt`, so a third party's crank cannot choose what the loan's expiry fold decides.
+/// @dev No crank leaves a live loan under its debt floor: a restore that would is replaced by a sale of the whole debt, filled whole or reverted.
 library Deleverage {
     using SafeERC20 for IERC20;
 
@@ -49,17 +51,19 @@ library Deleverage {
 
     /* ====== 1. DELEVERAGE ====== */
 
-    /// @notice Sells just enough collateral to restore the target margin once the record proves the band.
-    /// @notice Every unit of proceeds, net of any protocol cut, melts debt. Permissionless, and only before distress and before expiry.
+    /// @notice Sells just enough collateral to restore the target margin, or to close the loan, once the record proves the band.
+    /// @notice Every unit of a restore's proceeds, net of any protocol cut, melts debt. Permissionless, and only before distress and before expiry.
+    /// @notice A closing sale takes no cut; its overshoot of the debt is credited to the borrower.
     /// @notice From the expiry second it refuses with `LoanMatured`, the same condition and error as a collateral withdrawal.
-    /// @notice A crank whose with-cut restore does not fit its caps re-sizes cut-free, then caps: it takes no cut and may still stop short of target.
-    /// @notice The position keeps what settlement would need, so a fully reserved crank sells nothing and returns zero.
-    /// @notice At or under `minDebt` it returns zero right after the disabled, closed and matured gates; no record read or later refusal runs.
+    /// @notice A crank whose with-cut restore does not fit its cap re-sizes cut-free, then caps: it takes no cut and may still stop short of target.
+    /// @notice The position keeps what settlement would need, so a fully reserved restore sells nothing and returns zero.
+    /// @notice A loan AT its debt floor closes on any admitted crank whose restore sells a unit: any melt would leave it under.
+    /// @dev The close decision is a SIZE rule on the full fill's net melt, never a per-crank health test.
     /// @dev Selling helps only while `pay/u > D/C`, and NO per-crank test of that exists: the runtime stop check bounds the price.
     /// @dev What bounds the take is the `stop below sellmax onset` rail with the stop gate: together they hold the sizing at `u <= C`.
     /// @dev Being in the band buys no exemption from the fill floor: the windowed minimum less eps binds every crank.
-    /// @dev Every admitted crank lowers `D/C` and the cap idles the expiry fold's `minDebt` floor: bar atom rounding, no crank flips an armed roll.
-    /// @dev The crank's `< expiry` and the fold's `>= expiry` must stay disjoint: no second admits both.
+    /// @dev Every admitted crank lowers `D/C`, which only eases an extension's admission: bar atom rounding, no crank turns one into a refusal.
+    /// @dev The crank's `< expiry` and `forceClose`'s `>= expiry` must stay disjoint: no second admits both.
     function deleverage(LoanBook storage B, Market storage M, Cfg memory c, uint256 id, bytes calldata data)
         public
         returns (uint256 unitsSold, uint256 stableOut)
@@ -68,8 +72,6 @@ library Deleverage {
         if (c.p.deleverageBandBps == 0) revert DeleverageDisabled(); // precede sizing
         if (L.closedAt != 0) revert LoanClosed();
         if (block.timestamp >= L.expiry) revert LoanMatured(); // before the record reads: a matured crank makes no external call
-        uint256 head = Math.saturatingSub(L.debt, c.p.minDebt); // the most a melt may take off this loan
-        if (head == 0) return (0, 0); // at or under minDebt: no record read, no callback, no event
         if (Borrower.inDistress(L, c)) revert Distressed();
         uint256 ps;
         uint256 free;
@@ -87,17 +89,23 @@ library Deleverage {
             if (ps <= stopLevel) revert DeleverageStopped();
             (unitsSold, free) = _deleverageSizing(c, L.collateralUnits, trig, ps);
         }
-        if (unitsSold == 0) return (0, 0); // at or above target, or a dust restore; `_fit` follows because its room's no-wrap bound needs a sale
+        if (unitsSold == 0) return (0, 0); // at or above target, or a dust restore; the close's no-wrap bound needs a restore
         bool charge;
-        (unitsSold, charge) = _fit(B, M, c, id, unitsSold, free, head, ps);
-        if (unitsSold == 0) return (0, 0); // a cap, or a cut-free restore under one unit, left nothing to sell: no callback, no zero-unit event
-        L.collateralUnits -= unitsSold;
-        (unitsSold, stableOut) = _dispose(B, c, Disposal({id: id, unitsSold: unitsSold, floorPrice: ps}), data);
-        uint256 pay = _meltAll(B, M, c, id, stableOut, charge);
+        (unitsSold, charge) = _fit(B, M, c, id, unitsSold, free);
+        uint256 pay;
+        /// @dev `floor + melt`, never `debt - melt`: a melt at or past the debt routes to the close and cannot underflow.
+        if (L.debt < LoanMath.debtFloor(c.p.minPrincipal) + _net(c, _owed(c, unitsSold, ps), charge)) {
+            (unitsSold, stableOut, pay) = _closeSale(B, M, c, id, ps, data);
+        } else {
+            if (unitsSold == 0) return (0, 0); // the reserve, or a cut-free restore under one unit, left nothing to sell: no callback, no event
+            L.collateralUnits -= unitsSold;
+            (unitsSold, stableOut) = _dispose(B, c, Disposal({id: id, unitsSold: unitsSold, floorPrice: ps}), data);
+            pay = _meltAll(B, M, c, id, stableOut, charge);
+        }
         emit Deleveraged(id, unitsSold, stableOut, pay, msg.sender);
     }
 
-    /* ====== 2. DISPOSAL: sizing, the waterfall, and the sale core ====== */
+    /* ====== 2. DISPOSAL: sizing, the close, the waterfall, and the sale core ====== */
 
     /// @dev Closed-form restore-to-target `u = C (T - T*) / (k m (1-cut) Ps/1e18 - T*)`, k = minCoverageWad.
     /// @dev Returns it twice: `u` with the cut, and `free` with none, the restore a crank that takes no cut is sized to.
@@ -117,42 +125,63 @@ library Deleverage {
         free = Math.min(FullMath.mulDiv(units, trig - tStar, y - tStar), units);
     }
 
-    /// @dev Sells `u` and charges the cut iff `u < units` and `u <= cap = min(securedBase, room)`; else sells `min(free, cap)` with no cut.
-    /// @dev Neither cap is ever crossed, and `free <= u`, so the sale never exceeds `min(u, cap)`.
-    /// @dev `room` is the exact inverse of `_owed`: the largest sale whose proceeds cannot melt the debt under `minDebt`.
-    /// @dev `ps * (10000 - eps)` cannot wrap: the sizing sold, so `ps < (trig + 1) * 1e4`, and a live trigger never exceeds the price, at most `MAX_PRICE`.
-    function _fit(LoanBook storage B, Market storage M, Cfg memory c, uint256 id, uint256 u, uint256 free, uint256 head, uint256 ps)
-        private
-        view
-        returns (uint256 sold, bool charge)
-    {
+    /// @dev Sells `u` and charges the cut iff `u < units` and `u <= cap = securedBase`; else sells `min(free, cap)` with no cut.
+    /// @dev The cap is never crossed, and `free <= u`, so the sale never exceeds `min(u, cap)`.
+    function _fit(LoanBook storage B, Market storage M, Cfg memory c, uint256 id, uint256 u, uint256 free) private view returns (uint256 sold, bool charge) {
         uint256 units = B.loans[id].collateralUnits;
-        uint256 room = FullMath.mulDiv(head, 10000 * c.unitScale, ps * (10000 - c.p.deleverageFloorEpsBps));
-        uint256 cap = Math.min(LoanAccounting.securedBase(B, M, c, id, units), room);
+        uint256 cap = LoanAccounting.securedBase(B, M, c, id, units);
         if (u < units && u <= cap) return (u, true);
         return (Math.min(free, cap), false);
     }
 
-    /// @dev The decline channel's waterfall: a protocol cut off the top, then every remaining unit melts debt.
+    /// @dev The protocol cut on `gross` when the restore charges it, truncated down, loan-favourable: the decision and the melt share it.
+    function _cut(Cfg memory c, uint256 gross, bool charge) private pure returns (uint256) {
+        return charge ? FullMath.mulDiv(gross, c.p.deleverageProtocolBps, 10000) : 0;
+    }
+
+    /// @dev What `gross` of proceeds melts, net of the cut it would pay.
+    function _net(Cfg memory c, uint256 gross, bool charge) private pure returns (uint256) {
+        return gross - _cut(c, gross, charge);
+    }
+
+    /// @dev The close: sells `uClose`, the exact inverse of `_owed`'s ceil, the smallest sale whose bill covers the whole debt.
+    /// @dev `ps * (10000 - eps)` cannot wrap: the restore sold a unit, so `ps < (trig + 1) * 1e4`, and `trig <= 20 * 2^224` on a uint128 debt.
+    /// @dev `uClose <= C`: the strict stop gate and the `stop below sellmax onset` rail give `C ps (1-eps) / S > D`; the debit stays CHECKED.
+    /// @dev The fill must be EXACT, or a live loan would be left under the reserve: a short fill, a wholly refused one included, reverts.
+    /// @dev The books run in `repay`'s order: the escrow split over the live claim, the melt, the clean close, then the overshoot.
+    /// @dev No cut is taken, and the title is untouched, as after a repay.
+    function _closeSale(LoanBook storage B, Market storage M, Cfg memory c, uint256 id, uint256 ps, bytes calldata data)
+        private
+        returns (uint256 units, uint256 out, uint256 debt)
+    {
+        Loan storage L = B.loans[id];
+        debt = L.debt;
+        units = FullMath.mulDiv(debt - 1, 10000 * c.unitScale, ps * (10000 - c.p.deleverageFloorEpsBps)) + 1;
+        L.collateralUnits -= units;
+        uint256 filled;
+        (filled, out) = _dispose(B, c, Disposal({id: id, unitsSold: units, floorPrice: ps}), data);
+        if (filled != units) revert CloseUnfilled();
+        L.debt -= debt;
+        LoanAccounting.earnFeeEscrowProRata(B, M, id); // BEFORE the melt: it credits over the claim the melt retires
+        LoanAccounting.meltLoan(M, id, debt);
+        emit Recash(id, debt, address(this));
+        Settlement.closeClean(B, M, c, id);
+        LoanAccounting.creditQuote(B, M, id, L.borrower, out - debt); // the ceil's overshoot, under one unit's price plus an atom
+    }
+
+    /// @dev The decline channel's waterfall: a protocol cut off the top, then every remaining unit melts debt and the claim alike.
     /// @dev The cut is taken only when the cut-charging restore fit (`charge`); a re-sized crank melts in full.
     /// @dev A PARTIAL FILL keeps `charge` and pays the cut on what filled; the sizing priced the cut in, so it is borrower-borne, never lender-borne.
     /// @dev The cut floors PER CRANK, and a keeper sizes each crank by its refund: a sale split over N cranks forgoes under N quote atoms of cut.
-    /// @dev A partial fill can lift the loan out of band short of target; a repay of that melt, permissionless above `minDebt`, lifts it further.
-    /// @dev The `minDebt` cap bounds `net` by `debt - minDebt`, so a melt never closes the loan and nothing is left to credit back.
-    /// @dev The subtraction stays CHECKED: were the cap ever to regress into an overshoot, the crank reverts rather than under-credits.
+    /// @dev A partial fill can lift the loan out of band short of target; a repay of that melt, permissionless above the floor, lifts it further.
+    /// @dev The close decision bounds every restore fill's net melt by `debt - floor`, so a melt never closes the loan; the subtraction stays CHECKED.
+    /// @dev A partial restore fill melts monotonically less than the full fill the decision judged, so it never lands in dust.
     function _meltAll(LoanBook storage B, Market storage M, Cfg memory c, uint256 id, uint256 stableOut, bool charge) private returns (uint256 net) {
         if (stableOut == 0) return 0; // a wholly refused fill is an exact no-op
-        net = stableOut;
-        if (charge && c.p.deleverageProtocolBps > 0) {
-            // truncates down, loan-favourable
-            uint256 cut = FullMath.mulDiv(stableOut, c.p.deleverageProtocolBps, 10000);
-            if (cut > 0) {
-                LoanAccounting.accrueProtocolFee(M, cut);
-                net = stableOut - cut;
-            }
-        }
+        uint256 cut = _cut(c, stableOut, charge);
+        if (cut > 0) LoanAccounting.accrueProtocolFee(M, cut);
+        net = stableOut - cut;
         B.loans[id].debt -= net;
-        Borrower.shrinkReserve(B, M, c, id); // a lower debt needs no more roll than it had: an armed share only shrinks
         LoanAccounting.meltLoan(M, id, net);
         emit Recash(id, net, address(this));
     }

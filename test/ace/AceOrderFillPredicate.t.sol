@@ -219,7 +219,7 @@ contract AceFillPredicateOrderLegsTest is AceFillPredicateBase {
         uint256 orderId = _postDefault();
         Order memory o = ace.orderOf(orderId);
         uint256 small = MINFILL / 10;
-        assertGe(small, ace.idToMarketParams(id).minDebt, "guard: the fill still clears the market's own dust floor");
+        assertGe(small, ace.idToMarketParams(id).minPrincipal, "guard: the fill still clears the market's own dust floor");
 
         _bothRefuse(orderId, small, _proRata(o, small), FillBelowMin.selector, "under the maker's fill floor");
     }

@@ -28,7 +28,7 @@ TOOLS="${ACE_CERTORA_HOME:-$HOME/.local/share/certora-toolchain}"
 SRC="$TOOLS/CertoraProver"
 CERTORA="$TOOLS/out"
 
-PROVER_COMMIT="63fdea80a35b36ebfe0cff5dff9009b90e91966c" # upstream pin: a Certora prover release
+PROVER_COMMIT="4ef546d00cd67d333914845dead2d72081e1f014" # upstream pin: a Certora prover release
 JDK_RELEASE="jdk-21.0.12.1+1"
 JDK_ASSET="OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz"
 JDK_SHA256="ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94"
