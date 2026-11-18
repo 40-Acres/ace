@@ -17,6 +17,11 @@ remappings = [
     "@openzeppelin/=lib/openzeppelin-contracts/",
 ]
 
+# The fork tests' named endpoints, keyed; every fork test skips without BASE_RPC_URL or ALCHEMY_API_KEY.
+[rpc_endpoints]
+mainnet = "https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}"
+base = "https://base-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}"
+
 # The deployed bytecode is compiled via-IR: `FOUNDRY_PROFILE=deploy forge build` reproduces it.
 [profile.deploy]
 via_ir = true

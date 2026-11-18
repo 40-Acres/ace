@@ -48,7 +48,7 @@ contract AceMarketCashCapTest is Test {
     function _params() internal view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(quote), address(collateral));
         p.record = address(0);
-        p.baseBps = 1;
+        p.lenderAprBps = 1;
         p.settleBountyBps = 0;
         p.minPrincipal = FLOOR;
     }
@@ -220,9 +220,19 @@ contract AceMarketCashCapTest is Test {
         ace.createMarket(p);
     }
 
-    /// @notice The boundary itself is ADMITTED, so the rail cannot be an off-by-one that refuses a legal term.
+    /// @notice The longest term any market can carry is ADMITTED: 71,672,727,272 seconds at the floor rate of 1 bps a year.
+    /// @notice The fee-share rail binds before the uint40 bound now, so uint40.max itself is uncreatable at every rate.
+    /// @dev `1 * T * 11000 <= 2500 * 1e4 * 365 days` gives `T <= 71,672,727,272`; one second more is refused by the fee rail.
     function test_Genesis_AdmitsMaxTenorAtUint40Max() public {
-        bytes32 id = ace.createMarket(_tenorParams(uint64(type(uint40).max)));
-        assertEq(ace.idToMarketParams(id).maxTenor, uint64(type(uint40).max), "the widest representable term must be creatable");
+        uint64 longest = 71_672_727_272;
+        MarketParams memory p = _tenorParams(longest);
+        p.lenderAprBps = 1;
+        bytes32 id = ace.createMarket(p);
+        assertEq(ace.idToMarketParams(id).maxTenor, longest, "the longest creatable term must be creatable");
+
+        p = _tenorParams(longest + 1);
+        p.lenderAprBps = 1;
+        vm.expectRevert(bytes("fee bps too high"));
+        ace.createMarket(p);
     }
 }

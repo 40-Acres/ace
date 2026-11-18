@@ -2,8 +2,9 @@
 pragma solidity 0.8.36;
 
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVaultCapHarness} from "./harness/CuratorVaultCapHarness.sol";
+import {MockTerms} from "./vault/MockTerms.sol";
 
 /// @title CuratorVaultEntryCapFee
 /// @notice The entry cap on a FEE-BEARING vault, with a fee pending that each entry verb mints before it prices.
@@ -13,17 +14,22 @@ contract CuratorVaultEntryCapFeeTest is CuratorVaultBase {
     uint256 internal constant GAIN = 1_000e6;
     uint256 internal constant CAP = 1_234e6;
 
-    CuratorVaultCapHarness internal v;
+    AceVault internal v;
+    MockTerms internal mt;
 
     function setUp() public override {
         super.setUp();
-        v = new CuratorVaultCapHarness(_cfg(2000), _listing());
-        mid = _doorMarket(v, address(collateral));
+        (v, mt) = _onMockTerms(2000); // the product's entry cap is a settable number
         _lpDeposit(v, alice, SEED);
         _giftPart(v, GAIN + 10e6, GAIN); // a counted rise; the donor keeps its market's minimum resting
         _crankAndRecognize(v);
         assertGt(v.pendingFeeShares(), 0, "PREMISE: a fee is pending, so each entry verb mints it before it prices");
         assertGt(v.maxDeposit(bob), 0, "PREMISE: and entry is open");
+    }
+
+    /// @dev The entry cap the product answers.
+    function _setCap(uint256 c) internal {
+        mt.setEntryCap(MockTerms.Mode.Answer, c);
     }
 
     /// @dev `who` holds `amt` of cash and has approved the vault for all of it.
@@ -40,7 +46,7 @@ contract CuratorVaultEntryCapFeeTest is CuratorVaultBase {
     /// @notice `mint(maxMint)` LANDS WITH THE FEE MINTED IN THE SAME CALL: it mints exactly the view, costs its preview, and fits the cap.
     /// @notice One share more is refused in assets, naming the cap.
     function test_EntryCapFee_MintAtMaxMintLandsWithTheFeeMintedFirst() public {
-        v.setCap(CAP);
+        _setCap(CAP);
         uint256 room = v.maxMint(bob);
         uint256 cost = v.previewMint(room);
         uint256 fee = v.pendingFeeShares();
@@ -65,7 +71,7 @@ contract CuratorVaultEntryCapFeeTest is CuratorVaultBase {
 
     /// @notice `deposit(maxDeposit)` LANDS WITH THE FEE MINTED IN THE SAME CALL and mints its preview exactly; one asset more is refused.
     function test_EntryCapFee_DepositAtMaxDepositLandsWithTheFeeMintedFirst() public {
-        v.setCap(CAP);
+        _setCap(CAP);
         assertEq(v.maxDeposit(bob), CAP, "PREMISE: the deposit view is the cap");
         uint256 promised = v.previewDeposit(CAP);
         uint256 fee = v.pendingFeeShares();
@@ -83,7 +89,7 @@ contract CuratorVaultEntryCapFeeTest is CuratorVaultBase {
     /// @notice FOR ANY CAP, WITH A FEE PENDING, a finite `maxMint` is EXACT: its preview fits the cap and one share more does not.
     /// @dev Where the view is finite and fundable, the verb agrees with it: `mint(maxMint)` lands at the previewed cost.
     function testFuzz_EntryCapFee_MaxMintIsExactWithAFeePending(uint256 cap) public {
-        v.setCap(cap);
+        _setCap(cap);
         uint256 room = v.maxMint(bob);
         if (room == type(uint256).max) return;
         assertLe(v.previewMint(room), cap, "the mint view's shares never cost past the cap");

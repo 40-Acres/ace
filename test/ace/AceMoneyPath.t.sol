@@ -115,9 +115,9 @@ contract AceMoneyPathTest is Test {
         return (fee * PROTOCOL_SHARE) / (10000 + PROTOCOL_SHARE);
     }
 
-    /// @dev The borrower's ALL-IN cost: `baseBps` prices the lender and the protocol adds its share.
+    /// @dev The borrower's ALL-IN cost: `lenderAprBps` prices the lender and the protocol adds its share.
     function _fee(uint256 principal) internal view returns (uint256) {
-        return LoanMath.originationFee(principal, ProtocolPolicy.MIN_TENOR, PocDeployConfig.BASE_BPS, ProtocolPolicy.MIN_TENOR);
+        return LoanMath.originationFee(principal, ProtocolPolicy.MIN_TENOR, PocDeployConfig.LENDER_APR_BPS);
     }
 
     /// @dev The solvency identity, EXACT: hub quote is the four booked pots and not a wei more.
@@ -400,8 +400,8 @@ contract AceMoneyPathTest is Test {
     /// @notice The line is `requiredAt` plus ONE ATOM, so the trigger boundary sits strictly inside it.
     /// @dev The trigger leg keeps its own boundary and its own selector; both are asserted, so neither is assumed.
     /// @dev BY SELECTOR: one unit under the LINE still clears the trigger, so only `BelowCoverageLine` can name it.
-    /// @dev THE EPSILON WAS `maxClaimTicks`, one atom per funded tick, because settlement ceiled per tick while
-    /// @dev `requiredAt` ceils the whole debt once. A loan funds exactly one claim, so the derivation gives one.
+    /// @dev THE EPSILON WAS `maxClaimTicks`, one atom per funded tick, because settlement ceiled per tick.
+    /// @dev One claim now takes one ceiling, which `requiredAt`'s coverage margin absorbs, so the one atom left is margin.
     function test_Gate_CoverageLine_AdmitsAndOneUnitLessRefuses() public {
         _fundLadder();
         uint256 principal = 5_000e6;

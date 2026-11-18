@@ -101,7 +101,7 @@ contract AceRefinanceBlockedCollateralTest is WarpClock {
     /// @dev The subject of these rows is COLLATERAL CUSTODY, which the netting shape does not touch.
     function _refiComposed(uint256 oldId) internal returns (uint256) {
         MarketParams memory p = ace.idToMarketParams(id);
-        uint256 credit = P - LoanMath.originationFee(P, TEN30, p.baseBps, p.minTenor) + read.earlyExitRefund(oldId);
+        uint256 credit = P - LoanMath.originationFee(P, TEN30, p.lenderAprBps) + read.earlyExitRefund(oldId);
         uint256 debtOld = read.loan(oldId).debt;
         bytes[] memory calls = new bytes[](2);
         calls[0] = abi.encodeCall(Ace.repay, (oldId, credit >= debtOld ? 0 : debtOld - credit));

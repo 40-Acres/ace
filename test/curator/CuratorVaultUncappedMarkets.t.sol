@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 
@@ -26,14 +26,14 @@ contract CuratorVaultUncappedMarketsTest is CuratorVaultBase {
 
     /// @dev One door market per record print: the door prices at the row's buffered minimum, so a print 1% lower per step is a fresh price and id.
     /// @dev `minPrincipal` is the vault's immutable now, so the print is the differentiator; each market carries a loan, since nothing rests.
-    function _marketAt(CuratorVault v, uint256 i) internal returns (bytes32) {
-        MockPersistenceRecord r = MockPersistenceRecord(v.rowOf(address(collateral)).record);
+    function _marketAt(AceVault v, uint256 i) internal returns (bytes32) {
+        MockPersistenceRecord r = MockPersistenceRecord(_terms(v).rowOf(address(collateral)).record);
         r.setMinPrice(AceFixtures.px(2e18 - i * 2e16, address(usdc), address(collateral)));
         return ace.loanMarket(_borrow(v, PER_MARKET));
     }
 
     /// @dev `MANY` distinct markets on one vault, none of them the rig's default.
-    function _manyMarkets(CuratorVault v) internal {
+    function _manyMarkets(AceVault v) internal {
         bytes32 last = mid;
         for (uint256 i = 1; i <= MANY; i++) {
             bytes32 m = _marketAt(v, i);
@@ -44,7 +44,7 @@ contract CuratorVaultUncappedMarketsTest is CuratorVaultBase {
 
     /// @notice A vault takes MORE markets than the retired cap allowed, and still prices itself.
     function test_MarketCount_IsNotCapped() public {
-        CuratorVault v = _newVault(0); // ships with the rig's own door market already created
+        AceVault v = _newVault(0); // ships with the rig's own door market already created
         _lpDeposit(v, alice, SEED);
 
         _manyMarkets(v);
@@ -57,7 +57,7 @@ contract CuratorVaultUncappedMarketsTest is CuratorVaultBase {
     /// @dev A LINEAR walk over 41 markets is ~41x one market's read, so the bound below is enormous
     /// @dev slack against the walk and still far under it -- this cannot pass on a surviving loop.
     function test_GrossNav_CostDoesNotGrowWithMarketCount() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
 
         uint256 g0 = gasleft();
@@ -79,7 +79,7 @@ contract CuratorVaultUncappedMarketsTest is CuratorVaultBase {
     /// @dev Both markets quote the vault's asset, so both land in the same slot. That summing IS the
     /// @dev mechanism, so it is asserted rather than assumed.
     function test_TwoMarketsOfOneVaultSumIntoOnePosition() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         _open(PER_MARKET);
         bytes32 second = _marketAt(v, 13);
@@ -92,12 +92,12 @@ contract CuratorVaultUncappedMarketsTest is CuratorVaultBase {
     /// @dev The property pooling must not cost. Isolation between PARTIES survives because the key IS
     /// @dev the party; what pooling gives up is only isolation between one party's own markets.
     function test_AnotherVaultsMarketsAreNotInThisOnesPosition() public {
-        CuratorVault a = _newVault(0);
+        AceVault a = _newVault(0);
         _lpDeposit(a, alice, SEED);
         _open(PER_MARKET);
         uint256 navA = a.grossNav();
 
-        CuratorVault b = _newVault(0); // the same USDC quote, so isolation rests on the lender key alone
+        AceVault b = _newVault(0); // the same USDC quote, so isolation rests on the lender key alone
         _lpDeposit(b, bob, SEED);
         _open(PER_MARKET);
 

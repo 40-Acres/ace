@@ -66,7 +66,7 @@ contract AceCollateralWidthRailTest is WarpClock {
 
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(record);
-        p.baseBps = BASE_BPS;
+        p.lenderAprBps = BASE_BPS;
         p.minTenor = TEN7;
         p.maxTenor = TEN30;
 

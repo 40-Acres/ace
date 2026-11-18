@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {MarketParams} from "../../src/ace/hub/Types.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 
@@ -21,7 +21,7 @@ contract CuratorVaultForeignPayoutTest is CuratorVaultBase {
 
     address internal donor = address(0xD0D0);
 
-    CuratorVault internal v;
+    AceVault internal v;
     bytes32 internal own; // a market the donor creates in the vault's asset, naming itself its one lender
 
     function setUp() public override {
@@ -37,8 +37,8 @@ contract CuratorVaultForeignPayoutTest is CuratorVaultBase {
     /// @notice PREMISE: the donor's own deposit moves no vault NAV.
     function test_Premise_AForeignDepositAloneMovesNoNav() public view {
         assertEq(ace.idToMarketParams(own).lender, donor, "PREMISE: the donor is its one lender");
-        assertEq(v.grossNav(), EACH, "the vault's gross is its LP stake alone");
-        assertEq(v.totalAssets(), EACH, "and nothing is deferred");
+        assertEq(v.grossNav(), EACH + v.MIN_SEED(), "the vault's gross is its LP stake and its seed alone");
+        assertEq(v.totalAssets(), EACH + v.MIN_SEED(), "and nothing is deferred");
     }
 
     /// @notice `withdraw(own, max, vault, 0)`: the donor's resting cash joins the vault's counted NAV, and the vest defers it.
@@ -78,12 +78,10 @@ contract CuratorVaultForeignPayoutTest is CuratorVaultBase {
         _assertCountedAndDeferred(g0, t0, paid);
     }
 
-    /// @notice TWO DUST DONATIONS BEFORE THE FIRST DEPOSIT CANNOT BRICK ENTRY: the deferral is all of a dust gross, never past it.
-    /// @dev Both vest roundings CEIL, so the second stamp would read a wei past the gross; the pending pile is capped at the gross.
-    /// @dev `totalAssets` is then exactly zero; were the pile to pass the gross, the read would floor or underflow.
-    /// @dev Any dust transfer is counted, so this cap is what keeps a stranger's dust from bricking the first entry.
+    /// @notice TWO DUST DONATIONS BEFORE THE FIRST DEPOSIT CANNOT BRICK ENTRY: the deferral is exactly the dust, never past it.
+    /// @dev The stamp's basis floors, so the second stamp reads back exactly the two payouts and `totalAssets` is the seed alone.
     function test_TwoDustDonationsBeforeTheFirstDepositCannotBrickEntry() public {
-        CuratorVault w = _newVault(0);
+        AceVault w = _newVault(0);
 
         vm.prank(donor);
         ace.withdraw(own, 1_000, address(w), 0); // the donor's market from setUp, in the same asset
@@ -92,8 +90,8 @@ contract CuratorVaultForeignPayoutTest is CuratorVaultBase {
         vm.prank(donor);
         ace.withdraw(own, 1_000, address(w), 0);
 
-        assertEq(w.grossNav(), 2_000, "PREMISE: two dust payouts are the vault's whole gross");
-        assertEq(w.totalAssets(), 0, "the pending deferral is all of the dust gross, so NAV reads zero");
+        assertEq(w.grossNav(), 2_000 + w.MIN_SEED(), "PREMISE: two dust payouts and the seed are the vault's whole gross");
+        assertEq(w.totalAssets(), w.MIN_SEED(), "the pending deferral is exactly the dust, so NAV reads the seed alone");
         uint256 shares = _lpDeposit(w, alice, EACH);
         assertEq(shares, EACH * 1e6, "and the first depositor entered at the virtual price, unbricked");
     }

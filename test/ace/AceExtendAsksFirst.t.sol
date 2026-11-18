@@ -11,7 +11,7 @@ import {BalancePolicy, LiveLoanPolicy} from "../utils/RollPolicyMocks.sol";
 /// @notice Each row installs a policy that consents only while the state the verb is about to write still reads as before.
 /// @notice So an ask moved after a write turns the verb's yes into a no, and the row's landing assertion fails.
 /// @dev Two verbs ask now, `refinanceTo` and `extend`: `forceClose` only settles, so it asks no policy at all.
-/// @dev Reasoning: docs/ai/audit/findings/extend-in-place-lending-review.md, code-logic checklist row "CEI".
+/// @dev Reasoning: the internal record, code-logic checklist row "CEI".
 contract AceExtendAsksFirstTest is ExtendRig {
     function setUp() public override {
         super.setUp();

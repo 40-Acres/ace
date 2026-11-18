@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {AceVault} from "../../src/curator/AceVault.sol";
 
 /// @title CuratorVaultGate2Sandwich
@@ -19,11 +19,11 @@ contract CuratorVaultGate2SandwichTest is CuratorVaultBase {
     /// @dev A settled pot standing at the hub with NOTHING deferred: `unvested()` is 0 when the run starts.
     /// @dev Deferral already standing would flatter the defence, so the empty start is asserted, not assumed.
     /// @dev The 800 draw keeps the trough shallow; `test_Gate2_ADeepSandwichCapturesNothing` runs the original 12,000.
-    function _settledPot(CuratorVault v) internal returns (uint256 loanId) {
+    function _settledPot(AceVault v) internal returns (uint256 loanId) {
         loanId = _settledPotOf(v, DRAW);
     }
 
-    function _settledPotOf(CuratorVault v, uint256 draw) internal returns (uint256 loanId) {
+    function _settledPotOf(AceVault v, uint256 draw) internal returns (uint256 loanId) {
         _lpDeposit(v, alice, SEED);
         loanId = _open(draw);
         _crank(v, loanId, T2, 0);
@@ -35,7 +35,7 @@ contract CuratorVaultGate2SandwichTest is CuratorVaultBase {
 
     /// @notice A DEEP TROUGH REFUSES THE SANDWICH'S DEPOSIT: there is no trough gate, but the settled pot is unsold.
     function test_Gate2_ADeepSandwichCapturesNothing() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _settledPotOf(v, DEEP_DRAW);
         _assertSandwichRefused(v, 5_000e6);
     }
@@ -49,7 +49,7 @@ contract CuratorVaultGate2SandwichTest is CuratorVaultBase {
     /// @param stake The size of the sandwich deposit.
     /// @return held Cash out plus the value of whatever shares the exit rail left him.
     /// @return baseline The same wallet if he had bought the pot and skipped the vault entirely.
-    function _sandwich(CuratorVault v, uint256 loanId, uint256 stake) internal returns (uint256 held, uint256 baseline) {
+    function _sandwich(AceVault v, uint256 loanId, uint256 stake) internal returns (uint256 held, uint256 baseline) {
         usdc.mint(bob, stake + BUY);
 
         vm.startPrank(bob);
@@ -78,7 +78,7 @@ contract CuratorVaultGate2SandwichTest is CuratorVaultBase {
     }
 
     /// @dev The sandwich's first leg, refused: the settled pot is unsold, so the deposit reverts `InventoryUnsold` and no share is minted.
-    function _assertSandwichRefused(CuratorVault v, uint256 stake) internal {
+    function _assertSandwichRefused(AceVault v, uint256 stake) internal {
         usdc.mint(bob, stake);
         vm.startPrank(bob);
         usdc.approve(address(v), stake);
@@ -90,7 +90,7 @@ contract CuratorVaultGate2SandwichTest is CuratorVaultBase {
 
     /// @dev THE GATE. The attacker-triggered rebate must not be collectable: the deposit that would stand in the vault is refused.
     function test_Gate2_TheAttackerTriggeredSandwichCapturesNothing() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _settledPot(v);
         _assertSandwichRefused(v, 5_000e6);
     }
@@ -98,7 +98,7 @@ contract CuratorVaultGate2SandwichTest is CuratorVaultBase {
     /// @dev The same attack with D >> V, which is where `filled * D/(V+D)` approaches the whole payment.
     /// @dev Flash-sized, because deposit, buy and exit are one transaction and nothing here needs a block.
     function test_Gate2_TheFlashSizedAttackerTriggeredSandwichCapturesNothing() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _settledPot(v);
         _assertSandwichRefused(v, 40 * SEED);
     }
@@ -110,7 +110,7 @@ contract CuratorVaultGate2SandwichTest is CuratorVaultBase {
         uint256[4] memory sizes = [uint256(5_000e6), 50_000e6, 200_000e6, 40 * SEED];
         for (uint256 i; i < sizes.length; i++) {
             uint256 snap = vm.snapshotState();
-            CuratorVault v = _newVault(0);
+            AceVault v = _newVault(0);
             uint256 loanId = _settledPot(v);
             _waivePots(v);
             (uint256 held, uint256 baseline) = _sandwich(v, loanId, sizes[i]);
@@ -125,7 +125,7 @@ contract CuratorVaultGate2SandwichTest is CuratorVaultBase {
         uint256[4] memory sizes = [uint256(5_000e6), 50_000e6, 200_000e6, 40 * SEED];
         for (uint256 i; i < sizes.length; i++) {
             uint256 snap = vm.snapshotState();
-            CuratorVault v = _newVault(0);
+            AceVault v = _newVault(0);
             _settledPot(v);
             _assertSandwichRefused(v, sizes[i]);
             vm.revertToState(snap);
@@ -135,7 +135,7 @@ contract CuratorVaultGate2SandwichTest is CuratorVaultBase {
     /// @dev What the attacker is really buying: the pot's collateral, at a price his own shares refund.
     /// @dev Pinned because the extraction ceiling is the FILL, and the fill is what the class is owed.
     function test_Gate2_TheFillIsCappedAtWhatTheClassIsOwedSoTheCeilingIsThePot() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _settledPot(v);
         usdc.mint(bob, BUY);
         vm.startPrank(bob);

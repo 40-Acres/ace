@@ -71,22 +71,21 @@ library MarketInit {
         /// @dev a declared-but-unread field on an immutable preimage is a lie: with the ask off no buyer exists to pay a fill fee
         require(p.inventoryAsk || p.fillFeeBps == 0, "ask off but fill fee set");
         require(p.minCoverageWad >= Constants.MIN_COVERAGE_WAD && p.minCoverageWad <= Constants.MAX_COVERAGE_WAD, "min coverage out of band");
-        /// @dev THE CEILING IS REPRESENTATIONAL, NOT POLICY: `feeFundable` below binds at 2272, under this 2500 at every shape.
-        /// @dev Without it an unbounded `baseBps` reaches `feeFundable`'s multiply first and reverts Panic instead of by name.
-        require(p.baseBps >= Constants.MIN_BASE_BPS && p.baseBps <= Constants.MAX_FEE_SHARE_BPS, "base bps out of band");
+        /// @dev The rate is bps a year, and this is its FLOOR alone: `feeFundable` below is its ceiling and never multiplies it, so any rate refuses by name.
+        require(p.lenderAprBps >= Constants.MIN_LENDER_APR_BPS, "rate below floor");
         /// @dev The floor sits at or over the hold's divisor: at it no tenor-derived hold is zero.
-        /// @dev MUST precede the two fee rails below: at `minTenor == 0` one misnames the refusal and the other divides by it.
+        /// @dev MUST precede the two fee rails below: at a zero `maxTenor` the share rail refuses too, under another name.
         require(p.minTenor >= Constants.MIN_TENOR_FLOOR, "min tenor under floor");
         require(p.maxTenor >= p.minTenor, "max tenor below min");
         require(p.maxTenor <= type(uint40).max, "max tenor too long"); // a sanity bound on a write-once term
         /// @dev the all-in fee stays inside `MAX_FEE_SHARE_BPS` of the draw at every term the market offers
-        require(LoanMath.feeFundable(p.baseBps, p.maxTenor, p.minTenor), "fee bps too high");
+        require(LoanMath.feeFundable(p.lenderAprBps, p.maxTenor), "fee bps too high");
         /// @dev A TERM IS ADMISSIBLE IFF IT LIES IN `[minTenor, maxTenor]`: nothing quantises a tenor, so a borrower picks any in that range.
         require(p.minPrincipal >= 2, "debt floor zero"); // its half floors every live loan, so it must be positive
         /// @dev The SHARE rail above bounds a fraction and cannot bound one wei, because the fee CEILS; so this checks the hardest ends.
         /// @dev Those are maxTenor and minPrincipal: the fee is monotone in tenor, and `ceil(P r) < P` binds at the smallest P.
         /// @dev MUST stay below `debt floor zero`: at 0 or 1 the ceiled fee equals the principal, so this rail would fail first and shadow it
-        require(LoanMath.originationFee(p.minPrincipal, p.maxTenor, p.baseBps, p.minTenor) < p.minPrincipal, "min principal under fee");
+        require(LoanMath.originationFee(p.minPrincipal, p.maxTenor, p.lenderAprBps) < p.minPrincipal, "min principal under fee");
         /// @dev The deposit floor and the smallest loan are both `minPrincipal`, so one cap covers both.
         require(p.minPrincipal <= type(uint128).max, "min principal over cash cap");
         /// @dev THE MINIMUM TICKET MUST OPEN: its coverage line at the price must fit the widest lot an open admits, `max / 1e18`.
@@ -107,8 +106,8 @@ library MarketInit {
             require(p.deleverageTargetBps < 10000, "deleverage target too high");
             /// @dev the stop floor: a real positive margin strictly below the fire band
             /// @dev below it settlement owns the loan -- a trade must not do liquidation's job
-            uint256 stop = p.deleverageStopBps;
-            require(stop > 0 && stop < p.deleverageBandBps, "deleverage stop out of band");
+            uint256 stopBps = p.deleverageStopBps;
+            require(stopBps > 0 && stopBps < p.deleverageBandBps, "deleverage stop out of band");
             require(p.deleverageProtocolBps <= Constants.MAX_DELEVERAGE_PROTOCOL_BPS, "deleverage cut too high");
             /// @dev the closed form's real-arithmetic feasibility: `k m (1-cut) + t > 1e18`, k = minCoverageWad
             /// @dev REDUNDANT given the sell-max rail below and `target > band > stop`, and kept for the sharper message it puts first

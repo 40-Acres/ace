@@ -2,8 +2,9 @@
 pragma solidity 0.8.36;
 
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
-import {VaultConfig} from "../../src/curator/AceVault.sol";
-import {CuratorVault, Listing} from "../../src/curator/CuratorVault.sol";
+import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
+import {Listing} from "../../src/entities/curated/CuratorTerms.sol";
+import {CuratedVaults} from "../utils/CuratedVaults.sol";
 import {PocDeployConfig} from "../../src/config/Defaults.sol";
 import {MockSendHookERC20} from "../mocks/MockSendHookERC20.sol";
 import {ITokenReceiveHook} from "../mocks/MockHookERC20.sol";
@@ -15,7 +16,7 @@ import {CuratorVaultBase} from "./CuratorVaultBase.sol";
 /// @dev The drain's keys, hold and entry rows live in `CuratorVaultDrain.t.sol`.
 contract CuratorVaultDrainGuardTest is CuratorVaultBase, ITokenReceiveHook {
     MockSendHookERC20 internal tok;
-    CuratorVault internal v;
+    AceVault internal v;
     bool internal armed;
     bool internal reentered;
     bytes internal reentryErr;
@@ -27,7 +28,7 @@ contract CuratorVaultDrainGuardTest is CuratorVaultBase, ITokenReceiveHook {
         VaultConfig memory cfg = _cfg(0);
         cfg.asset = address(tok);
         cfg.guardian = address(this);
-        v = new CuratorVault(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, new Listing[](0), "Hooked", "cHOOK");
+        v = CuratedVaults.make(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, new Listing[](0), "Hooked", "cHOOK");
         tok.mint(address(this), 10_000e6);
         tok.approve(address(v), type(uint256).max);
         tok.setHookTarget(address(this));

@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {BorrowRequest} from "../../src/curator/AceVaultFlows.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {GateRefused} from "../../src/ace/hub/Lender.sol";
@@ -31,7 +31,7 @@ contract CuratorVaultSurfacePinTest is CuratorVaultBase {
     /// @dev The door opens the loan to the vault and withdraws every resting unit to the vault.
     /// @dev The crank's `collect` spends the vault's own pool and pays it to the vault.
     function test_Surface_EveryHubCallNamesTheVaultItselfAsOwnerAndPayee() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
 
         uint64 tenor = ProtocolPolicy.MIN_TENOR;
@@ -75,7 +75,7 @@ contract CuratorVaultSurfacePinTest is CuratorVaultBase {
     /// @dev The claim names the VAULT; only the exit names a receiver, and it pays out of the vault's own cash alone.
     /// @dev A claim addressed to the exiter would pay them twice: once at the hub and once out of the vault.
     function test_Surface_AClaimAndAnExitAddressTwoDifferentParties() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         _lpDeposit(v, bob, 1_000e6);
         uint256 loanId = _open(DRAW);
@@ -104,7 +104,7 @@ contract CuratorVaultSurfacePinTest is CuratorVaultBase {
     /// @dev The market NAMES its one lender, and the name is in the id preimage, so it cannot move.
     /// @dev REPLACES the gate-predicate row: there is no contract left to interview, only a field to read.
     function test_Tenancy_TheMarketNamesTheVaultAsItsOneLender() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         assertEq(ace.idToMarketParams(mid).lender, address(v), "the rig really did bind this market to this vault");
     }
 
@@ -113,7 +113,7 @@ contract CuratorVaultSurfacePinTest is CuratorVaultBase {
     /// @dev foreign deposit would make that market's aggregates permanently wrong for the vault.
     function testFuzz_Tenancy_TheHubRefusesAForeignDepositInAHeldMarket(address who, uint96 amt) public {
         vm.assume(who != address(0) && who.code.length == 0);
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         vm.assume(who != address(v));
         uint256 a = bound(uint256(amt), 10e6, 1_000_000e6);
 

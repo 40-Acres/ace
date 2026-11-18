@@ -72,7 +72,7 @@ abstract contract AceAskDriftFuzzBase is WarpClock {
         MarketParams memory p = AceFixtures.marketParams(address(quote), address(coll));
         p.price = AceFixtures.priceAt(address(quote), address(coll), offset);
         p.record = address(rec);
-        p.baseBps = 1;
+        p.lenderAprBps = 1;
         p.settleBountyBps = 0;
         p.minPrincipal = 10 * _one();
         p.fillFeeBps = FEE;

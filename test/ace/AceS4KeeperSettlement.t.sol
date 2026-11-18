@@ -47,7 +47,7 @@ contract AceS4OwnRefinanceStaleBidTest is WarpClock {
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(coll));
         p.record = address(rec);
         p.lender = alice;
-        p.baseBps = 40;
+        p.lenderAprBps = 40;
         p.minTenor = TEN7;
         p.maxTenor = TEN28;
         p.settleBountyBps = 50;
@@ -115,7 +115,7 @@ contract AceS4OwnRefinanceStaleBidTest is WarpClock {
         loanId = _open(TEN7);
         _warpTo(uint256(read.loan(loanId).expiry) - 1 hours);
         rec.setMinPrice(_px(0.9e18));
-        principal = RefinanceMath.principalForOwed(P, TEN7, 40, TEN7);
+        principal = RefinanceMath.principalForOwed(P, TEN7, 40);
         assertGt(principal, P, "PREMISE: the re-term capitalises its fee, so it draws a small fresh remainder");
     }
 

@@ -13,7 +13,8 @@ pragma solidity 0.8.36;
 library Constants {
     // ---- ACE's own take: uniform across every market, never creator-set ----
 
-    uint256 internal constant PROTOCOL_SHARE_BPS = 1000; // ACE's origination take, charged ON TOP of the lender's baseBps, never carved out of it
+    uint256 internal constant PROTOCOL_SHARE_BPS = 1000; // ACE's origination take, charged ON TOP of the lender's rate, never carved out of it
+    uint256 internal constant SECONDS_PER_YEAR = 365 days; // the period every market's rate is quoted per, leap years ignored: a rate is bps a year
     uint256 internal constant REBATE_PHI_BPS = 5000; // half the lender fee is refundable: a borrower pays the midpoint of term booked and used
     uint64 internal constant SWEEP_PERIOD = 1 days; // min spacing between keeper-crank sweeps: transfer count against dwell time
 
@@ -36,7 +37,7 @@ library Constants {
     uint256 internal constant MAX_COVERAGE_WAD = 20e18; // ruled: 20x admits ~5% LTV markets
     uint256 internal constant MAX_DELEVERAGE_PROTOCOL_BPS = 2000; // sanity ceiling; the feasibility rail guards
     uint256 internal constant MAX_FILL_FEE_BPS = 50; // a ceiling on the premium a settled pot's buyer pays over the ask; no keeper pays it
-    uint256 internal constant MIN_BASE_BPS = 1; // keeps the origination fee and the tick cut non-zero; the escrow cut may still floor to zero
+    uint256 internal constant MIN_LENDER_APR_BPS = 1; // 1 bp a year keeps the origination fee and the tick cut non-zero; the escrow cut may floor to zero
     uint256 internal constant MAX_PRICE = 1 << 224; // Q96 price ceiling; every overflow argument assumes it, so re-derive them before raising it
     uint256 internal constant MAX_DECIMALS = 18; // bounds the pair's decimal gap, hence how far par sits from 2^96
     uint256 internal constant MAX_DELEVERAGE_FLOOR_EPS_BPS = 200; // ruled unsized: deleverage is never the solvency path; the header relation binds it

@@ -43,7 +43,7 @@ contract AceSoleTenancyGenesisTest is Test {
     /// @dev The whole deletion rests on this rail. Without it the hub must still compile the multi-lender path.
     function test_Genesis_RefusesAMarketWithNoLender() public {
         MarketParams memory p = _params(address(0));
-        p.baseBps = 41; // a fresh id, so the refusal is the lender rail and not a duplicate
+        p.lenderAprBps = 41; // a fresh id, so the refusal is the lender rail and not a duplicate
         vm.expectRevert(bytes("lender required"));
         ace.createMarket(p);
     }
@@ -51,7 +51,7 @@ contract AceSoleTenancyGenesisTest is Test {
     /// @notice The named lender is readable back off the market, so a vault can verify what it adopted.
     function test_Genesis_NamesTheLenderAndReadsItBack() public {
         MarketParams memory p = _params(bob);
-        p.baseBps = 42;
+        p.lenderAprBps = 42;
         bytes32 id = ace.createMarket(p);
         assertEq(ace.idToMarketParams(id).lender, bob, "the market carries its one lender");
     }
@@ -61,9 +61,9 @@ contract AceSoleTenancyGenesisTest is Test {
     /// @dev and the second creation would revert `MarketExists`, making the field unusable.
     function test_Genesis_TheLenderIsPartOfTheMarketId() public {
         MarketParams memory a = _params(alice);
-        a.baseBps = 43;
+        a.lenderAprBps = 43;
         MarketParams memory b = _params(bob);
-        b.baseBps = 43;
+        b.lenderAprBps = 43;
         assertTrue(ace.createMarket(a) != ace.createMarket(b), "two lenders, two markets");
     }
 }

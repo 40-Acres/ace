@@ -73,7 +73,7 @@ contract AceGenesisOffChannelFieldsTest is Test {
         p.collateral = address(collateral);
         p.fillFeeBps = 25;
         p.minCoverageWad = PocDeployConfig.MIN_COVERAGE_WAD;
-        p.baseBps = PocDeployConfig.BASE_BPS;
+        p.lenderAprBps = PocDeployConfig.LENDER_APR_BPS;
         p.minTenor = ProtocolPolicy.MIN_TENOR;
         p.maxTenor = ProtocolPolicy.MAX_TENOR;
         p.minPrincipal = PocDeployConfig.MIN_PRINCIPAL;
@@ -168,7 +168,7 @@ contract AceGenesisOffChannelFieldsTest is Test {
     }
 
     /// @notice A market naming NO record still creates: the head probe is scoped to a record that exists.
-    /// @dev The lens answers `recordObserving` false for exactly this case, so genesis must not turn it into a refusal.
+    /// @dev Recordless is a legal shape that probes as a dead record would, so genesis must not turn it into a refusal.
     function test_Genesis_ARecordlessMarketIsStillAdmitted() public {
         MarketParams memory p = _base();
         assertEq(p.record, address(0), "fixture: no record is named");

@@ -257,7 +257,7 @@ contract AceExtendRecordLegTest is WarpClock {
         p = AceFixtures.marketParams(address(usdc), address(coll));
         p.record = address(rec);
         p.lender = lender;
-        p.baseBps = 40;
+        p.lenderAprBps = 40;
         p.minTenor = TEN7;
         p.maxTenor = TEN7;
         p.settleBountyBps = 50;
@@ -372,7 +372,7 @@ contract AceHomeRecycleTest is WarpClock {
         coll = new MockERC20("Collateral", "COLL", 18);
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(coll));
         p.lender = alice;
-        p.baseBps = 40;
+        p.lenderAprBps = 40;
         p.minTenor = 7 days;
         p.maxTenor = 28 days;
         AceFixtures.Deployment memory d = AceFixtures.deploy(p);

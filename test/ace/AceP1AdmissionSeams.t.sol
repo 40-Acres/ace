@@ -53,10 +53,10 @@ contract AceP1OffChannelRoutingTest is WarpClock {
     }
 
     /// @dev The canonical bullet shape: the decline channel OFF and every off-channel dial zeroed.
-    function _params(uint256 baseBps, address lender_) internal view returns (MarketParams memory p) {
+    function _params(uint256 lenderAprBps, address lender_) internal view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(record);
-        p.baseBps = baseBps;
+        p.lenderAprBps = lenderAprBps;
         p.lender = lender_;
         p.minTenor = TEN7;
         p.maxTenor = TEN7;

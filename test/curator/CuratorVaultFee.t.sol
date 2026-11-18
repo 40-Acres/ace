@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {MarketParams} from "../../src/ace/hub/Types.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
@@ -15,13 +15,13 @@ contract CuratorVaultFeeTest is CuratorVaultBase {
     uint256 internal constant SEED = 12_020e6; // a doomed loan and two earning cycles, with twenty units over
 
     /// @dev One vault holding the LP's cash; every draw is a door borrow on its one gridded market.
-    function _rig(uint16 bps) internal returns (CuratorVault v) {
+    function _rig(uint16 bps) internal returns (AceVault v) {
         v = _newVault(bps);
         _lpDeposit(v, alice, SEED);
     }
 
     /// @dev A small loan taken to settlement: the impairment every diversion test is struck against.
-    function _impair(CuratorVault v) internal returns (uint256 loanId) {
+    function _impair(AceVault v) internal returns (uint256 loanId) {
         loanId = _open(DOOMED);
         _crankAllTicks(v, loanId, 0);
         _finalize(loanId);
@@ -30,7 +30,7 @@ contract CuratorVaultFeeTest is CuratorVaultBase {
 
     /// @dev One earning cycle: draw a lot, crank it, repay it with its fee, bank AND recognize the result.
     /// @dev The wait is load-bearing: the ladder defers recognition, and these tests are about the AMOUNT.
-    function _growth(CuratorVault v) internal {
+    function _growth(AceVault v) internal {
         uint256 loanId = _open(GROWTH_DRAW);
         _crankAllTicks(v, loanId, 0);
         _repay(loanId, GROWTH_DRAW * 2);
@@ -45,7 +45,7 @@ contract CuratorVaultFeeTest is CuratorVaultBase {
     }
 
     /// @dev What the shares minted in this window are worth now, which is what the fee actually paid.
-    function _mintedValue(CuratorVault v, uint256 sharesBefore) internal view returns (uint256) {
+    function _mintedValue(AceVault v, uint256 sharesBefore) internal view returns (uint256) {
         uint256 fresh = v.balanceOf(curator) - sharesBefore;
         return (v.totalAssets() * fresh) / v.totalSupply();
     }
@@ -54,7 +54,7 @@ contract CuratorVaultFeeTest is CuratorVaultBase {
 
     /// @dev T16: one NAV, so what the curator's new shares are worth equals the fee struck, to the wei.
     function test_Fee_DilutionDenominatorIsTotalAssets() public {
-        CuratorVault v = _rig(2000);
+        AceVault v = _rig(2000);
         _growth(v); // the fee is struck on the second cycle, against the high-water the first left
         uint256 base = v.feeHighWater();
         uint256 held = v.balanceOf(curator);
@@ -72,7 +72,7 @@ contract CuratorVaultFeeTest is CuratorVaultBase {
     /// @dev Replaces `test_Fee_BaselineRatchetsWithTheRate`, which pinned "there is no high-water mark".
     /// @dev It costs the curator strictly MORE than the diversion did: that is the point of the swap.
     function test_Fee_TheHighWaterHoldsThroughALoss() public {
-        CuratorVault v = _rig(2000);
+        AceVault v = _rig(2000);
         _growth(v);
         uint256 peak = v.feeHighWater();
         assertGt(peak, 0, "PREMISE: a high-water stands before the loss");
@@ -93,7 +93,7 @@ contract CuratorVaultFeeTest is CuratorVaultBase {
     /// @dev its mark; one flat window releases the lot and carries it back OVER, so the wait now stages
     /// @dev the opposite state. The premise is asserted rather than assumed so it cannot rot again.
     function test_Fee_ARecoveryUnderTheOldMarkPaysTheCuratorNothing() public {
-        CuratorVault v = _rig(2000);
+        AceVault v = _rig(2000);
         uint256 loanId = _impair(v);
         uint256 mark = v.feeHighWater();
         assertGt(mark, 0, "the pre-loss mark stands, and the write-off did not move it");
@@ -115,7 +115,7 @@ contract CuratorVaultFeeTest is CuratorVaultBase {
     /// @dev forgoes at least the loss, because no fee is struck until NAV clears the old high-water.
     /// @dev Replaces the four diverted-fee rows, which measured the same alignment through the memo.
     function testFuzz_Fee_NothingIsEarnedUntilTheLossIsClawedBack(uint8 cycles) public {
-        CuratorVault v = _rig(5000);
+        AceVault v = _rig(5000);
         _impair(v); // its own booking crank stamps the mark, and the settling pass may not lower it
         uint256 peak = v.feeHighWater();
         assertGt(peak, 0, "the pre-loss mark stands");
@@ -137,7 +137,7 @@ contract CuratorVaultFeeTest is CuratorVaultBase {
     /// @dev The fee must actually mint on REALIZED growth, else the whole mechanism is inert.
     /// @dev The second cycle's growth is measured from the high-water the first cycle's collection left.
     function test_Fee_MintsOnRealizedGrowth() public {
-        CuratorVault v = _rig(2000);
+        AceVault v = _rig(2000);
         _growth(v);
         uint256 navBefore = v.totalAssets();
         uint256 held = v.balanceOf(curator);
@@ -151,7 +151,7 @@ contract CuratorVaultFeeTest is CuratorVaultBase {
 
     /// @dev A zero-fee vault never mints and never stamps a mark, through a loss and a recovery alike.
     function test_Fee_ZeroBps_IsInert() public {
-        CuratorVault v = _rig(0);
+        AceVault v = _rig(0);
         _impair(v);
         uint256 supplyBefore = v.totalSupply();
         _growth(v);
@@ -168,12 +168,12 @@ contract CuratorVaultFeeTest is CuratorVaultBase {
     /// @dev The zero-charge assertions below are the whole point: stamping alone would survive without them.
     /// @dev Replaces `test_Fee_BaselineStampedByFirstMint`, which pinned the deleted per-entry restamp.
     function test_Fee_TheFirstDepositStampsTheHighWaterAndChargesNothing() public {
-        CuratorVault v = _newVault(2000);
+        AceVault v = _newVault(2000);
         v.collectFee();
-        assertEq(v.feeHighWater(), 0, "an empty vault stamps nothing");
+        assertEq(v.feeHighWater(), v.MIN_SEED(), "an empty vault's high-water is its seed, and a collection moves it nowhere");
 
         _lpDeposit(v, alice, 1_000e6);
-        assertEq(v.feeHighWater(), 1_000e6, "the first deposit stamps the high-water at its cash");
+        assertEq(v.feeHighWater(), 1_000e6 + v.MIN_SEED(), "the first deposit stamps the high-water at its cash over the seed");
         uint256 supplyAfterEntry = v.totalSupply();
 
         v.collectFee();
@@ -192,18 +192,18 @@ contract CuratorVaultFeeTest is CuratorVaultBase {
 
     /// @dev Every holder out through a claim after two charged cycles, the curator's fee shares included.
     /// @dev The last claim is the sole holder's, which floors through the virtual shares and leaves a residual.
-    function _windDown(CuratorVault v) internal {
+    function _windDown(AceVault v) internal {
         _growth(v);
         _growth(v);
         uint256 lp = v.balanceOf(alice);
         uint256 fee = v.balanceOf(curator);
         assertGt(fee, 0, "PREMISE: the curator holds fee shares, so it is a holder that leaves too");
         _requestThenClaim(v, lp, fee);
-        assertEq(v.totalSupply(), 0, "PREMISE: every share left through a claim");
+        assertEq(v.totalSupply(), v.SEED_SHARES(), "PREMISE: every live share left through a claim");
     }
 
     /// @dev Alice and the curator each request, then each claims the whole request: every share they held leaves by a claim.
-    function _requestThenClaim(CuratorVault v, uint256 lp, uint256 fee) internal {
+    function _requestThenClaim(AceVault v, uint256 lp, uint256 fee) internal {
         vm.prank(alice);
         v.requestExit(lp);
         vm.prank(curator);
@@ -215,7 +215,7 @@ contract CuratorVaultFeeTest is CuratorVaultBase {
     }
 
     /// @dev Pay `amount` into the vault's counted NAV from a market the donor runs on the vault's asset, then let it vest.
-    function _donate(CuratorVault v, uint256 amount) internal {
+    function _donate(AceVault v, uint256 amount) internal {
         MarketParams memory p = AceFixtures.marketParams(v.asset(), address(collateral));
         p.lender = donor;
         bytes32 gift = ace.createMarket(p);
@@ -227,7 +227,7 @@ contract CuratorVaultFeeTest is CuratorVaultBase {
     }
 
     /// @dev A fresh entrant into a vault with no supply, then the fee the next collection would charge it.
-    function _assertTheNextDepositorIsNotCharged(CuratorVault v) internal {
+    function _assertTheNextDepositorIsNotCharged(AceVault v) internal {
         uint256 residual = v.totalAssets();
         uint256 stale = v.feeHighWater();
         uint256 shares = _lpDeposit(v, bob, NEXT_IN);
@@ -243,9 +243,9 @@ contract CuratorVaultFeeTest is CuratorVaultBase {
     }
 
     /// @notice A full wind-down leaves a residual; the next depositor must not pay the fee on its own cash.
-    /// @dev Zero supply stamps the high-water at the NAV left, so nothing at zero supply is ever billed as growth.
+    /// @dev Zero live supply stamps the high-water at the NAV left, so nothing at zero live supply is ever billed as growth.
     function test_WindDown_TheNextDepositorPaysNoFeeOnOwnPrincipal() public {
-        CuratorVault v = _rig(2000);
+        AceVault v = _rig(2000);
         _windDown(v);
         assertGt(v.totalAssets(), 0, "PREMISE: the last exit floored through the virtual shares and left a residual");
         _assertTheNextDepositorIsNotCharged(v);
@@ -253,10 +253,10 @@ contract CuratorVaultFeeTest is CuratorVaultBase {
 
     /// @notice The same with the residual DONATED: a few atoms into an emptied vault must not set a fee on the next principal.
     function test_WindDown_ADonationIntoTheEmptyVaultIsNotChargedToTheNextDepositor() public {
-        CuratorVault v = _newVault(2000);
+        AceVault v = _newVault(2000);
         _lpDeposit(v, alice, NEXT_IN);
         _requestAndClaim(v, alice, v.balanceOf(alice));
-        assertEq(v.totalSupply(), 0, "PREMISE: the only holder left through a claim");
+        assertEq(v.totalSupply(), v.SEED_SHARES(), "PREMISE: the only holder left through a claim");
         _donate(v, 5);
         assertGt(v.totalAssets(), 0, "PREMISE: the donation is counted and vested");
         _assertTheNextDepositorIsNotCharged(v);
@@ -266,13 +266,13 @@ contract CuratorVaultFeeTest is CuratorVaultBase {
     /// @notice A per-share mark restamped at the dust remainder's rate sat far past par, and the next cohort inherited it.
     /// @dev In assets the high-water carries the dust's value only, and the next cohort adds its cash to it, so its growth is charged.
     function test_WindDown_ADonatedShareDoesNotKillTheNextCohortsFee() public {
-        CuratorVault v = _rig(2000);
+        AceVault v = _rig(2000);
         _growth(v);
         _growth(v);
         vm.prank(alice);
         v.transfer(address(v), 1); // one share-wei nobody can redeem: the supply can never reach zero again
         _requestThenClaim(v, v.balanceOf(alice), v.balanceOf(curator));
-        assertEq(v.totalSupply(), 1, "PREMISE: only the donated share-wei is left");
+        assertEq(v.totalSupply(), v.SEED_SHARES() + 1, "PREMISE: only the seed and the donated share-wei are left");
         _warpBy(VEST_W);
         v.collectFee(); // the restamp at the dust remainder's rate
         emit log_named_uint("the high-water the dust left", v.feeHighWater());
@@ -300,7 +300,7 @@ contract CuratorVaultFeeTest is CuratorVaultBase {
 
     /// @dev Build exactly `n` positions, one door borrow each, then time a collection and a crank.
     function _measureFlat(uint256 n) internal returns (uint256 feeGas, uint256 crankGas) {
-        CuratorVault v = _newVault(2000);
+        AceVault v = _newVault(2000);
         _lpDeposit(v, alice, (n + 2) * 100e6);
         for (uint256 i; i < n; i++) {
             _crank(v, _open(100e6), T2, 0);

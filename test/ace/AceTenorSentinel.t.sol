@@ -103,7 +103,7 @@ contract AceTenorSentinelTest is WarpClock {
         uint256 loanId = _open(TEN28);
         vm.recordLogs();
         vm.prank(borrower);
-        uint256 newId = ace.refinanceTo(MigrateArgs(loanId, dst, P, 0, OpenBounds(0, 0, 0), 0, address(0)));
+        uint256 newId = ace.refinanceTo(MigrateArgs(loanId, dst, P + 2_000e6, 0, OpenBounds(0, 0, 0), 0, address(0)));
         assertEq(read.loan(newId).tenor, TEN14, "the successor carries the destination's minTenor");
         assertEq(_loggedTenor(REFINANCED, 1), TEN14, "and Refinanced logs the destination's term, not the source's or a zero");
     }

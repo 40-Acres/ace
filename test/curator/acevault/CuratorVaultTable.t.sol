@@ -4,13 +4,15 @@ pragma solidity 0.8.36;
 import {MarketParams} from "../../../src/ace/hub/Types.sol";
 import {AceVault} from "../../../src/curator/AceVault.sol";
 import {AceVaultFlows} from "../../../src/curator/AceVaultFlows.sol";
-import {CuratorVault, Listing, Row} from "../../../src/curator/CuratorVault.sol";
+import {CuratorTerms, Listing, Row} from "../../../src/entities/curated/CuratorTerms.sol";
+import {AceVaultCaps} from "../../../src/curator/AceVaultCaps.sol";
+import {CuratedVaults} from "../../utils/CuratedVaults.sol";
 import {MockStakeVault} from "../../mocks/MockStakeVault.sol";
 import {MockPersistenceRecord} from "../../mocks/MockPersistenceRecord.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
 
-/// @notice CuratorVault's collateral table: rows and cap raises wait a timelock, a cap cut lands at once, and the door prices off the row.
-/// @dev The pending shape is MetaMorpho's `{value, validAt}`: submit, accept after the delay by anyone, revoke by the curator or the guardian.
+/// @notice The curated table: rows on CuratorTerms and cap raises on the vault wait a timelock, a cap cut lands at once, and the door prices off the row.
+/// @dev A pending change is a value and the time it may be accepted from: submit, accept after the delay by anyone, revoke by the curator or the guardian.
 contract CuratorVaultTableTest is AceVaultRig {
     bytes32 internal constant ROOT = 0xb7a4de03362d20465bcc8b45bb9625cb4abe76f109b674085f908e1bc61c7000; // erc7201:ace.curatorvault
     MockStakeVault internal other;
@@ -22,66 +24,74 @@ contract CuratorVaultTableTest is AceVaultRig {
         otherRecord = _record(address(other), 3e18);
     }
 
+    /// @dev Terms for a vault at `v` at the given floor ticket, coverage and row timelock, listing nothing.
+    function _termsAt(address v, uint256 minPrincipal, uint256 coverage, uint64 timelock) internal returns (CuratorTerms) {
+        return new CuratorTerms(CuratedVaults.termsConfig(v, _cfg(), CuratedVaults.Terms(minPrincipal, coverage, timelock, 0)), new Listing[](0));
+    }
+
     /// @notice The timelock is railed to one to fourteen days at construction.
     function test_TheTimelockIsRailed() public {
-        Listing[] memory none = new Listing[](0);
-        vm.expectRevert(CuratorVault.TimelockOutOfBounds.selector);
-        new CuratorVault(_cfg(), MIN_PRINCIPAL, COVERAGE, 1 days - 1, none, "C", "C");
-        vm.expectRevert(CuratorVault.TimelockOutOfBounds.selector);
-        new CuratorVault(_cfg(), MIN_PRINCIPAL, COVERAGE, 14 days + 1, none, "C", "C");
-        assertEq(new CuratorVault(_cfg(), MIN_PRINCIPAL, COVERAGE, 14 days, none, "C", "C").TIMELOCK(), 14 days, "the ceiling itself is admitted");
+        vm.expectRevert(CuratorTerms.TimelockOutOfBounds.selector);
+        _termsAt(address(vault), MIN_PRINCIPAL, COVERAGE, 1 days - 1);
+        vm.expectRevert(CuratorTerms.TimelockOutOfBounds.selector);
+        _termsAt(address(vault), MIN_PRINCIPAL, COVERAGE, 14 days + 1);
+        assertEq(_termsAt(address(vault), MIN_PRINCIPAL, COVERAGE, 14 days).TIMELOCK(), 14 days, "the ceiling itself is admitted");
     }
 
     /// @notice minPrincipal and coverage are checked against the hub's genesis rails at construction.
     function test_TheImmutablesMeetTheGenesisRails() public {
-        Listing[] memory none = new Listing[](0);
-        vm.expectRevert(CuratorVault.BadTerms.selector);
-        new CuratorVault(_cfg(), 0, COVERAGE, TIMELOCK, none, "C", "C");
-        vm.expectRevert(CuratorVault.BadTerms.selector);
-        new CuratorVault(_cfg(), MIN_PRINCIPAL, 1e18, TIMELOCK, none, "C", "C");
-        vm.expectRevert(CuratorVault.BadTerms.selector);
-        new CuratorVault(_cfg(), MIN_PRINCIPAL, 21e18, TIMELOCK, none, "C", "C");
+        vm.expectRevert(CuratorTerms.BadTerms.selector);
+        _termsAt(address(vault), 0, COVERAGE, TIMELOCK);
+        vm.expectRevert(CuratorTerms.BadTerms.selector);
+        _termsAt(address(vault), MIN_PRINCIPAL, 1e18, TIMELOCK);
+        vm.expectRevert(CuratorTerms.BadTerms.selector);
+        _termsAt(address(vault), MIN_PRINCIPAL, 21e18, TIMELOCK);
     }
 
     /// @notice A new collateral waits the timelock; anyone accepts it once it has run.
     function test_ANewCollateralWaitsTheTimelock() public {
+        CuratorTerms t = _terms(vault);
         vm.prank(curator);
-        vault.submitCollateral(address(other), _row(address(otherRecord), type(uint192).max));
-        (, uint64 validAt) = vault.pendingRowOf(address(other));
+        t.submitCollateral(address(other), _row(address(otherRecord)));
+        (, uint64 validAt) = t.pendingRowOf(address(other));
         assertEq(validAt, uint64(_now()) + TIMELOCK, "pending until the delay runs");
-        vm.expectRevert(CuratorVault.NothingDue.selector);
-        vault.accept(address(other));
+        vm.expectRevert(CuratorTerms.NothingDue.selector);
+        t.accept(address(other));
         _warpBy(TIMELOCK);
         vm.prank(stranger);
-        vault.accept(address(other));
-        assertEq(vault.rowOf(address(other)).record, address(otherRecord), "the row is live");
-        (, validAt) = vault.pendingRowOf(address(other));
+        t.accept(address(other));
+        assertEq(t.rowOf(address(other)).record, address(otherRecord), "the row is live");
+        (, validAt) = t.pendingRowOf(address(other));
         assertEq(validAt, 0, "and no longer pending");
     }
 
     /// @notice Only the curator submits a row.
     function test_OnlyTheCuratorSubmitsARow() public {
+        CuratorTerms t = _terms(vault);
         vm.prank(guardian);
-        vm.expectRevert(AceVault.NotCurator.selector);
-        vault.submitCollateral(address(other), _row(address(otherRecord), type(uint192).max));
+        vm.expectRevert(CuratorTerms.NotCurator.selector);
+        t.submitCollateral(address(other), _row(address(otherRecord)));
     }
 
     /// @notice A row naming no record is refused: the door prices off it.
     function test_ARowNamesARecord() public {
+        CuratorTerms t = _terms(vault);
         vm.prank(curator);
-        vm.expectRevert(CuratorVault.BadRow.selector);
-        vault.submitCollateral(address(other), _row(address(0), type(uint192).max));
+        vm.expectRevert(CuratorTerms.BadRow.selector);
+        t.submitCollateral(address(other), _row(address(0)));
     }
 
     /// @notice A row whose record does not affirm the vault's asset against the collateral is refused.
     function test_ARowsRecordAffirmsThePair() public {
+        CuratorTerms t = _terms(vault);
         vm.prank(curator);
-        vm.expectRevert(CuratorVault.BadRow.selector);
-        vault.submitCollateral(address(other), _row(address(record), type(uint192).max));
+        vm.expectRevert(CuratorTerms.BadRow.selector);
+        t.submitCollateral(address(other), _row(address(record)));
     }
 
-    /// @notice Every table verb leaves gross NAV, the pile, NAV and the mark untouched.
+    /// @notice Every table verb, on the terms' rows and on the vault's caps, leaves gross NAV, the pile, NAV and the mark untouched.
     function test_TableVerbsMoveNoValue() public {
+        CuratorTerms t = _terms(vault);
         _borrow(MIN_TENOR);
         usdc.mint(address(vault), 1_000e6);
         vault.crank();
@@ -90,34 +100,47 @@ contract CuratorVaultTableTest is AceVaultRig {
         uint256 nav = vault.totalAssets();
         bytes32 mark = vm.load(address(vault), bytes32(uint256(ROOT) + 1));
         vm.startPrank(curator);
-        vault.submitCollateral(address(other), _row(address(otherRecord), type(uint192).max));
-        vault.submitCap(address(coll), 2_000e6);
-        vault.submitCap(address(coll), 3_000e6);
+        t.submitCollateral(address(other), _row(address(otherRecord)));
+        vault.submitCap(address(coll), 2_000e6); // a cut, at once
+        vault.submitCap(address(coll), 3_000e6); // a raise, pending
+        vault.submitCap(address(other), 4_000e6); // a listing over the zero wildcard, pending
         vm.stopPrank();
         vm.prank(guardian);
         vault.submitCap(address(coll), 0);
         vm.prank(guardian);
-        vault.revokePending(address(other));
-        vm.prank(curator);
-        vault.submitCollateral(address(other), _row(address(otherRecord), type(uint192).max));
+        t.revokePending(address(other));
+        vm.prank(guardian);
+        vault.revokePendingCap(address(other));
+        vm.startPrank(curator);
+        t.submitCollateral(address(other), _row(address(otherRecord)));
+        vault.submitCap(address(other), 4_000e6);
+        vm.stopPrank();
         _warpBy(TIMELOCK);
         pile = vault.unvested();
         nav = vault.totalAssets();
-        vault.accept(address(other));
+        t.accept(address(other));
+        vault.acceptCap(address(other));
+        vm.prank(curator);
+        vault.submitDelist(address(other)); // under the zero wildcard, a cut: at once
         assertEq(vault.grossNav(), gross, "gross NAV is untouched");
         assertEq(vault.unvested(), pile, "the pile is untouched");
         assertEq(vault.totalAssets(), nav, "NAV is untouched");
         assertEq(vm.load(address(vault), bytes32(uint256(ROOT) + 1)), mark, "the mark is untouched");
     }
 
+    /// @dev The rig collateral's stored cap on the vault.
+    function _cap() internal view returns (uint192 c) {
+        (c,) = vlens.capOf(address(vault), address(coll));
+    }
+
     /// @notice A cap cut lands at once, by the guardian as well as the curator.
     function test_ACapCutLandsAtOnce() public {
         vm.prank(guardian);
         vault.submitCap(address(coll), 5_000e6);
-        assertEq(vault.rowOf(address(coll)).cap, 5_000e6, "cut at once");
+        assertEq(_cap(), 5_000e6, "cut at once");
         vm.prank(curator);
         vault.submitCap(address(coll), 0);
-        assertEq(vault.rowOf(address(coll)).cap, 0, "a cap of zero is removal, at once");
+        assertEq(_cap(), 0, "a cap of zero is removal, at once");
     }
 
     /// @notice A cap raise waits the timelock, and the guardian may not raise.
@@ -125,14 +148,14 @@ contract CuratorVaultTableTest is AceVaultRig {
         vm.prank(curator);
         vault.submitCap(address(coll), 5_000e6);
         vm.prank(guardian);
-        vm.expectRevert(AceVault.NotCurator.selector);
+        vm.expectRevert(AceVaultCaps.NotCurator.selector);
         vault.submitCap(address(coll), 6_000e6);
         vm.prank(curator);
         vault.submitCap(address(coll), 6_000e6);
-        assertEq(vault.rowOf(address(coll)).cap, 5_000e6, "the raise is pending");
+        assertEq(_cap(), 5_000e6, "the raise is pending");
         _warpBy(TIMELOCK);
-        vault.accept(address(coll));
-        assertEq(vault.rowOf(address(coll)).cap, 6_000e6, "accepted after the delay");
+        vault.acceptCap(address(coll));
+        assertEq(_cap(), 6_000e6, "accepted after the delay");
     }
 
     /// @notice A cut drops a raise submitted before it: once the timelock runs there is nothing to accept, and the cap stays cut.
@@ -141,46 +164,31 @@ contract CuratorVaultTableTest is AceVaultRig {
         vault.submitCap(address(coll), 5_000e6);
         vm.prank(curator);
         vault.submitCap(address(coll), 6_000e6);
-        (, uint64 validAt) = vault.pendingCapOf(address(coll));
+        (,, uint64 validAt) = vlens.pendingCapOf(address(vault), address(coll));
         assertGt(validAt, 0, "premise: the raise is pending");
         vm.prank(guardian);
         vault.submitCap(address(coll), 1_000e6);
-        (, validAt) = vault.pendingCapOf(address(coll));
+        (,, validAt) = vlens.pendingCapOf(address(vault), address(coll));
         assertEq(validAt, 0, "the cut dropped the pending raise");
         _warpBy(TIMELOCK);
-        vm.expectRevert(CuratorVault.NothingDue.selector);
-        vault.accept(address(coll));
-        assertEq(vault.rowOf(address(coll)).cap, 1_000e6, "and the cap stays cut");
-    }
-
-    /// @notice A cut drops a row submitted before it, so the row's own cap cannot lift the cut back after the timelock.
-    function test_ACutDropsAPendingRow() public {
-        vm.prank(curator);
-        vault.submitCollateral(address(coll), _row(address(record), type(uint192).max));
-        (, uint64 validAt) = vault.pendingRowOf(address(coll));
-        assertGt(validAt, 0, "premise: the row is pending");
-        vm.prank(guardian);
-        vault.submitCap(address(coll), 1_000e6);
-        (, validAt) = vault.pendingRowOf(address(coll));
-        assertEq(validAt, 0, "the cut dropped the pending row");
-        _warpBy(TIMELOCK);
-        vm.expectRevert(CuratorVault.NothingDue.selector);
-        vault.accept(address(coll));
-        assertEq(vault.rowOf(address(coll)).cap, 1_000e6, "and the cap stays cut");
+        vm.expectRevert(AceVaultCaps.NothingDue.selector);
+        vault.acceptCap(address(coll));
+        assertEq(_cap(), 1_000e6, "and the cap stays cut");
     }
 
     /// @notice The guardian revokes a pending row or raise.
     function test_TheGuardianRevokesPending() public {
+        CuratorTerms t = _terms(vault);
         vm.prank(curator);
-        vault.submitCollateral(address(other), _row(address(otherRecord), type(uint192).max));
+        t.submitCollateral(address(other), _row(address(otherRecord)));
         vm.prank(guardian);
-        vault.revokePending(address(other));
+        t.revokePending(address(other));
         _warpBy(TIMELOCK);
-        vm.expectRevert(CuratorVault.NothingDue.selector);
-        vault.accept(address(other));
+        vm.expectRevert(CuratorTerms.NothingDue.selector);
+        t.accept(address(other));
         vm.prank(stranger);
-        vm.expectRevert(AceVault.NotCurator.selector);
-        vault.revokePending(address(coll));
+        vm.expectRevert(CuratorTerms.NotCurator.selector);
+        t.revokePending(address(coll));
     }
 
     /// @notice The door's price is the buffered windowed minimum rounded down onto a 50-tick grid.
@@ -227,11 +235,13 @@ contract CuratorVaultTableTest is AceVaultRig {
         vm.stopPrank();
     }
 
-    /// @notice The rows a deploy lists are live from the first block, with no timelock.
+    /// @notice The rows a deploy lists are live from the first block, with no timelock, and so are their caps on the vault.
     function test_TheDeployListingIsLiveAtOnce() public view {
-        Row memory r = vault.rowOf(address(coll));
+        Row memory r = _terms(vault).rowOf(address(coll));
         assertEq(r.record, address(record), "listed at deploy");
         assertEq(r.bufferBps, BUFFER_BPS, "with its buffer");
-        assertEq(uint256(r.cap), type(uint192).max, "and its cap");
+        (uint192 c, bool listed) = vlens.capOf(address(vault), address(coll));
+        assertEq(uint256(c), type(uint192).max, "and its cap");
+        assertTrue(listed, "listed on the vault as on the terms");
     }
 }

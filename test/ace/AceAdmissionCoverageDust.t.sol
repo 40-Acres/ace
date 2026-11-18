@@ -22,17 +22,13 @@ import {PriceFrame} from "../utils/PriceFrame.sol";
 /// @notice THE QUESTION: does the ADMISSION gate cover settlement, with no withdrawal and no sale?
 /// @notice The admission-side twin of `AceWithdrawCoverageDust`, and the same two functions disagree.
 /// @notice `Borrower._gate` takes ONE ceiling over the whole debt: `trig <= floor` IS `units >= requiredAt`.
-/// @notice `LoanAccounting.collateralNeeded` takes ONE ceiling too, so the two now differ by a single atom.
+/// @notice `LoanAccounting.collateralNeeded` takes ONE ceiling too, and `requiredAt`'s coverage margin absorbs its excess.
 /// @dev THE EXPOSURE THIS FILE WAS WRITTEN FOR IS STRUCTURALLY GONE, and the rows are kept as its witness.
-/// @dev Settlement used to ceil PER FUNDED TICK while admission ceiled the whole debt once, and a sum of
-/// @dev ceilings is not the ceiling of a sum: the gap grew with the tick count `n`, so a draw spanning the
-/// @dev whole claim cap on a principal worth a few collateral wei could be admitted and still come up short.
-/// @dev Write `W = principal * unitScale / fundingFloor` and `R` for the claim-weighted mean of
-/// @dev `fundingFloor / price_t`. The violation bound was `W < n / (k - 1)`, which needed `R` near one AND a
-/// @dev large `n`. BOTH TERMS COLLAPSED: `R` is exactly one, because every claim funds at the market's single
-/// @dev price, and `n` is one, because a loan holds one claim. The residue cannot exceed a single atom, which
-/// @dev is precisely the epsilon `coverageLine` carries.
-/// @dev Reasoning: `the design record`, and `the design record` one-market-one-price.
+/// @dev Settlement used to ceil PER FUNDED TICK while admission ceiled the whole debt once, so the gap grew with the tick count `n`.
+/// @dev A draw spanning the whole claim cap on a principal worth a few collateral wei could be admitted and still come up short.
+/// @dev Write `W = principal * unitScale / fundingFloor`: the violation bound was `W < n / (k - 1)`, which needed a large `n`.
+/// @dev THAT TERM COLLAPSED: every claim funds at the market's single price, and a loan holds one claim, so `n` is one.
+/// @dev One ceiling cannot outrun `requiredAt`, since `ceil(k W) >= ceil(W)`, so the line's own atom is margin.
 /// @dev NO WITHDRAWAL, NO SALE AND NO REPAY HERE: every loan settles exactly as the draw left it.
 contract AceAdmissionCoverageDustTest is Test {
     /// @dev One deployed market, plus the views the assertions read it through.
@@ -52,7 +48,7 @@ contract AceAdmissionCoverageDustTest is Test {
     address internal alice = address(0xA11CE);
     address internal borrower = address(0xB0B);
 
-    uint256 internal constant TICKS = 32; // == maxClaimTicks: the count that maximizes the ceiling slack
+    uint256 internal constant TICKS = 32; // the retired maxClaimTicks: now a lot count, and the `n` of the deleted bound below
     int24 internal constant SPACING = 60; // the suite-wide default grid; the threshold scans vary it
     uint256 internal constant DUST_MIN_DEBT = 32; // the smallest floor that still legalizes a one-wei lot at 32 ticks
 
@@ -163,7 +159,7 @@ contract AceAdmissionCoverageDustTest is Test {
     }
 
     /// @notice Opens at exactly the gate's minimum, having proved one wei less is refused by the HUB.
-    /// @notice That minimum IS the coverage line now: `requiredAt` plus the market's tick cap.
+    /// @notice That minimum IS the coverage line: `requiredAt` plus one atom.
     /// @dev BY SELECTOR: a bare expectRevert would accept any refusal and leave the line unpinned.
     /// @dev The probe also pins `previewOpen` to `open`, so the bisection above is the verb's own boundary.
     /// @dev `BelowCoverageLine` and not `TriggerAboveFloor`: one wei under the line still clears the trigger leg.
@@ -190,9 +186,8 @@ contract AceAdmissionCoverageDustTest is Test {
     }
 
     /// @dev Claims carrying a live balance: `n_eff`, the count `collateralNeeded` pays a ceiling for.
-    /// @dev IT IS ONE OR ZERO NOW. `n_eff` was the whole variable this file measured against: settlement ceiled
-    /// @dev PER FUNDED TICK, so its requirement floored at one atom per live claim tick and the gap grew with
-    /// @dev the count. A loan holds one claim, so `n_eff` is a fact rather than a dial, and the gap is one atom.
+    /// @dev IT IS ONE OR ZERO NOW. Settlement once ceiled PER FUNDED TICK, so its requirement grew with this count.
+    /// @dev A loan holds one claim, so `n_eff` is a fact rather than a dial.
     function _liveTicks(Fx memory f, uint256 loanId) internal view returns (uint256) {
         return f.read.claimCount(f.id, loanId);
     }
@@ -200,7 +195,7 @@ contract AceAdmissionCoverageDustTest is Test {
     /* ========== the sequence that answers the admission question ========== */
 
     /// @notice THE PROPERTY, on the shape that used to break it: a loan the gate admits covers settlement.
-    /// @notice The gate now asks 73 units where it once asked 41, and settlement needs 63.
+    /// @notice The gate asks 35 units and settlement needs 32, which the line clears.
     /// @dev The regime is an 18/18 pair, so `unitScale` is 1e18 and one collateral wei buys about one quote wei.
     /// @dev A one-wei claim then ceils to two units at every tick under the floor, which was the whole exposure.
     /// @dev THE EXACT LINE IS PINNED, not just the inequality, so a change in the SLACK trips this too.
@@ -245,8 +240,8 @@ contract AceAdmissionCoverageDustTest is Test {
         assertEq(quoteAtBook, 0, "so nothing is booked against the funding ticks");
     }
 
-    /// @notice The SHIPPED coverage multiple gets the same line, one derived off `maxClaimTicks` and not off k.
-    /// @dev It separates the property from `MIN_COVERAGE_WAD`: the slack is a tick count, so k does not move it.
+    /// @notice The SHIPPED coverage multiple, k = 1.4: the line rises with k, and the need does not.
+    /// @dev It separates the property from `MIN_COVERAGE_WAD`: the line's atom is the same at every k.
     /// @dev This is issue #305 inverted: it asserted 54 against a need of 63 while the defect stood.
     function test_DustMinDebt_AtTheShippedK_TheAdmittedLoanCoversSettlement() public {
         Fx memory f = _deploy(18, 18, DUST_MIN_DEBT, 1.4e18);
@@ -263,7 +258,7 @@ contract AceAdmissionCoverageDustTest is Test {
 
     /// @notice THE CONTROL, and it must PASS: the identical shape on the suite's baseline `minPrincipal`.
     /// @dev Its job is to show the failures above are the DUST FLOOR and not the fixture's plumbing.
-    /// @dev At `minPrincipal` 10e6 on an 18-dec quote the position is ~1.2e7 collateral units, so 32 ceilings vanish.
+    /// @dev At `minPrincipal` 10e6 on an 18-dec quote the position is ~1.2e7 collateral units, so its one ceiling vanishes.
     function test_Control_OnTheBaselineMinDebt_StaysCoveredAtTheGatesOwnLine() public {
         Fx memory f = _deploy(18, 18, 10e6, Constants.MIN_COVERAGE_WAD);
         _seedUniform(f, f.minLot);
@@ -280,7 +275,7 @@ contract AceAdmissionCoverageDustTest is Test {
     /// @notice A whole-unit collateral at a few thousand dollars puts W under one, not under 640.
     /// @dev So the corner does not need an absurd `minPrincipal`: it needs collateral COARSE beside the loan.
     /// @dev Tokenized whole units -- shares, bars, wrapped singles -- are exactly that shape, and legal.
-    /// @dev Each funded tick then ceils its own claim to a WHOLE unit, so 32 ticks ask 32 units of a 1-unit lot.
+    /// @dev The one claim's ceiling rounds W up by under a WHOLE unit; under per-tick ceilings, 32 ticks each asked a unit of their own.
     /// @dev The band sits near tick 92100, where one whole unit is worth about 10,000 of a 6-dec quote.
     /// @dev This is issue #305 inverted: it asserted a 1-unit line against a need of 32 while the defect stood.
     /// @dev The draw is `32 * minPrincipal`, so the figures scale with the shipped `minPrincipal`: W is the draw over one unit's price.
@@ -304,9 +299,9 @@ contract AceAdmissionCoverageDustTest is Test {
         assertLe(_need(f, loanId), units, "a coarse-collateral market covers settlement at the gate's line");
     }
 
-    /// @notice The same coarse market settled: every class is paid its atom, and nothing is booked as bad debt.
+    /// @notice The same coarse market settled: the claim is paid its ceiled units, and nothing is booked as bad debt.
     /// @notice The loan is never in distress and is never touched after the draw: it simply expires.
-    /// @dev Each of the 32 classes takes the whole unit its own claim ceils to, which is what the line funds.
+    /// @dev The one claim takes the whole units it ceils to, which the line funds.
     /// @dev This is issue #305 inverted: it asserted 4,843.75 quote of bad debt while the defect stood.
     function test_CoarseCollateral_ForceCloseLeavesTheLendersWhole() public {
         priceOffset = 92_100; // SET BEFORE the deploy: the price is a creation param, not a rung a seed picks

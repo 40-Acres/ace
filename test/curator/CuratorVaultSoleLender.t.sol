@@ -2,8 +2,9 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault, Listing} from "../../src/curator/CuratorVault.sol";
 import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
+import {Listing} from "../../src/entities/curated/CuratorTerms.sol";
+import {CuratedVaults} from "../utils/CuratedVaults.sol";
 import {BorrowRequest} from "../../src/curator/AceVaultFlows.sol";
 import {GUARD_TRIP} from "../utils/GuardTrip.sol";
 import {MarketParams} from "../../src/ace/hub/Types.sol";
@@ -107,7 +108,7 @@ contract CuratorVaultSoleLenderTest is CuratorVaultBase {
     /// @dev unbound call was a drain that needed no shares. The crank takes no market: it sweeps the vault's own pool,
     /// @dev keyed by (lender, quote), and a foreign market's credit is keyed to somebody else and simply unreachable.
     function test_Crank_AForeignMarketIsOutsideThePool() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         bytes32 foreign = _marketLike(12e6, stranger);
         _lendDirectIn(stranger, foreign, 4_000e6);
@@ -126,10 +127,10 @@ contract CuratorVaultSoleLenderTest is CuratorVaultBase {
     /// @dev THE CREDIT POOLS PER (lender, quote), so there is nothing finer than the pool for a crank to name.
     /// @dev The second market is the door's at a lower record print, so the two loans sit in two ids.
     function test_MultiMarket_NavCountsBothAndOneCrankSweepsThem() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 here = _open(DRAW);
-        MockPersistenceRecord(v.rowOf(address(collateral)).record).setMinPrice(AceFixtures.px(18e17, address(usdc), address(collateral)));
+        MockPersistenceRecord(_terms(v).rowOf(address(collateral)).record).setMinPrice(AceFixtures.px(18e17, address(usdc), address(collateral)));
         uint256 there = _borrow(v, DRAW);
         assertTrue(ace.loanMarket(there) != ace.loanMarket(here), "PREMISE: the two loans sit in two markets");
 
@@ -155,7 +156,7 @@ contract CuratorVaultSoleLenderTest is CuratorVaultBase {
         ReenteringERC20 tok = new ReenteringERC20();
         VaultConfig memory cfg = _cfg(0);
         cfg.asset = address(tok);
-        CuratorVault v = new CuratorVault(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, new Listing[](0), "Hostile", "cHOST");
+        AceVault v = CuratedVaults.make(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, new Listing[](0), "Hostile", "cHOST");
 
         tok.mint(bob, 10_000e6);
         vm.prank(bob);
@@ -191,7 +192,7 @@ contract CuratorVaultSoleLenderTest is CuratorVaultBase {
     /// @dev The aggregate NAV reads the hub's own guarded `lenderAssets`, the crank is one `collect`, and the door asks the hub alone.
     /// @dev Assertions are SUCCESSES, not absent reverts: a passing `expectRevert` proves nothing about why.
     function test_Exit_ADeadLensCostsTheVaultNothingOnAnyPath() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 shares = _lpDeposit(v, alice, SEED);
         _open(DRAW);
         vm.etch(address(lens), hex""); // the lens address holds no code from here on

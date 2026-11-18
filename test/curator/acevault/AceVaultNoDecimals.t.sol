@@ -6,9 +6,11 @@ import {MockPersistenceRecord} from "../../mocks/MockPersistenceRecord.sol";
 import {WarpClock} from "../../utils/WarpClock.sol";
 import {AceFixtures} from "../../utils/AceFixtures.sol";
 import {Ace} from "../../../src/ace/hub/Ace.sol";
-import {VaultConfig} from "../../../src/curator/AceVault.sol";
+import {CuratedVaults} from "../../utils/CuratedVaults.sol";
+import {VaultSeed} from "../../utils/VaultSeed.sol";
 import {BorrowRequest} from "../../../src/curator/AceVaultFlows.sol";
-import {CuratorVault, Listing, Row} from "../../../src/curator/CuratorVault.sol";
+import {AceVault, VaultConfig} from "../../../src/curator/AceVault.sol";
+import {Listing, Row} from "../../../src/entities/curated/CuratorTerms.sol";
 
 /// @notice A cash token that answers no `decimals()`.
 contract NoDecimalsCash {
@@ -51,13 +53,11 @@ contract AceVaultNoDecimalsTest is WarpClock {
         rec.setFrame(address(cash), address(coll));
         rec.setMinPrice(1 << 96);
         Listing[] memory l = new Listing[](1);
-        l[0] = Listing({
-            collateral: address(coll),
-            row: Row({record: address(rec), bufferBps: 1000, baseBps: 40, minTenor: 7 days, maxTenor: 30 days, cap: type(uint192).max})
+        l[0] = Listing({collateral: address(coll), row: Row({record: address(rec), bufferBps: 1000, lenderAprBps: 40, minTenor: 7 days, maxTenor: 30 days})});
+        VaultConfig memory cfg = VaultConfig({
+            ace: address(ace), asset: address(cash), curator: address(0xC0A11), guardian: address(0), perfFeeBps: 0, vestWindow: 1 days, seed: VaultSeed.SEED
         });
-        VaultConfig memory cfg =
-            VaultConfig({ace: address(ace), asset: address(cash), curator: address(0xC0A11), guardian: address(0), perfFeeBps: 0, vestWindow: 1 days});
-        CuratorVault v = new CuratorVault(cfg, 10e6, 1.4e18, 3 days, l, "NoDec", "ND");
+        AceVault v = CuratedVaults.make(cfg, 10e6, 1.4e18, 3 days, l, "NoDec", "ND");
         address lp = address(0xA11CE);
         cash.mint(lp, 1_000_000e6);
         vm.startPrank(lp);

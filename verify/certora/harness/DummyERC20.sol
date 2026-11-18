@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 /// @title DummyERC20
 /// @notice A plain ERC-20 for the prover to link where a contract holds an asset: exact transfers, no fee, no hooks.
-/// @notice That is the asset CuratorVault and the hub's markets require, so it models the token they are allowed to hold.
+/// @notice That is the asset AceVault and the hub's markets require, so it models the token they are allowed to hold.
 contract DummyERC20 {
     uint256 public totalSupply;
     mapping(address => uint256) public balanceOf;

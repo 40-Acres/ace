@@ -4,7 +4,7 @@ pragma solidity 0.8.36;
 import {Vm} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault, VaultConfig} from "../../src/curator/CuratorVault.sol";
+import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {GUARD_TRIP} from "../utils/GuardTrip.sol";
@@ -127,7 +127,7 @@ contract CuratorVaultStrangerFirstTest is CuratorVaultBase {
     }
 
     /// @dev One lot, one drawn class, real quote sitting at it, and NOBODY has cranked.
-    function _accrued(CuratorVault v) internal returns (uint256 loanId) {
+    function _accrued(AceVault v) internal returns (uint256 loanId) {
         _lpDeposit(v, alice, SEED);
         loanId = _open(DRAW);
         _warpBy(30 days);
@@ -136,7 +136,7 @@ contract CuratorVaultStrangerFirstTest is CuratorVaultBase {
 
     /// @dev The counter and the cash must agree after every path, or the exit is paying from a fiction.
     /// @dev The vault holds its cash, so idle IS its asset balance, and NAV is that plus the hub's pools.
-    function _assertCounterHonest(CuratorVault v, string memory where) internal view {
+    function _assertCounterHonest(AceVault v, string memory where) internal view {
         assertEq(usdc.balanceOf(address(v)), v.idle(), where);
         assertEq(v.grossNav(), _hubTruthNav(v), where);
     }
@@ -151,7 +151,7 @@ contract CuratorVaultStrangerFirstTest is CuratorVaultBase {
     /// @dev whose permissionless collect-for-the-vault is removed; the vault's own `crank` is how its pool comes home.
     /// @dev The crank leg below pins that the vault's own collect moves its pool into its own balance, and NAV with it nowhere.
     function test_Stranger_CannotCollectTheVaultsPool_AndMovesNothingTrying() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _accrued(v);
         _repay(loanId, DRAW / 4);
 
@@ -183,7 +183,7 @@ contract CuratorVaultStrangerFirstTest is CuratorVaultBase {
     /// @dev The selector survived the argument swap, so it decodes as `(quote = vault, to = asset)` and spends the caller's
     /// @dev own, empty, pool. ACCEPTED BY RULING rather than refused: it pays nothing, logs nothing, and moves no NAV.
     function test_Stranger_ALegacyOrderCollectNamingTheVaultPaysNothingAndLogsNothing() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _accrued(v);
         _repay(loanId, DRAW / 4);
         uint256 owed = lens.claimable(address(v), v.asset());
@@ -210,7 +210,7 @@ contract CuratorVaultStrangerFirstTest is CuratorVaultBase {
     /// @dev A keeper settles and a stranger buys the pot, with the vault never cranking in between.
     /// @dev The loss must land atomically and the recovery must reach the aggregate the vault reads.
     function test_Stranger_SettlementAndFillLandWithoutTheVaultTouchingAnything() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(DRAW);
         _crank(v, loanId, T2, 0);
@@ -230,7 +230,7 @@ contract CuratorVaultStrangerFirstTest is CuratorVaultBase {
     /// @dev The buyer's cash waits at the hub as the vault's credit, so the aggregate moves by the fill alone, at the sale.
     /// @dev The crank after it MOVES that cash into the vault's balance and values nothing.
     function test_Stranger_ASaleCreditsTheVaultsPool_AndItsCrankBringsItHome() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(DRAW);
         _crank(v, loanId, T2, 0);
@@ -262,7 +262,7 @@ contract CuratorVaultStrangerFirstTest is CuratorVaultBase {
     /// @dev The vault has no collateral accounting at all, so the arrival must be worth exactly nothing.
     /// @dev It is also UNRECOVERABLE: there is no rescue verb, which is the accepted cost of that silence.
     function test_Stranger_CollateralPushedOntoTheVaultIsWorthNothingToIt() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(DRAW);
         _crank(v, loanId, T2, 0);
@@ -353,7 +353,7 @@ contract CuratorVaultStrangerFirstTest is CuratorVaultBase {
     /// @dev The consequence for the VAULT, which is the reason the guard is on this read at all.
     /// @dev Its NAV rests on `lenderAssets`, so a torn read is a torn share price on every verb.
     function test_LenderAssets_TheVaultsWholeNavRestsOnTheGuardedRead() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         bytes memory torn = abi.encodeWithSelector(GUARD_TRIP);
         vm.mockCallRevert(address(ace), abi.encodeWithSelector(Ace.lenderAssets.selector), torn);
@@ -371,7 +371,7 @@ contract CuratorVaultStrangerFirstTest is CuratorVaultBase {
     /// @dev A ladder standing from an earlier arrival, then an unsynced settlement big enough to burn it.
     /// @dev Duplicated from the vault's own suites deliberately, so this file still reads on its own.
     /// @dev The settled loan is SHALLOW_DOOMED, about four percent of the book, which still burns past the ladder.
-    function _unsyncedFallUnderALadder(CuratorVault v) internal {
+    function _unsyncedFallUnderALadder(AceVault v) internal {
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(DRAW);
         _crank(v, loanId, T2, 0);
@@ -393,7 +393,7 @@ contract CuratorVaultStrangerFirstTest is CuratorVaultBase {
     /// @dev Fired between a depositor's quote and their fill, it must not cost them a single share.
     /// @dev BROKEN: the sync retires the ladder the loss wiped out, which RAISES NAV and mints fewer.
     function test_Stranger_SyncingBetweenAQuoteAndItsFillDoesNotMoveThePrice() public {
-        CuratorVault v = _newVault(2000);
+        AceVault v = _newVault(2000);
         _unsyncedFallUnderALadder(v);
         uint256 promised = v.previewDeposit(1_000e6);
 
@@ -406,7 +406,7 @@ contract CuratorVaultStrangerFirstTest is CuratorVaultBase {
     /// @dev The same seam through `crank`, whose NatSpec says PERMISSIONLESS and which also syncs first.
     /// @dev `crank` is the same `_sync` then `_collectFeeAt` shape, so this row covers the class.
     function test_Stranger_CrankingBetweenAQuoteAndItsFillDoesNotMoveThePrice() public {
-        CuratorVault v = _newVault(2000);
+        AceVault v = _newVault(2000);
         _unsyncedFallUnderALadder(v);
         uint256 promised = v.previewDeposit(1_000e6);
 

@@ -7,8 +7,11 @@ import {Vm} from "forge-std/Test.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
+import {AceVaultFactory} from "../../src/curator/AceVaultFactory.sol";
 import {AceVaultFlows, BorrowRequest} from "../../src/curator/AceVaultFlows.sol";
-import {CuratorVault, Listing, Row} from "../../src/curator/CuratorVault.sol";
+import {CuratorTerms, Listing, Row} from "../../src/entities/curated/CuratorTerms.sol";
+import {CuratedVaults} from "../utils/CuratedVaults.sol";
+import {MockTerms} from "./vault/MockTerms.sol";
 import {MarketParams, MarketState, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PriceFrame} from "../utils/PriceFrame.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
@@ -17,16 +20,22 @@ import {MockStakeVault} from "../mocks/MockStakeVault.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
+import {IAceVaultLens, VaultLens} from "../utils/VaultLens.sol";
+import {VaultSeed} from "../utils/VaultSeed.sol";
 import {PocDeployConfig, ProtocolPolicy} from "../../src/config/Defaults.sol";
 
-/// @notice Shared rig for the CuratorVault suites: one hub, one genesis market, one lens, plus the vault and door helpers.
+/// @notice Shared rig for the curated-vault suites: one hub, one genesis market, one lens, plus the vault and door helpers.
+/// @notice A curated vault is an AceVault naming CuratorTerms, deployed through the rig's factory: the terms first, against its prediction.
 /// @dev Abstract, so no test runs here; each concrete suite inherits the fixture and the verb helpers.
 /// @dev A vault HOLDS ITS CASH and lends only through its door, so no helper here rests or allocates anything.
 /// @dev `mid` is the market the newest vault's door opens on the rig collateral, created at the hub when the vault is built.
 /// @dev THE ONLY NAV ORACLE HERE IS `_hubTruthNav`: a mirror of the contract's own arithmetic proves nothing.
 abstract contract CuratorVaultBase is WarpClock {
     Ace internal ace;
+    AceVaultFactory internal vaultFactory;
+    uint256 internal vaultSalt; // each factory deploy from this rig takes the next salt
     AceLens internal lens;
+    IAceVaultLens internal vlens; // the vault lens: `previewTerms` and the vault's stored figures, built last in `setUp`
     AceReader internal read;
     PositionManager internal positionManager;
     MockERC20 internal usdc;
@@ -88,6 +97,8 @@ abstract contract CuratorVaultBase is WarpClock {
         AceFixtures.Deployment memory d = AceFixtures.deploy(p);
         (ace, positionManager, read, mid) = (d.ace, d.positionManager, d.read, d.id);
         lens = new AceLens(address(ace));
+        vaultFactory = CuratedVaults.factory(address(ace));
+        vlens = VaultLens.deploy();
     }
 
     /// @dev Approve the hub for `amt`: every market here is quoted in the asset, so the hub is the one spender.
@@ -100,7 +111,7 @@ abstract contract CuratorVaultBase is WarpClock {
     uint256 internal vaultMinPrice;
 
     /// @dev A row on `coll` over a FRESH record on the asset pair, reassigned to `record` because the suites drive prices through it.
-    /// @dev A week-long term at the shipped rate, and no cap; the door lends at half the record's minimum, gridded down.
+    /// @dev A week-long term at the shipped rate; the vault lists the collateral uncapped; the door lends at half the record's minimum, gridded down.
     /// @param coll The collateral token.
     /// @return The row.
     function _row(address coll) internal returns (Row memory) {
@@ -110,11 +121,25 @@ abstract contract CuratorVaultBase is WarpClock {
         return Row({
             record: address(record),
             bufferBps: RIG_BUFFER_BPS,
-            baseBps: uint16(PocDeployConfig.BASE_BPS),
+            lenderAprBps: uint16(PocDeployConfig.LENDER_APR_BPS),
             minTenor: ProtocolPolicy.MIN_TENOR,
-            maxTenor: ProtocolPolicy.MAX_TENOR,
-            cap: type(uint192).max
+            maxTenor: ProtocolPolicy.MAX_TENOR
         });
+    }
+
+    /// @dev The curated terms every rig vault takes: the rig's floor ticket, the shipped coverage, the rig timelock, listed rows uncapped.
+    function _curated() internal pure returns (CuratedVaults.Terms memory) {
+        return CuratedVaults.Terms(RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, CuratedVaults.UNCAPPED);
+    }
+
+    /// @dev The curated terms `v` names, where its rows live.
+    function _terms(AceVault v) internal view returns (CuratorTerms) {
+        return CuratedVaults.terms(v);
+    }
+
+    /// @dev `coll`'s stored cap on `v`.
+    function _cap(AceVault v, address coll) internal view returns (uint192 c) {
+        (c,) = vlens.capOf(address(v), coll);
     }
 
     /// @dev The rig collateral listed on a fresh row, for a vault's constructor.
@@ -126,42 +151,72 @@ abstract contract CuratorVaultBase is WarpClock {
     /// @dev The deploy config every suite shares; a suite overrides fields on the returned struct.
     /// @dev It names the rig guardian, so a row about a standing loss can exempt its pot from the entry gate with `_waivePots`.
     function _cfg(uint16 perfFeeBps) internal view returns (VaultConfig memory) {
-        return VaultConfig({ace: address(ace), asset: address(usdc), curator: curator, guardian: rigGuardian, perfFeeBps: perfFeeBps, vestWindow: VEST_W});
+        return VaultConfig({
+            ace: address(ace), asset: address(usdc), curator: curator, guardian: rigGuardian, perfFeeBps: perfFeeBps, vestWindow: VEST_W, seed: VaultSeed.SEED
+        });
     }
 
     /// @dev The vault's guardian exempts every pot standing now, so the loss stays standing while entry reopens over it.
-    function _waivePots(CuratorVault v) internal {
+    function _waivePots(AceVault v) internal {
         (, uint256 s) = ace.lenderUnresolved(address(v), v.asset());
         vm.prank(v.GUARDIAN());
         v.exemptDeadPots(s);
     }
 
     /// @dev A production vault listing the rig collateral from deploy. `mid` follows the newest vault.
-    function _newVault(uint16 perfFeeBps) internal returns (CuratorVault v) {
+    function _newVault(uint16 perfFeeBps) internal returns (AceVault v) {
         v = _deploy(_cfg(perfFeeBps), "Curator", "cVLT");
     }
 
-    /// @dev Deploy a vault from `c` with the rig collateral listed, and name its door market `mid`.
-    function _deploy(VaultConfig memory c, string memory name, string memory symbol) internal returns (CuratorVault v) {
-        v = new CuratorVault(c, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, _listing(), name, symbol);
+    /// @dev Deploy a vault from `c` through the rig's factory with the rig collateral listed, and name its door market `mid`.
+    function _deploy(VaultConfig memory c, string memory name, string memory symbol) internal returns (AceVault v) {
+        v = CuratedVaults.viaFactory(vaultFactory, bytes32(++vaultSalt), c, _curated(), _listing(), name, symbol);
         mid = _doorMarket(v, address(collateral));
+    }
+
+    /// @dev A vault whose product is a `MockTerms` a row steers, listing no collateral: the wildcard zero, the total uncapped.
+    function _onMockTerms(uint16 perfFeeBps) internal returns (AceVault v, MockTerms t) {
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
+        t = new MockTerms(predicted, address(ace));
+        CuratedVaults.Terms memory c = _curated();
+        VaultSeed.fund(_cfg(perfFeeBps), predicted);
+        v = new AceVault(
+            _cfg(perfFeeBps), CuratedVaults.product(address(t), c.timelock), CuratedVaults.caps(predicted, new Listing[](0), c.rowCap), "Cap", "cCAP"
+        );
+    }
+
+    /// @dev A curated vault from `cfg` listing `l` uncapped at the rig's terms, by plain `new` from this contract.
+    /// @dev External, so an expectation armed before the self-call binds the vault's own refusal rather than the terms' create.
+    function makeCurated(VaultConfig memory cfg, Listing[] memory l, string memory name, string memory symbol) external returns (AceVault) {
+        return CuratedVaults.make(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, name, symbol);
     }
 
     /// @dev The market `v`'s door opens on `coll` at the record's current print, created at the hub if it is not there yet.
     /// @dev Anyone may create a market naming a lender; it lends nothing until that lender's door funds it.
-    function _doorMarket(CuratorVault v, address coll) internal returns (bytes32 id) {
+    function _doorMarket(AceVault v, address coll) internal returns (bytes32 id) {
         MarketParams memory p;
-        (id, p,) = v.previewTerms(_request(coll, 0, 0), "");
+        (id, p,) = _vaultLens().previewTerms(address(v), borrower, _request(coll, 0, 0), "");
         if (ace.idToMarketParams(id).lender == address(0)) ace.createMarket(p);
     }
 
-    /// @dev List `coll` on `v` after deploy: the curator submits a fresh row, the timelock passes, and anyone accepts it.
-    function _list(CuratorVault v, address coll) internal returns (Row memory row) {
+    /// @dev The vault lens `previewTerms` lives on, built here if a suite's own `setUp` has not built it yet.
+    function _vaultLens() internal returns (IAceVaultLens) {
+        if (address(vlens) == address(0)) vlens = VaultLens.deploy();
+        return vlens;
+    }
+
+    /// @dev List `coll` on `v` after deploy: the curator submits a fresh row on the terms and an uncapped cap on the vault, both wait, anyone accepts.
+    function _list(AceVault v, address coll) internal returns (Row memory row) {
         row = _row(coll);
+        CuratorTerms t = _terms(v); // read before the prank, which the read would otherwise spend
         vm.prank(curator);
-        v.submitCollateral(coll, row);
+        t.submitCollateral(coll, row);
+        vm.prank(curator);
+        v.submitCap(coll, CuratedVaults.UNCAPPED);
         _warpBy(RIG_TIMELOCK);
-        v.accept(coll);
+        t.accept(coll);
+        (,, uint64 capAt) = vlens.pendingCapOf(address(v), coll);
+        if (capAt != 0) v.acceptCap(coll); // a collateral already listed uncapped took the cap at once
     }
 
     /// @dev A door request for `units` of `coll` drawing `principal` over the row's shortest term, with no floors.
@@ -181,7 +236,7 @@ abstract contract CuratorVaultBase is WarpClock {
         return ace.createMarket(p);
     }
 
-    function _lpDeposit(CuratorVault v, address who, uint256 amt) internal returns (uint256 shares) {
+    function _lpDeposit(AceVault v, address who, uint256 amt) internal returns (uint256 shares) {
         usdc.mint(who, amt);
         vm.startPrank(who);
         usdc.approve(address(v), amt);
@@ -191,20 +246,29 @@ abstract contract CuratorVaultBase is WarpClock {
 
     /// @dev Borrow `principal` against `COLL` through the door of the vault lending in `mid`; the borrower takes the cash and the title.
     function _open(uint256 principal) internal returns (uint256 loanId) {
-        return _borrow(CuratorVault(ace.idToMarketParams(mid).lender), principal);
+        return _borrow(AceVault(ace.idToMarketParams(mid).lender), principal);
     }
 
     /// @dev Borrow `principal` against `COLL` of the rig collateral through `v`'s door as the rig borrower.
-    function _borrow(CuratorVault v, uint256 principal) internal returns (uint256 loanId) {
+    function _borrow(AceVault v, uint256 principal) internal returns (uint256 loanId) {
         return _borrowOn(v, address(collateral), principal);
     }
 
     /// @dev Borrow `principal` against `COLL` of `coll` through `v`'s door as the rig borrower, who pledges to the vault.
-    function _borrowOn(CuratorVault v, address coll, uint256 principal) internal returns (uint256 loanId) {
+    function _borrowOn(AceVault v, address coll, uint256 principal) internal returns (uint256 loanId) {
         MockStakeVault(coll).mint(borrower, COLL);
         vm.startPrank(borrower);
         MockStakeVault(coll).approve(address(v), COLL);
         loanId = v.borrow(_request(coll, COLL, principal), "", "");
+        vm.stopPrank();
+    }
+
+    /// @dev `_borrowOn` with the pledge named: `units` of `coll` against `principal` through `v`'s door as the rig borrower.
+    function _borrowOnAt(AceVault v, address coll, uint256 units, uint256 principal) internal returns (uint256 loanId) {
+        MockStakeVault(coll).mint(borrower, units);
+        vm.startPrank(borrower);
+        MockStakeVault(coll).approve(address(v), units);
+        loanId = v.borrow(_request(coll, units, principal), "", "");
         vm.stopPrank();
     }
 
@@ -220,7 +284,7 @@ abstract contract CuratorVaultBase is WarpClock {
     /// @dev THE CRANK TAKES NO MARKET. The three variants below survive as call-site shorthand, and each
     /// @dev sweeps the vault's whole pool: the hub keys the credit by (lender, quote), so nothing is finer.
     /// @dev `price` and `lotIndex` are ignored, but the arity stays so a call site reads as the same step.
-    function _crank(CuratorVault v, uint256 loanId, uint256 price, uint256 lotIndex) internal {
+    function _crank(AceVault v, uint256 loanId, uint256 price, uint256 lotIndex) internal {
         price;
         _track(loanId, lotIndex);
         v.crank();
@@ -228,44 +292,44 @@ abstract contract CuratorVaultBase is WarpClock {
 
     /// @dev Track the loan's one position, then sweep the vault once.
     /// @dev The empty case still skips the crank: a loan with neither a live claim nor a pot funded nothing.
-    function _crankAllTicks(CuratorVault v, uint256 loanId, uint256 lotIndex) internal {
+    function _crankAllTicks(AceVault v, uint256 loanId, uint256 lotIndex) internal {
         bytes32 m = ace.loanMarket(loanId);
         if (read.claimOf(m, loanId) == 0 && read.invPotOf(m, loanId) == 0) return;
         _track(loanId, lotIndex);
         v.crank();
     }
 
-    function _crankByLoan(CuratorVault v, uint256 loanId) internal {
+    function _crankByLoan(AceVault v, uint256 loanId) internal {
         _crankAllTicks(v, loanId, 0);
     }
 
     uint256 internal constant CLASS_DRAW = 100e6; // one position's draw, comfortably over the rig's `minPrincipal`
 
     /// @dev Build at least `target` carried positions, one door borrow per round; `band` is tracked and ignored.
-    function _buildClasses(CuratorVault v, uint256 target, uint256 band) internal {
+    function _buildClasses(AceVault v, uint256 target, uint256 band) internal {
         band;
         for (uint256 round; legs.length < target; round++) {
             _crankAllTicks(v, _borrow(v, CLASS_DRAW), round);
         }
     }
 
-    function _buildClasses(CuratorVault v, uint256 target) internal {
+    function _buildClasses(AceVault v, uint256 target) internal {
         _buildClasses(v, target, 16);
     }
 
     /// @dev A lap PLUS the wait that RECOGNIZES what it banked, for tests whose subject is the amount.
-    function _crankAndRecognize(CuratorVault v) internal {
+    function _crankAndRecognize(AceVault v) internal {
         _crankAll(v);
         _warpBy(VEST_W);
     }
 
     /// @dev The same lap behind an EXTERNAL call, so a fuzz driver can try/catch it.
-    function crankAllExternal(CuratorVault v) external {
+    function crankAllExternal(AceVault v) external {
         _crankAll(v);
     }
 
     /// @dev Sweep THIS vault, whole: one call collects everything the hub owes it into its own balance.
-    function _crankAll(CuratorVault v) internal {
+    function _crankAll(AceVault v) internal {
         v.crank();
     }
 
@@ -322,12 +386,12 @@ abstract contract CuratorVaultBase is WarpClock {
     uint256 internal gifts; // each gift lends through its own donor, so each is its own market
 
     /// @dev A counted rise of `amount`: the asset lands in the vault's balance, which NAV counts.
-    function _gift(CuratorVault v, uint256 amount) internal {
+    function _gift(AceVault v, uint256 amount) internal {
         _giftPart(v, amount, amount);
     }
 
     /// @dev The same counted rise, of any size down to one wei: the donor lends `lent` and withdraws only `amount` to the vault.
-    function _giftPart(CuratorVault v, uint256 lent, uint256 amount) internal {
+    function _giftPart(AceVault v, uint256 lent, uint256 amount) internal {
         address donor = address(uint160(0xD0D0 + ++gifts));
         MarketParams memory p = AceFixtures.marketParams(v.asset(), address(collateral));
         p.lender = donor;
@@ -339,7 +403,7 @@ abstract contract CuratorVaultBase is WarpClock {
 
     /// @dev Entry is open: both max views uncapped, and `deposit` mints at the price `previewDeposit` quotes.
     /// @return shares The shares the entry minted.
-    function _assertEntryAdmitted(CuratorVault v, address who) internal returns (uint256 shares) {
+    function _assertEntryAdmitted(AceVault v, address who) internal returns (uint256 shares) {
         assertEq(v.maxDeposit(who), type(uint256).max, "maxDeposit shut an entry the vault takes");
         assertGt(v.maxMint(who), 0, "and so did maxMint");
         uint256 quoted = v.previewDeposit(1_000e6);
@@ -348,7 +412,7 @@ abstract contract CuratorVaultBase is WarpClock {
     }
 
     /// @dev Entry waits on an unsold pot: both max views read zero, and `deposit` reverts `InventoryUnsold` and mints no share.
-    function _assertEntryWaitsForTheSale(CuratorVault v, address who) internal {
+    function _assertEntryWaitsForTheSale(AceVault v, address who) internal {
         assertEq(v.maxDeposit(who), 0, "maxDeposit advertised an entry the unsold pot shuts");
         assertEq(v.maxMint(who), 0, "and so did maxMint");
         uint256 held = v.balanceOf(who);
@@ -372,18 +436,18 @@ abstract contract CuratorVaultBase is WarpClock {
 
     /// @dev Redeem a holder's whole position for cash; the exit pays no title.
     /// @dev A REQUEST AND A CLAIM, not an instant redeem: the claim reaches all of exitable and releases a vesting pile to the last holders out.
-    function _redeemAll(CuratorVault v, address who) internal returns (uint256 assets) {
+    function _redeemAll(AceVault v, address who) internal returns (uint256 assets) {
         return _requestAndClaim(v, who, v.balanceOf(who));
     }
 
     /// @dev Redeem `num/den` of a holder's position.
-    function _redeemFrac(CuratorVault v, address who, uint256 num, uint256 den) internal returns (uint256 assets) {
+    function _redeemFrac(AceVault v, address who, uint256 num, uint256 den) internal returns (uint256 assets) {
         return _requestAndClaim(v, who, (v.balanceOf(who) * num) / den);
     }
 
     /// @dev The whole exit, end to end: request the shares, then claim all of the request exitable cash covers now.
     /// @dev What it cannot cover stays requested, and the request holds exitable cash from lending until a later claim.
-    function _requestAndClaim(CuratorVault v, address who, uint256 shares) internal returns (uint256 assets) {
+    function _requestAndClaim(AceVault v, address who, uint256 shares) internal returns (uint256 assets) {
         vm.startPrank(who);
         v.requestExit(shares);
         uint256 m = v.maxClaim(who);
@@ -395,14 +459,14 @@ abstract contract CuratorVaultBase is WarpClock {
     /// @dev The vault asks the hub's own `lenderAssets` getter; this sums the lens's pools, so a wrong offset shows up as a mismatch.
     /// @dev Cash is the TOKEN BALANCE: the vault holds its cash, and nothing it funds rests between calls.
     /// @dev THE ARITHMETIC NECESSARILY AGREES WITH `grossNav`, so this is a consistency check and not a proof.
-    function _hubTruthNav(CuratorVault v) internal view returns (uint256 nav) {
+    function _hubTruthNav(AceVault v) internal view returns (uint256 nav) {
         (uint256 resting, uint256 lent, uint256 owed) = lens.lenderPools(address(v), v.asset());
         nav = usdc.balanceOf(address(v)) + resting + lent + owed;
     }
 
     /// @dev A door borrow the vault's lendable cannot fund is refused by the placement check before anything moves.
     /// @param principal The draw to attempt; it plus its roll-hold growth must exceed `lendable`.
-    function _expectBorrowPastLendable(CuratorVault v, uint256 principal) internal {
+    function _expectBorrowPastLendable(AceVault v, uint256 principal) internal {
         collateral.mint(borrower, COLL);
         vm.startPrank(borrower);
         collateral.approve(address(v), COLL);
@@ -420,7 +484,7 @@ abstract contract CuratorVaultBase is WarpClock {
     }
 
     /// @dev Positions the rig funded that the vault is still IN: a live claim, or a settled pot it may take.
-    function _carriedClasses(CuratorVault v) internal view returns (uint256 n) {
+    function _carriedClasses(AceVault v) internal view returns (uint256 n) {
         for (uint256 i; i < legs.length; i++) {
             bytes32 m = ace.loanMarket(legs[i].loanId);
             if (ace.idToMarketParams(m).lender != address(v)) continue;
@@ -430,7 +494,7 @@ abstract contract CuratorVaultBase is WarpClock {
     }
 
     /// @dev Collateral the vault can still take across every position the rig funded, off the hub's own pots.
-    function _unitsHeld(CuratorVault v) internal view returns (uint256 sum) {
+    function _unitsHeld(AceVault v) internal view returns (uint256 sum) {
         for (uint256 i; i < legs.length; i++) {
             bytes32 m = ace.loanMarket(legs[i].loanId);
             if (ace.idToMarketParams(m).lender != address(v)) continue;

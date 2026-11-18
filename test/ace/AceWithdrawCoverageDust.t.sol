@@ -15,20 +15,17 @@ import {AceReader} from "../utils/AceReader.sol";
 /// @title AceWithdrawCoverageDust
 /// @notice THE QUESTION: does the withdrawal gate still cover settlement once debt is repaid to dust?
 /// @notice Two functions answer "collateral this loan needs" and they do not agree at the wei.
-/// @notice `Borrower.requiredAt` takes ONE ceiling over the whole debt: admissibility, and the old gate.
-/// @notice `LoanAccounting.collateralNeeded` takes N ceilings, one per funded tick, and governs `_settle`.
-/// @notice `Borrower.withdrawLine` is what gates `withdrawCollateral` now: `requiredAt` plus the tick cap.
-/// @dev Write `omega = priceAt(t) / unitScale`, the QUOTE WEI one COLLATERAL WEI buys at that tick.
-/// @dev Then the gate leaves `k * debt / omega_floor` and settlement asks `sum ceil(claim_t / omega_t)`.
-/// @dev Each per-tick ceiling rounds up by under one collateral wei, so the sum can exceed the gate.
-/// @dev The violation condition is `n_eff > (k - 1) * debt / omega_floor`: the coverage margin,
-/// @dev MEASURED IN COLLATERAL WEI, smaller than the count of funded ticks.
-/// @dev So it needs BOTH dust debt and a large `omega`, and the shortfall is bounded by `maxClaimTicks` wei.
+/// @notice `Borrower.requiredAt` takes ONE ceiling over `k` times the whole debt: admissibility.
+/// @notice `LoanAccounting.collateralNeeded` takes ONE ceiling over the loan's one claim, and governs `_settle`.
+/// @notice `Borrower.coverageLine` gates `withdrawCollateral`: `requiredAt` plus one atom of margin.
+/// @dev Write `omega = price / unitScale`, the QUOTE WEI one COLLATERAL WEI buys at the market's price.
+/// @dev Then the gate leaves `k * debt / omega` and settlement asks `ceil(claim / omega)`.
+/// @dev The old violation condition was `n_eff > (k - 1) * debt / omega`: the margin, in COLLATERAL WEI, under the funded tick count.
+/// @dev It needed BOTH dust debt and a large `omega`; with one claim no violation is left, since `ceil(k X) >= ceil(X)` at every debt.
 /// @dev `omega = human_price * 10 ** (quoteDec - collDec)`, so an 8-dec collateral against an 18-dec
 /// @dev quote gives `omega ~ 1e10` at a price near 1, and WBTC/USDC at $60k gives `omega ~ 600`.
-/// @dev The doctrinal claim under test is `the design record`, `shortfall-unreachable`:
-/// @dev "withdrawing to the line does not thin it, because at the line `units = k x need` exactly".
-/// @dev That identity is real-arithmetic; `need` is a sum of integer ceilings and is not `debt * S / floor`.
+/// @dev The doctrinal claim under test: "withdrawing to the line does not thin it, because at the line `units = k x need` exactly".
+/// @dev That identity is real-arithmetic; `need` is an integer ceiling and is not `debt * S / floor`.
 /// @dev DUST DEBT IS REACHABLE ONLY UNDER A PERMISSIVE `minPrincipal`: no repay leaves a live loan under its market's floor.
 /// @dev `minPrincipal` is creator-chosen and bounded only by `originationFee(minPrincipal) < minPrincipal`, so a tiny floor is legal.
 /// @dev So every row repays to its debt with one public verb, on a market whose floor admits that debt.
@@ -48,7 +45,7 @@ contract AceWithdrawCoverageDustTest is Test {
     address internal alice = address(0xA11CE);
     address internal borrower = address(0xB0B);
 
-    uint256 internal constant TICKS = 32; // == maxClaimTicks: the count that maximizes the ceiling slack
+    uint256 internal constant TICKS = 32; // the retired maxClaimTicks, kept as the seed's lot count
     int24 internal constant SPACING = 60;
     uint256 internal constant K = 1.4e18; // PocDeployConfig.MIN_COVERAGE_WAD, the shipped coverage multiple
 
@@ -58,7 +55,7 @@ contract AceWithdrawCoverageDustTest is Test {
 
     /* ============================ the fixture ============================ */
 
-    /// @dev A market whose collateral and quote decimals are the caller's, funded across all 32 ticks.
+    /// @dev A market whose collateral and quote decimals are the caller's, funded with 32 lots' worth of cash.
     function _deploy(uint8 collDec, uint8 quoteDec, uint256 perTick, uint256 minPrincipal) internal returns (Fx memory f) {
         f.quote = new MockERC20("Quote", "Q", quoteDec);
         f.coll = new MockERC20("Collateral", "C", collDec);
@@ -86,7 +83,7 @@ contract AceWithdrawCoverageDustTest is Test {
     /// @dev DELETED: `_price(par, i)`, the i-th funding tick descending from par so a draw spanned the seeded
     /// @dev band. A market bids at one price, so there is no band to descend and no i to index.
 
-    /// @dev Opens the loan that funds every seeded tick: the principal is exactly the seeded cash.
+    /// @dev Opens the loan that draws the whole seed: the principal is exactly the seeded cash.
     function _open(Fx memory f, uint256 perTick, uint256 units) internal returns (uint256 loanId) {
         f.coll.mint(borrower, units);
         vm.startPrank(borrower);
@@ -121,8 +118,7 @@ contract AceWithdrawCoverageDustTest is Test {
     }
 
     /// @dev Live claims on this loan: `n_eff`, the count `collateralNeeded` pays a ceiling for.
-    /// @dev IT IS ONE OR ZERO NOW. The epsilon that rode on it collapsed with it: the coverage line was
-    /// @dev `requiredAt` plus one atom PER FUNDED TICK, and a loan funds one, so it is `requiredAt` plus one.
+    /// @dev IT IS ONE OR ZERO NOW. The coverage line once carried one atom per funded tick; its one atom now is margin.
     function _liveTicks(Fx memory f, uint256 loanId) internal view returns (uint256) {
         return f.read.claimCount(f.id, loanId);
     }
@@ -190,8 +186,7 @@ contract AceWithdrawCoverageDustTest is Test {
     /* ============================ the control ============================ */
 
     /// @notice THE CONTROL, and it must PASS: the same sequence on an 18-dec collateral / 6-dec quote pair.
-    /// @dev `unitScale` is 1e30 there against tick prices near 1e18, so `omega ~ 1e-12` and one collateral
-    /// @dev wei buys almost no quote. The per-tick ceilings are then negligible beside the `k` margin.
+    /// @dev There one collateral wei buys ~1e-12 of quote, so the need's one ceiling is negligible beside the `k` margin.
     /// @dev Its job is to show the failure above is the DECIMAL/PRICE regime and not the fixture's plumbing.
     function test_Control_WideUnitScale_StaysCoveredOnTheSameSequence() public {
         Fx memory f = _deploy(18, 6, 1e6, 1e4); // a floor that admits the 32_000 debt

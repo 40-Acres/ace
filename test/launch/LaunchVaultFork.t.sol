@@ -16,8 +16,8 @@ import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {IContinuousClearingAuction} from "../../src/interfaces/ILaunchAuction.sol";
-import {LaunchVault} from "../../src/curator/LaunchVault.sol";
-import {SetValue} from "../../src/curator/sets/SetValue.sol";
+import {LaunchVault} from "../../src/entities/launch/LaunchVault.sol";
+import {PriceGrid} from "../../src/curator/PriceGrid.sol";
 import {LaunchLock, Leg} from "../../src/entities/launch/LaunchLock.sol";
 import {LaunchOpsBudget} from "../../src/entities/launch/LaunchOpsBudget.sol";
 import {LaunchTokenFactory} from "../../src/entities/launch/LaunchTokenFactory.sol";
@@ -252,7 +252,7 @@ contract LaunchVaultForkTest is WarpClock {
 
     /// @dev Swap the pool to the token price `priceQ96`, exact-input against a sqrt-price limit, funded by `deal`.
     function _moveTo(Launch memory L, uint256 priceQ96) internal {
-        uint160 target = SetValue.sqrtPriceX96(priceQ96, USDC < L.token);
+        uint160 target = PriceGrid.sqrtPriceX96(priceQ96, USDC < L.token);
         (uint160 s,,,) = pm.getSlot0(L.key.toId());
         if (target == s) return;
         bool zeroForOne = target < s;

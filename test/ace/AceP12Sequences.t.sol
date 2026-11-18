@@ -140,7 +140,7 @@ contract AceP12SequencesTest is WarpClock {
         vm.prank(alice);
         uint256 paid = ace.collect(address(usdc), alice);
 
-        assertEq(paid, DRAW / 2 + 2_000_000, "the repaid half plus the lender's cut of the origination fee, as cash");
+        assertEq(paid, DRAW / 2 + 2_000_275, "the repaid half plus the lender's cut of the origination fee, as cash");
         assertEq(ace.restingOf(id), 0, "and the market they left is still empty behind them");
     }
 }

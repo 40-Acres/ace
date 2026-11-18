@@ -61,6 +61,7 @@ contract AceStagedSettlementHandler is WarpClock {
     /// @dev 1 units not conserved, 2 claim survived, 3 lent did not fall by the claim, 4 shortfall record wrong,
     /// @dev 5 the market's loss total did not move with the record, 6 a short settle paid the defaulted borrower,
     /// @dev 7 a `forceClose` on an expired live loan reverted, or returned and left it live; from expiry it must always settle.
+    /// @dev 8 an in-term recorded take off [need, min(line, claim at trigger)] or short at max(trigger, price / k), 9 a recorded take from expiry not the need.
     uint8 public settleCode;
     uint256 public settleLoanId;
     uint256 public settleExpected;
@@ -70,6 +71,23 @@ contract AceStagedSettlementHandler is WarpClock {
     uint256[2] public settlesCovered; // per path: settles the units covered
     uint256 public forfeits; // recordless settles whose market took more than the claim's need
     uint256 public baselineShort; // short settles the baseline landed, so a report can tell the fuzzer's own from them
+    uint256 public recordedSpreads; // `overPledgeThenSettle`'s in-term recorded settles whose take passed the need: the take follows the trigger
+    uint256 public recordedCapArm; // of those, the settles the coverage line capped
+    uint256 public recordedTriggerArm; // of those, the settles whose take was the claim at the trigger itself
+    uint256 public recordedAtTenor; // `overPledgeThenSettle`'s settles from the expiry second, each of which took exactly the need
+
+    /// @dev What a recorded settle's take is checked against, read the instant before it.
+    struct Take {
+        uint256 units; // the lot, before the sliver
+        uint256 claim; // the live claim, which is the debt
+        uint256 need; // the claim's need at the price
+        uint256 line; // the coverage line on the claim at the price, the in-term take's cap
+        uint256 atTrigger; // ceil(units * 1e18 / k), the claim at the trigger
+        uint256 trig; // the loan's trigger price
+        uint256 pot; // the pot before the settle
+        uint256 expiry; // the loan's expiry second
+        bool inTerm; // the settle landed before it
+    }
 
     /// @dev What one settle is checked against, taken before it runs.
     struct Pre {
@@ -145,6 +163,19 @@ contract AceStagedSettlementHandler is WarpClock {
         _repayWhole(f); // a clean close refunds the unearned escrow AS A CREDIT, so the quote ledger has an entry to hold
         require(read.marketState(recId).quoteOwedTotal > 0, "BASELINE: the clean close credited no quote refund");
         baselineShort = settlesShort[0] + settlesShort[1];
+        _baselineRecordedTake();
+    }
+
+    /// @dev The recorded spread on both arms before the fuzzer runs: two lines takes the cap's arm, 1.2 lines the trigger's.
+    function _baselineRecordedTake() internal {
+        uint256 g = _openIn(recId, borrowers[1], 2_000e6, 20_000);
+        require(g != 0, "BASELINE: the cap-arm open did not land");
+        _settleRecorded(g, 0);
+        uint256 j = _openIn(recId, borrowers[0], 2_000e6, 12_000);
+        require(j != 0, "BASELINE: the trigger-arm open did not land");
+        _settleRecorded(j, 0);
+        _requireLatchClean();
+        require(recordedCapArm > 0 && recordedTriggerArm > 0, "BASELINE: an in-term recorded settle did not take past the need on both arms");
     }
 
     function _repayWhole(uint256 id) internal {
@@ -420,6 +451,109 @@ contract AceStagedSettlementHandler is WarpClock {
         record.setAbove(true);
     }
 
+    // ---- the recorded take, which follows the trigger inside the term ----
+
+    /// @notice Real verbs only: a recorded loan opened over its line, part-repaid on two seeds in three, then settled in the term or from expiry.
+    /// @dev The recorded spread arm: an in-term take over the need on the cap's arm and the trigger's, and the step to the need at expiry.
+    /// @dev `doorSeed % 4`: 0 finalize now, 1 finalize in the term's last second, 2 finalize at the expiry second, 3 `forceClose` there.
+    /// @dev It funds its own draw and heals the print first, so a lender's withdrawal or a crash left by the fuzzer cannot starve the open.
+    /// @dev Past the tracked-loan cap its loan is left untracked, since it settles here; the suite's walks still read it off the hub.
+    /// @dev An open that fails falls back to a live recorded loan the fuzzer left, never a staged one: its lot must hold the line.
+    function overPledgeThenSettle(uint256 drawSeed, uint256 factorSeed, uint256 repaySeed, uint256 doorSeed) external {
+        _bump("overPledgeThenSettle");
+        _heal();
+        uint256 principal = bound(drawSeed, 50e6, 8_000e6);
+        _seed(recLender, recId, principal);
+        uint256 kBps = ace.idToMarketParams(recId).minCoverageWad / 1e14; // `k` lines, where the cap starts to bind
+        uint256 factor = factorSeed % 2 == 0 ? bound(factorSeed, 10_000, kBps - 1) : bound(factorSeed, kBps, 40_000); // each arm half the draws
+        uint256 id = _openIn(recId, borrowers[doorSeed % 2], principal, factor);
+        if (_loanIds.length > MAX_LOANS) _loanIds.pop();
+        if (id == 0) id = _pickOnTheLine(drawSeed);
+        if (id == 0) return;
+        _repayPart(id, repaySeed);
+        _settleRecorded(id, doorSeed % 4);
+    }
+
+    /// @dev The first live recorded loan at or after the seed's pick that is inside its term and holds its coverage line, or zero.
+    function _pickOnTheLine(uint256 seed) internal view returns (uint256) {
+        uint256 n = _loanIds.length;
+        if (n == 0) return 0;
+        Cfg memory c = _cfg(recId);
+        for (uint256 k; k < n; k++) {
+            uint256 id = _loanIds[(seed % n + k) % n];
+            Loan memory l = read.loan(id);
+            if (l.market != recId || l.closedAt != 0 || _now() >= l.expiry) continue;
+            if (l.collateralUnits >= Borrower.coverageLine(c, read.claimOf(recId, id), c.p.price)) return id;
+        }
+        return 0;
+    }
+
+    /// @dev Repay part of `id` on two seeds in three, never under the debt floor, which pulls the trigger further under the price.
+    function _repayPart(uint256 id, uint256 seed) internal {
+        if (seed % 3 == 0) return;
+        Loan memory l = read.loan(id);
+        uint256 floorDebt = ace.idToMarketParams(l.market).minPrincipal / 2;
+        if (l.debt <= floorDebt) return;
+        uint256 amt = bound(seed, 1, l.debt - floorDebt);
+        usdc.mint(l.borrower, amt);
+        vm.startPrank(l.borrower);
+        usdc.approve(address(ace), amt);
+        try ace.repay(id, amt) {} catch {}
+        vm.stopPrank();
+    }
+
+    /// @dev Settle `id` through the door and second `mode` names, then hold its take to the rule; a settle that broke a law is already latched.
+    function _settleRecorded(uint256 id, uint256 mode) internal {
+        Loan memory l = read.loan(id);
+        if (l.closedAt != 0 || l.market != recId) return;
+        _warpAtLeastTo(mode == 0 ? 0 : (mode == 1 ? l.expiry - 1 : l.expiry));
+        Take memory t = _takePre(id, l);
+        if (mode == 3) {
+            _forceClose(id);
+        } else {
+            _crash(id);
+            _finalize(id);
+            _heal();
+        }
+        if (settleCode != 0 || read.loan(id).closedAt == 0) return;
+        _checkTake(t, id);
+    }
+
+    function _takePre(uint256 id, Loan memory l) internal view returns (Take memory t) {
+        Cfg memory c = _cfg(recId);
+        t.units = l.collateralUnits;
+        t.claim = read.claimOf(recId, id);
+        t.need = _need(recId, t.claim);
+        t.line = Borrower.coverageLine(c, t.claim, c.p.price);
+        t.atTrigger = FullMath.mulDivRoundingUp(t.units, 1e18, c.p.minCoverageWad);
+        t.trig = read.triggerPrice(id);
+        t.pot = read.invPotOf(recId, id);
+        t.expiry = l.expiry;
+    }
+
+    /// @dev Code 8 or 9 on a take off the rule; else the arm it landed on is tallied.
+    /// @dev In the term or not is read off the hub's own `closedAt`, the second it settled, so no test clock can disagree with it.
+    function _checkTake(Take memory t, uint256 id) internal {
+        t.inTerm = read.loan(id).closedAt < t.expiry;
+        uint256 potIn = read.invPotOf(recId, id) - t.pot;
+        if (!t.inTerm) {
+            if (potIn != t.need) _latch(9, id, t.need, potIn);
+            else recordedAtTenor++;
+            return;
+        }
+        Cfg memory c = _cfg(recId);
+        bool whole = potIn * t.trig >= t.claim * c.unitScale || potIn * c.p.price * 1e18 >= t.claim * c.unitScale * c.p.minCoverageWad;
+        bool bounded = potIn >= t.need && potIn <= t.line && (potIn <= t.atTrigger || potIn == t.need);
+        if (!whole || !bounded) {
+            _latch(8, id, t.atTrigger < t.line ? t.atTrigger : t.line, potIn);
+            return;
+        }
+        if (potIn <= t.need) return;
+        recordedSpreads++;
+        if (t.atTrigger > t.line) recordedCapArm++;
+        else recordedTriggerArm++;
+    }
+
     // ---- the two settlement doors, each checked against the settle it was ----
 
     function finalize(uint256 loanSeed) external {
@@ -489,7 +623,7 @@ contract AceStagedSettlementHandler is WarpClock {
         }
         if (su != 0) settlesShort[path]++;
         else settlesCovered[path]++;
-        if (potIn > need) forfeits++;
+        if (potIn > need && p.m == norecId) forfeits++; // a recorded take over the need is a spread, tallied by `_checkTake`
     }
 
     /// @dev Codes 1-3: the lot is conserved across the three places it can land, the claim retires, `lent` falls by it.

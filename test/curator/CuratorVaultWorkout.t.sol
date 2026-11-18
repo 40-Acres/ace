@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
 import {AceVault} from "../../src/curator/AceVault.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {PriceFrame} from "../utils/PriceFrame.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
@@ -20,19 +20,19 @@ contract CuratorVaultWorkoutTest is CuratorVaultBase {
     }
 
     /// @dev A settled but un-cranked class: the write-off has not been recognized yet.
-    function _settled(CuratorVault v) internal returns (uint256 loanId) {
+    function _settled(AceVault v) internal returns (uint256 loanId) {
         _lpDeposit(v, alice, SEED);
         loanId = _open(DRAW);
         _crank(v, loanId, T2, 0);
         _finalize(loanId);
     }
 
-    function _impaired(CuratorVault v) internal returns (uint256 loanId) {
+    function _impaired(AceVault v) internal returns (uint256 loanId) {
         loanId = _settled(v);
         _crankAll(v);
     }
 
-    function _tryDeposit(CuratorVault v, address who, uint256 amt) internal {
+    function _tryDeposit(AceVault v, address who, uint256 amt) internal {
         usdc.mint(who, amt);
         vm.startPrank(who);
         usdc.approve(address(v), amt);
@@ -46,7 +46,7 @@ contract CuratorVaultWorkoutTest is CuratorVaultBase {
     /// @dev There is no workout flag left to clear, so what a later entrant meets is the price, and the pile gate.
     /// @dev While the recovery vests it sits over GATE_BPS of NAV and entry is refused `GainVesting`; once vested, the same depositor enters.
     function test_Recovery_LeavesTheClassSpentAndEntryOpen() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _impaired(v);
         uint256 navAfterLoss = v.totalAssets();
 
@@ -73,7 +73,7 @@ contract CuratorVaultWorkoutTest is CuratorVaultBase {
     /// @dev T28: the trough gate is deleted, but a JIT depositor into a deep impairment is refused until its settled pot sells.
     /// @dev So it captures none of the later recovery: the unsold pot refuses it `InventoryUnsold`, with no share minted.
     function test_Skim_AJitDepositIntoADeepImpairmentIsRefusedUntilTheSale() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 doomed = _impaired(v);
         assertTrue(ace.isClosed(doomed), "PREMISE: the impairment landed");
         uint256 live = Math.mulDiv(v.totalAssets() + 1, 1e18, v.totalSupply() + 1e6);
@@ -85,7 +85,7 @@ contract CuratorVaultWorkoutTest is CuratorVaultBase {
     /// @dev Bob's cash lands BEFORE the loss, so the balance holds his deposit as well as alice's leftover.
     /// @dev With no request, `lendable` is the whole balance: one wei past it is refused, and all of it lends.
     function test_Lend_ReservesNothingAgainstARealizedLoss() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, bob, SEED);
         _impaired(v);
         uint256 cash = v.idle();
@@ -103,7 +103,7 @@ contract CuratorVaultWorkoutTest is CuratorVaultBase {
     /// @dev T39: the class brake is deleted, so a large set is an accepted consequence, not a refusal.
     function test_Lend_IsUncappedInPositions() public {
         uint256 target = 130;
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, target * 100e6 + 5_000e6);
         _buildClasses(v, target);
 
@@ -118,7 +118,7 @@ contract CuratorVaultWorkoutTest is CuratorVaultBase {
 
     /// @dev Withdrawal and the exit stay open right through an impairment; nothing about a loss gates them.
     function test_Workout_ExitsStayOpen() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _impaired(v);
         assertTrue(ace.isClosed(loanId), "impaired: the loan really did settle");
         uint256 first = v.balanceOf(alice) / 10; // BEFORE the prank: a read is a call, and a call would eat it

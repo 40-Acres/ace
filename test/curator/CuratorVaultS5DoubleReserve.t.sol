@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 
 /// @title CuratorVaultS5DoubleReserve
 /// @notice No need is held twice: a request claimed whole leaves nothing held behind.
@@ -19,7 +19,7 @@ contract CuratorVaultS5DoubleReserveTest is CuratorVaultBase {
     uint256 internal constant DUST = 2;
     address internal carol = address(0xCA201);
 
-    CuratorVault internal v;
+    AceVault internal v;
     uint256 internal loanId;
 
     function setUp() public override {
@@ -49,7 +49,7 @@ contract CuratorVaultS5DoubleReserveTest is CuratorVaultBase {
         _repay(loanId, ARRIVAL);
         _repay(loanId, ARRIVAL);
         v.crank(); // a repayment reaches idle only at a crank
-        (uint256 exitable, uint256 held) = v.holds();
+        (uint256 exitable, uint256 held) = vlens.holds(address(v));
         assertEq(exitable, v.idle(), "exitable is all of idle");
         assertLe(held, exitable, "the request's hold sits inside exitable");
         assertLe(held, worth + DUST, "and never past the request's worth");
@@ -62,11 +62,11 @@ contract CuratorVaultS5DoubleReserveTest is CuratorVaultBase {
     /// @dev Its surplus would sit in the request's hold, owed to no request, and keep the door from lending it.
     function test_AServedRequestLeavesNoCashHeldBehind() public {
         (uint256 paid, uint256 worth) = _serveBob();
-        (uint256 left,) = v.requestOf(bob);
-        assertEq(v.requestedShares(), 0, "PREMISE: no request stands");
+        (uint256 left,) = vlens.requestOf(address(v), bob);
+        assertEq(vlens.requestedShares(address(v)), 0, "PREMISE: no request stands");
         assertEq(left, 0, "PREMISE: bob's request ended");
         assertApproxEqAbs(paid, worth, DUST, "PREMISE: bob was paid his whole stake, so the request was served whole");
-        (uint256 exitable, uint256 held) = v.holds();
+        (uint256 exitable, uint256 held) = vlens.holds(address(v));
         emit log_named_uint("request hold after the served request", held);
         assertEq(held, 0, "a request that is gone holds nothing back");
         assertEq(v.lendable(), exitable, "so all of exitable is lendable again");

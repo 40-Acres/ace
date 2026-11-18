@@ -28,7 +28,7 @@ library LaunchMarketParams {
         address token; // the launch token, pledged as collateral
         address lender; // sole tenancy: the one address whose cash rests here
         uint256 price; // the lender's bid, raw Q96 quote atoms per token atom
-        uint256 baseBps; // the lender's rate per MIN_TENOR
+        uint256 lenderAprBps; // the lender's rate, bps a year
         uint256 minPrincipal; // the smallest ticket, in the quote's own atoms
         uint256 minCoverageWad; // WAD; caps a ticket at 1/k of the bid, and a default forfeits that whole line
     }
@@ -47,7 +47,7 @@ library LaunchMarketParams {
         p.price = c.price;
         p.fillFeeBps = 0;
         p.minCoverageWad = c.minCoverageWad;
-        p.baseBps = c.baseBps;
+        p.lenderAprBps = c.lenderAprBps;
         p.minTenor = MIN_TENOR;
         p.maxTenor = MAX_TENOR;
         p.minPrincipal = c.minPrincipal;
@@ -142,7 +142,7 @@ abstract contract LaunchFixture is WarpClock {
             token: address(token),
             lender: lender,
             price: AceFixtures.px(0.1e18, quote, address(token)),
-            baseBps: BASE_BPS,
+            lenderAprBps: BASE_BPS,
             minPrincipal: MIN_PRINCIPAL,
             minCoverageWad: COVERAGE
         });

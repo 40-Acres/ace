@@ -4,7 +4,7 @@ pragma solidity 0.8.36;
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {CuratorVaultBase} from "../curator/CuratorVaultBase.sol";
 import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {Loan} from "../../src/ace/hub/Types.sol";
 
 /// @title CuratorVaultInstantHandler
@@ -18,7 +18,7 @@ contract CuratorVaultInstantHandler is CuratorVaultBase {
     uint256 internal constant SEED_DEPOSIT = 500e6;
     uint256 internal constant VIRT = 1e6;
 
-    CuratorVault public vault;
+    AceVault public vault;
     address public guardian = address(0x6A2D);
     address[4] public actors = [address(0xA01), address(0xA02), address(0xA03), address(0xA04)];
     uint256[] internal _loanIds;
@@ -82,7 +82,7 @@ contract CuratorVaultInstantHandler is CuratorVaultBase {
         p.q = vault.totalSupply() + pending + VIRT;
         p.free = p.q - VIRT - vault.balanceOf(address(vault));
         if (who != curator) p.free -= vault.balanceOf(curator) + pending;
-        (p.exitable,) = vault.holds();
+        (p.exitable,) = vlens.holds(address(vault));
     }
 
     /// @dev Weigh one exit that paid: the quote, the stayers' price, the cash's share, the requests' hold while lending, and the pile.
@@ -99,8 +99,8 @@ contract CuratorVaultInstantHandler is CuratorVaultBase {
         if ((vault.totalAssets() + 2) * p.q < (p.a + 1) * q1) priceFell = true; // one asset-wei of rounding
         if (paid * (p.q - VIRT) > p.a * burned + (p.q - VIRT)) overpaid = true; // past the burned shares' part of NAV, plus a wei
         if (!p.draining) {
-            (uint256 exitable,) = vault.holds();
-            if (exitable + 2 < Math.min(p.exitable, vault.convertToAssets(vault.requestedShares()))) holdTouched = true;
+            (uint256 exitable,) = vlens.holds(address(vault));
+            if (exitable + 2 < Math.min(p.exitable, vault.convertToAssets(vlens.requestedShares(address(vault))))) holdTouched = true;
         }
     }
 
@@ -190,7 +190,7 @@ contract CuratorVaultInstantHandler is CuratorVaultBase {
         uint256 m = vault.maxClaim(a);
         if (m == 0) return;
         claimTries++;
-        (uint256 exitable,) = vault.holds();
+        (uint256 exitable,) = vlens.holds(address(vault));
         vm.prank(a);
         try vault.claimExit(m, a, 0) returns (uint256 got) {
             claimsPaid++;

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
@@ -15,8 +17,8 @@ import {AceReader} from "../utils/AceReader.sol";
 
 /// @title AceDarkRecordBound
 /// @notice THE PROPERTY: the settlement bound turns on whether a record was ever WIRED, never on whether it answers today.
-/// @notice A wired record that has gone dark keeps the NARROW bound, so its borrower is still credited everything above need.
-/// @notice Only the recordless class takes the whole coverage line, and the two differ by exactly that wedge.
+/// @notice A wired record that has gone dark settles exactly as a live one at the same second: at tenor its borrower keeps everything above need.
+/// @notice At tenor only the recordless class takes the whole coverage line, and the two differ by exactly that wedge.
 /// @dev THE SUBJECT IS THE CLASS TEST, which is why this is not a row in `AceRecordlessForfeit`: that suite's
 /// @dev subject is what the recordless class does, and its record-backed control holds a LIVE record throughout.
 /// @dev The gap between them is the market this suite drives -- wired at genesis, dark by the time it settles.
@@ -62,7 +64,7 @@ contract AceDarkRecordBoundTest is WarpClock {
 
     /* ================================ the ruled behaviour ================================ */
 
-    /// @notice A WIRED RECORD THAT WENT DARK KEEPS THE NARROW BOUND: the borrower is credited everything above need, net of the sliver.
+    /// @notice A WIRED RECORD THAT WENT DARK SETTLES AT TENOR AS A LIVE ONE: the borrower is credited everything above need, net of the sliver.
     /// @dev The issue's own repro: live at open, `setMinPrice(0)` thereafter, settled by `forceClose` at expiry.
     /// @dev RED under a liveness test, which would take the coverage line here and credit the wedge to the pot.
     /// @dev The sliver is taken before the bound is priced, so the borrower's credit is the lot less sliver less need.
@@ -171,17 +173,34 @@ contract AceDarkRecordBoundTest is WarpClock {
     /// @notice THE VENUE SHAPE: the price channel goes dark while below-ness survives the silence, and title still moves.
     /// @notice So a dark record does NOT deprive every lender of seizure -- and where it does not, nothing is owed in its place.
     /// @dev This is the class the finding's premise misses, and it is why the conceded loss is an ORACLE-class loss.
-    /// @dev The bound is asserted too: seizure being OPEN here changes who may act, never what the settlement takes.
+    /// @dev The bound is asserted too: a dark-but-below-answering record settles exactly as a live record finalized at the same second.
     function test_VenueShape_PriceDarkButBelowNessSurvives_TitleStillMoves() public {
         Rig memory w = _wired();
+        Rig memory v = _wired();
         uint256 loanId = _open(w);
-        (uint256 units, uint256 need,) = _unitsNeedLine(w, loanId);
+        uint256 liveLoan = _open(v);
+        (uint256 units, uint256 need, uint256 line) = _unitsNeedLine(w, loanId);
+        (uint256 u2, uint256 n2,) = _unitsNeedLine(v, liveLoan);
+        assertEq(u2, units, "fixture: the live twin must be the same loan");
+        assertEq(n2, need, "fixture: the live twin's need must match");
 
         _darkenPriceOnly(w);
+        v.rec.setBelow(true); // the live twin answers below with its price channel still open
+        v.rec.setSettleBelow(true);
 
         vm.prank(keeper);
         w.ace.finalize(loanId); // reverts NotSettleable if silence ever stops persisting below-ness
-        assertEq(w.read.unitsOwedOf(loanId, borrower), units - need - w.read.unitsOwedOf(loanId, keeper), "the bound is the narrow one here too");
+        vm.prank(keeper);
+        v.ace.finalize(liveLoan);
+
+        uint256 sliver = _sliver(w, loanId);
+        uint256 atTrigger = FullMath.mulDivRoundingUp(units, 1e18, w.ace.idToMarketParams(w.id).minCoverageWad);
+        uint256 take = Math.min(Math.max(need, Math.min(atTrigger, line)), units - sliver);
+        assertGt(take, need, "fixture: inside the term the capped claim at the trigger exceeds the need, so the row tells the rules apart");
+        assertEq(w.read.invPotOf(w.id, loanId), take, "inside the term the take is the claim at the trigger capped at the line, dark or not");
+        assertEq(w.read.unitsOwedOf(loanId, borrower), units - sliver - take, "and the borrower keeps the rest, less the sliver");
+        assertEq(w.read.invPotOf(w.id, loanId), v.read.invPotOf(v.id, liveLoan), "the dark record settles exactly as a live one at the same second");
+        assertEq(w.read.unitsOwedOf(loanId, borrower), v.read.unitsOwedOf(liveLoan, borrower), "and credits the borrower the same");
     }
 
     /// @notice EVERY RETIRED UNIT IS ACCOUNTED FOR under the dark class too: borrower plus keeper plus pot is the lot.

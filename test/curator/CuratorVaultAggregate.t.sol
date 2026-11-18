@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 
 /// @title CuratorVaultAggregate
 /// @notice THE AGGREGATE IDENTITY over the hub flow `CuratorVaultNav.t.sol` never drives: the inventory FILL.
@@ -10,7 +10,7 @@ import {CuratorVault} from "../../src/curator/CuratorVault.sol";
 /// @notice That is exactly when a NAV that keeps no book of its own can be wrong.
 /// @dev The oracle throughout is `_hubTruthNav`, which sums the lens's pools by a different call path than the vault's own
 /// @dev `Ace.lenderAssets` read, and reads CASH off the token balance.
-/// @dev A CuratorVault market runs no deleverage band, so the keeper crank this file once drove has no subject here.
+/// @dev A AceVault market runs no deleverage band, so the keeper crank this file once drove has no subject here.
 contract CuratorVaultAggregateTest is CuratorVaultBase {
     uint256 internal constant SEED = 40_000e6;
     uint256 internal constant DRAW = 12_000e6;
@@ -22,14 +22,14 @@ contract CuratorVaultAggregateTest is CuratorVaultBase {
     }
 
     /// @dev The identity itself, by the second read path, plus the balance the exit actually pays from.
-    function _assertIdentity(CuratorVault v, string memory where) internal view {
+    function _assertIdentity(AceVault v, string memory where) internal view {
         assertEq(v.grossNav(), _hubTruthNav(v), where);
         assertEq(usdc.balanceOf(address(v)), v.idle(), where);
         assertLe(v.totalAssets(), v.grossNav(), where);
     }
 
     /// @dev One live door loan, and the class booked.
-    function _lentAndBooked(CuratorVault v) internal returns (uint256 loanId) {
+    function _lentAndBooked(AceVault v) internal returns (uint256 loanId) {
         _lpDeposit(v, alice, SEED);
         loanId = _open(DRAW);
         _crank(v, loanId, T2, 0);
@@ -41,7 +41,7 @@ contract CuratorVaultAggregateTest is CuratorVaultBase {
     /// @dev `unitOwed` and lowers nothing, so gross must rise by the credit and the identity must survive.
     /// @dev The crank then MOVES the credit: the owed cash comes home into idle, and NAV does not move.
     function test_BuyInventory_TheAggregateIdentityHoldsAcrossAFill() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _lentAndBooked(v);
         _finalize(loanId);
         _crankAll(v);
@@ -67,7 +67,7 @@ contract CuratorVaultAggregateTest is CuratorVaultBase {
 
     /// @dev A PARTIAL fill leaves the pot live, and the identity must hold at every step of a drip.
     function testFuzz_BuyInventory_TheIdentityHoldsAcrossADripOfFills(uint96 bite) public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _lentAndBooked(v);
         _finalize(loanId);
         _crankAll(v);

@@ -18,7 +18,7 @@ import {DeleverageCrank} from "../utils/DeleverageCrank.sol";
 /// @title AceLenderAssetsTest
 /// @notice The hub's own share-pricing read, which exists so ACE'S OWN AUDITED CONTRACTS never staticcall
 /// @notice the lens, which is not audited.
-/// @dev The guard row is the one that matters: `CuratorVault` prices shares off `lenderAssets`, so a
+/// @dev The guard row is the one that matters: `AceVault` prices shares off `lenderAssets`, so a
 /// @dev torn read mints wrong. It asserts the selector, not merely that something reverted.
 contract AceLenderAssetsTest is Test, DeleverageCrank {
     Ace internal ace;
@@ -106,7 +106,7 @@ contract AceLenderAssetsTest is Test, DeleverageCrank {
     }
 
     /// @notice THE SHARE-PRICING GUARD: the hub refuses this read while its own body is open.
-    /// @notice `CuratorVault` prices shares off exactly this, so a torn answer mints wrong.
+    /// @notice `AceVault` prices shares off exactly this, so a torn answer mints wrong.
     /// @dev Driven through `deleverage`, the one verb that hands control to a caller mid-body.
     function testRevert_LenderAssets_RefusesInsideAGuardedHubBody() public {
         uint256 loanId = _open();

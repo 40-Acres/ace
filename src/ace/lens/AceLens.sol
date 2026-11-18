@@ -11,6 +11,7 @@ import {FillBelowMin, FillOverCollateralized, FillOverOrder, FillUnderCollateral
 import {Probe} from "../hub/libraries/Probe.sol";
 import {MarketInit} from "../hub/MarketInit.sol";
 import {HubLoanTerm} from "../../interfaces/HubLoanTerm.sol";
+import {HubRatePeriod} from "../../interfaces/HubRatePeriod.sol";
 import {IPersistenceRecord} from "../../interfaces/IPersistenceRecord.sol";
 import {Mul512} from "../../utils/Mul512.sol";
 
@@ -34,27 +35,6 @@ interface IAceHub {
         external
         view
         returns (Borrower.Quote memory);
-}
-
-/// @notice The venue-dependency disclosure behind one record and ordered pair: WHICH markets, on WHOSE terms.
-/// @notice NO MONEY FIGURE: a lender's (lender, quote) pool spans markets outside this venue, so any sum would charge it their whole book.
-/// @dev INFORMATIONAL: it gates nothing. The manipulation-cost read lives off-chain, by decision.
-/// @dev Capital-at-risk per venue is an off-chain join over the `Deposit` and `Funded` logs.
-struct VenueExposure {
-    uint256 verified; // ids whose params name this record AND this ordered pair
-    uint256 rejected; // ids skipped: no market, wrong record, or wrong pair
-    uint256 capPrice; // the record's windowed min over its OWN distress window: the shared funding ceiling
-    /// @dev BOTH windows are probed off the RECORD, which owns them; every market behind it shares them.
-    /// @dev A record that exposes neither reads 0 twice, and its settle patience is then undiscoverable on-chain.
-    /// @dev That is disclosure ACE OFFERS, never a guarantee it makes: the ORACLE class answers 0 for both.
-    uint256 distressWindow; // the record's own persistence window; 0 when it does not expose one
-    uint256 settleWindow; // the record's own settle window: how long before the verb that moves TITLE opens
-    uint256 minK; // smallest trigger multiplier in the set: where a lift buys the most debt
-    uint256 maxK;
-    uint256 minDepth; // best-effort probe; 0 when the record answers no depth (ORACLE class)
-    address writer; // best-effort probe; a windowed record's writer, for an off-chain pool-level roll-up
-    bool depthSupported; // a word came back; a catch-all fallback fakes this, so never a capability proof
-    bool recordObserving; // a nonzero lastObserved came back; false = dead, hostile, or no record at all
 }
 
 /// @title AceLens
@@ -98,7 +78,9 @@ contract AceLens {
     uint256 private constant L_ROLL_POLICY = uint256(Storage.LENDERS) + 3; // `rollPolicyOf`, member 3 of the `lenders` root
     uint256 private constant UNIT_SCALE = 1 << 96; // the one price frame genesis writes into every market; a record declaring another is refused
 
+    /// @notice Bind the lens to `ace`, refusing a hub that does not quote its rates per 365-day year: `rateBps` reads the field as one.
     constructor(address ace) {
+        HubRatePeriod.requirePerYear(ace);
         ACE = IAceHub(ace);
     }
 
@@ -126,6 +108,7 @@ contract AceLens {
     }
 
     /// @notice The non-reverting form: `ok` false carries the refusal's selector instead of throwing.
+    /// @dev A read from inside a hub call returns `ReentrancyGuardReentrantCall`'s selector: that is the guard, never a refusal of the open.
     function tryQuoteOpen(bytes32 id, uint256 collateralUnits, uint256 principal, uint64 tenor, address borrower, OpenBounds calldata bnd)
         external
         view
@@ -141,6 +124,7 @@ contract AceLens {
     /// @notice Whether `extend` with these arguments would land if `caller` sent it now, and its fee; the hub's own answer, forwarded.
     /// @notice The caller is an argument, so a borrower's preview through here answers for the borrower and never for this lens.
     /// @notice An extension always runs the loan's own tenor from now, so no tenor is asked.
+    /// @dev Not total like `tryFillOrder`: an id naming no loan reverts `NoMarket`, and a limit short of the policy budget reverts `PolicyGasShort`.
     function tryExtend(uint256 loanId, uint256 minBufferWad, bytes calldata data, address caller) external view returns (bool ok, bytes4 reason, uint256 fee) {
         return ACE.tryExtend(loanId, minBufferWad, data, caller);
     }
@@ -154,6 +138,7 @@ contract AceLens {
     /// @dev The tenor is passed RAW, as the fill passes it; the preview applies its zero-tenor sentinel to every caller, a no-op here.
     /// @dev A zero-tenor order cannot exist while `minTenor` is non-zero, which is what holds the two doors together here.
     /// @dev A fill states no payout floor and no buffer floor, so neither of those open legs can answer through this door.
+    /// @dev Never ask from inside a hub call: the order legs read torn state unguarded, and only the preview's guard may answer `ReentrancyGuardReentrantCall`.
     /// @param orderId The resting order to draw against.
     /// @param principalOut Quote this fill would draw.
     /// @param unitsOut Collateral this fill would carry out of the escrow.
@@ -216,22 +201,18 @@ contract AceLens {
 
     // ---- market state ----
 
-    /// @notice This market's posted rate, annualized.
-    /// @notice `baseBps` IS PER THE MARKET'S OWN `minTenor`; the raw number never compares across markets and the APR legs do.
+    /// @notice This market's posted rate, per year: the lender's, which is the field itself, and the borrower's all-in.
     /// @notice BOTH APR LEGS ARE HELD-TO-TERM: half the lender cut is refundable, so an early close realizes less on each.
     /// @notice THE ALL-IN LEG IS A RATE ON FACE: the fee is prepaid out of the draw, so the cost on the cash received is higher.
     /// @notice An extension is paid in cash at the same rate, so no extension moves a loan's face.
-    /// @dev PER YEAR IN BPS, multiply-before-divide, and SIMPLE: the fee is prepaid at the draw, so nothing compounds.
-    /// @dev Truncating, so a `minTenor` over a year at the floor rate reads zero; the error is under one bps of APR always.
+    /// @dev SIMPLE: the fee is prepaid at the draw, so nothing compounds; the all-in leg truncates, by under one bps.
     /// @dev Zeros for a market that does not exist, which is what the neighbouring views answer rather than reverting.
     /// @param id The market.
-    /// @return lenderAprBps What the lender earns, annualized.
-    /// @return allInAprBps The borrower's fee per unit of face, annualized, protocol share included.
+    /// @return lenderAprBps What the lender earns, per year.
+    /// @return allInAprBps The borrower's fee per unit of face, per year, protocol share included.
     function rateBps(bytes32 id) external view returns (uint256 lenderAprBps, uint256 allInAprBps) {
-        MarketParams memory p = ACE.idToMarketParams(id);
-        if (p.minTenor == 0) return (0, 0);
-        lenderAprBps = p.baseBps * 365 days / p.minTenor;
-        allInAprBps = p.baseBps * (10000 + Constants.PROTOCOL_SHARE_BPS) * 365 days / (10000 * p.minTenor);
+        lenderAprBps = ACE.idToMarketParams(id).lenderAprBps;
+        allInAprBps = lenderAprBps * (10000 + Constants.PROTOCOL_SHARE_BPS) / 10000;
     }
 
     /// @notice The market's scalar state: the O(1) aggregate mirrors plus the derived scales.
@@ -271,14 +252,15 @@ contract AceLens {
         quoteAtBook = _word(base + 1);
     }
 
-    /// @notice Draws ever made in this market: the change detector a lender contract caches against.
-    /// @notice Unchanged since your last check means no draw anywhere can have altered what you are owed.
+    /// @notice Draws and extensions ever made in this market: the change detector a lender contract caches against.
+    /// @notice Unchanged since your last check means no draw or extension can have altered what you are owed.
     /// @dev Conservative by construction: it may move when nothing of yours changed, never the reverse.
     function drawCount(bytes32 id) external view returns (uint64) {
         return uint64(_word(_marketBase(id) + M_STATE + 1));
     }
 
-    /// @notice The cash resting in this market, which under sole tenancy IS its lender's balance here, and all of it a fresh draw may take.
+    /// @notice The cash resting in this market, which under sole tenancy IS its lender's balance here.
+    /// @notice An open or a fill draws at least `minPrincipal`; only an own-market refinance, drawing net of the claim it recycles, takes a rest under it.
     /// @dev PER MARKET, unlike `lenderPools`, whose `resting` spans that lender's markets in this quote.
     function restingOf(bytes32 id) public view returns (uint256) {
         return _word(_marketBase(id) + M_STATE);
@@ -341,6 +323,8 @@ contract AceLens {
         return _word(_entry(loanId, _marketBase(id) + M_CLAIM));
     }
 
+    /// @notice The highest id issued so far, counting ORDERS as well as loans: both draw on one counter.
+    /// @dev Not a loan count despite the name: `drawCount` counts one market's draws and extensions, and the hub's `isLiveLoan` says which ids are live loans.
     function loanCount() external view returns (uint256) {
         return _word(B_COUNT);
     }
@@ -386,13 +370,14 @@ contract AceLens {
         l.market = w[0];
         l.borrower = address(uint160(uint256(w[1])));
         l.collateralUnits = uint256(w[2]);
-        l.debt = uint256(w[3]);
+        l.debt = uint256(w[HubLoanTerm.DEBT_WORD]);
         bytes32 p = w[HubLoanTerm.TERM_WORD];
         (l.openTime, l.tenor, l.expiry) = HubLoanTerm.decode(p);
         l.closedAt = HubLoanTerm.closedAt(p);
         l.lastFee = uint256(w[5]);
     }
 
+    /// @notice The principal the loan was born with, at its open: a top-up raises the debt and leaves this as it was, so it is no amount owed.
     function principalOf(uint256 loanId) external view returns (uint256) {
         return _word(_entry(loanId, B_PRINCIPAL));
     }
@@ -459,8 +444,8 @@ contract AceLens {
 
     /// @notice Collateral this loan must deliver to fill its live claim, at its funding price.
     /// @notice What the coverage line has to keep covered at both doors, which is why that line derives off this.
-    /// @notice NOT what a RECORDLESS settlement takes: that class forfeits the whole coverage line to its lender.
-    /// @dev ONE CEIL, matching settlement, which is what lets the line's own epsilon be a single atom.
+    /// @notice Settlement takes at least this where the lot allows: a recordless market and a recorded one inside the term forfeit up to the coverage line.
+    /// @dev ONE CEIL, matching settlement: `LoanAccounting.collateralNeeded` takes the same one, and the two must agree.
     /// @dev Zero once the claim is gone, which reads the same for a repaid loan and a settled one.
     /// @param id The market.
     /// @param loanId The loan.
@@ -658,7 +643,7 @@ contract AceLens {
         return ps > deleverageStopLevel(loanId);
     }
 
-    // ---- venue-side helpers ----
+    // ---- ask headroom, activity and lender credit ----
 
     /// @notice Ask-side headroom in units: backed burns not yet delivered.
     function headroom(bytes32 id) external view returns (uint256) {
@@ -666,7 +651,7 @@ contract AceLens {
         return s.cumulativeBackedBurns - s.netSyntheticOutflow;
     }
 
-    /// @notice Whether this market has any resting cash at all, every atom of which a fresh draw may take.
+    /// @notice Whether this market has any resting cash at all; a rest under `minPrincipal` reads active though no open or fill can take it.
     function isActive(bytes32 id) external view returns (bool) {
         return restingOf(id) != 0;
     }
@@ -680,47 +665,5 @@ contract AceLens {
         if (!ACE.notEntered()) revert TornRead();
         (,, uint256 owed) = lenderPools(lender, quote);
         return owed;
-    }
-
-    // ---- venue-dependency disclosure ----
-
-    /// @notice Aggregate exposure behind one record and ordered pair, over a caller-supplied id list.
-    /// @notice SOUND, NOT COMPLETE: every id counted provably names this record and pair.
-    /// @notice Nothing proves the list is all of them -- build it from the MarketCreated log.
-    /// @dev `rejected` is the receipt that the list was filtered, never a silent skip.
-    /// @dev Duplicates double-count: overstating exposure is the safe direction, and the caller owns the list.
-    /// @dev capPrice 0 with recordObserving true is a record that cannot price failing closed -- borrowing dark, not zero exposure.
-    /// @dev NOT the `recordLive` function: that reads the windowed min, this field reads lastObserved. Different questions.
-    /// @dev Caller-bounded loop: no protocol-owned market enumeration exists to walk.
-    function venueExposure(address record, address quote, address collateral, bytes32[] calldata ids) external view returns (VenueExposure memory v) {
-        for (uint256 i; i < ids.length; i++) {
-            MarketParams memory p = ACE.idToMarketParams(ids[i]);
-            if (p.quote != quote || p.collateral != collateral || p.record != record || p.quote == address(0)) {
-                v.rejected++;
-                continue;
-            }
-            if (v.verified == 0 || p.minCoverageWad < v.minK) v.minK = p.minCoverageWad;
-            v.maxK = Math.max(v.maxK, p.minCoverageWad);
-            v.verified++;
-        }
-        _probeRecord(v, record, quote, collateral);
-    }
-
-    /// @dev Every best-effort read of the record, in its own frame: inlined they run the stack out.
-    /// @dev ALL PROBED BY SIGNATURE OR TOTAL: a record owing none of these must render, never revert the view.
-    function _probeRecord(VenueExposure memory v, address record, address quote, address collateral) private view {
-        (bool ok, uint256 u) = Probe.askWord(record, abi.encodeCall(IPersistenceRecord.minPrice, (quote, collateral)));
-        if (ok) v.capPrice = u;
-        (ok, u) = Probe.askWord(record, abi.encodeCall(IPersistenceRecord.lastObserved, (quote, collateral)));
-        v.recordObserving = ok && u != 0;
-        (ok, u) = Probe.askWord(record, abi.encodeWithSignature("PERSISTENCE_WINDOW()"));
-        if (ok) v.distressWindow = u;
-        (ok, u) = Probe.askWord(record, abi.encodeWithSignature("SETTLE_WINDOW()"));
-        if (ok) v.settleWindow = u;
-        (ok, u) = Probe.askWord(record, abi.encodeWithSignature("DEPTH_WINDOW()"));
-        (v.depthSupported, u) = Probe.askWord(record, abi.encodeWithSignature("minDepthOverWindow(uint256)", ok ? u : 0));
-        if (v.depthSupported) v.minDepth = u;
-        (ok, u) = Probe.askWord(record, abi.encodeWithSignature("WRITER()"));
-        if (ok) v.writer = address(uint160(u));
     }
 }

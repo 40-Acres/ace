@@ -3,24 +3,8 @@ pragma solidity 0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
-import {CuratorVault, Listing} from "../../src/curator/CuratorVault.sol";
-import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {CuratorVaultExitsRig, ICuratorVaultExits} from "./CuratorVaultExitsRig.sol";
-
-/// @notice A product whose NAV override LOWERS the base's figure by a set cut, as an override is allowed to.
-contract CutNavVault is CuratorVault {
-    uint256 public cut;
-
-    constructor(VaultConfig memory cfg, Listing[] memory l) CuratorVault(cfg, 10e6, 1.4e18, 1 days, l, "Cut", "cCUT") {}
-
-    function setCut(uint256 amount) external {
-        cut = amount;
-    }
-
-    function totalAssets() public view override returns (uint256) {
-        return Math.saturatingSub(super.totalAssets(), cut);
-    }
-}
 
 /// @title CuratorVaultExitRequest
 /// @notice The exit request: escrowed shares whose worth holds exitable cash from placements and instant exits, claimed first come at the claim's own price.
@@ -31,32 +15,32 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
     uint256 internal constant DUST = 1e4; // asset-wei: rounding across a few prices and claims
 
     /// @dev The hold the requests take now: their escrow's worth at this NAV, capped by exitable.
-    function _expectedHold(CuratorVault v) internal view returns (uint256) {
-        return Math.min(_exitable(v), _worth(v, _x(v).requestedShares()));
+    function _expectedHold(AceVault v) internal view returns (uint256) {
+        return Math.min(_exitable(v), _worth(v, vlens.requestedShares(address(v))));
     }
 
     // ---- the request ----
 
     /// @notice A REQUEST ESCROWS THE SHARES ON THE VAULT, renews the lease, and holds exitable cash up to the request's worth.
     function test_Request_EscrowsTheSharesAndRaisesTheFence() public {
-        (CuratorVault v,) = _lent(15_000e6);
+        (AceVault v,) = _lent(15_000e6);
         uint256 sh = v.balanceOf(bob) / 2;
         uint256 worth = _worth(v, sh);
         vm.expectEmit(true, false, false, true, address(v));
         emit ExitRequested(bob, sh, uint64(_now()) + LEASE);
         _request(v, bob, sh);
-        (uint256 esc, uint64 exp) = _x(v).requestOf(bob);
+        (uint256 esc, uint64 exp) = vlens.requestOf(address(v), bob);
         assertEq(esc, sh, "the request did not record its shares");
         assertEq(exp, uint64(_now()) + LEASE, "the lease is not thirty days from the request");
         assertEq(_x(v).REQUEST_LEASE(), LEASE, "the lease constant moved");
-        assertEq(v.balanceOf(address(v)), sh, "the shares were not escrowed on the vault");
-        assertEq(_x(v).requestedShares(), sh, "the aggregate does not count the request");
+        assertEq(v.balanceOf(address(v)), sh + v.SEED_SHARES(), "the shares were not escrowed on the vault beside the seed");
+        assertEq(vlens.requestedShares(address(v)), sh, "the aggregate does not count the request");
         assertEq(_heldReq(v), Math.min(_exitable(v), worth), "the requests' hold is not the request's worth at this NAV, capped by exitable");
     }
 
     /// @notice A REQUEST HOLDS THE CASH ALREADY IN THE VAULT AT ONCE: lendable and every other holder's instant bound fall by the hold.
     function test_Request_HoldsTheCashAlreadyInTheVaultAtOnce() public {
-        (CuratorVault v,) = _lent(15_000e6);
+        (AceVault v,) = _lent(15_000e6);
         uint256 lend0 = v.lendable();
         uint256 aliceMax0 = v.maxWithdraw(alice);
         assertEq(aliceMax0, lend0, "PREMISE: alice is worth more than the instant bound");
@@ -71,7 +55,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
     /// @notice A REPAYMENT IS HELD FOR THE REQUEST UP TO ITS WORTH, and what lands past the worth stays lendable.
     /// @dev Bob's whole request is worth more than exitable, so the hold takes all of it until repayments pass the worth.
     function test_Fence_ARepaymentIsHeldUpToTheRequestsWorth() public {
-        (CuratorVault v, uint256 loanId) = _lent(15_000e6);
+        (AceVault v, uint256 loanId) = _lent(15_000e6);
         _request(v, bob, v.balanceOf(bob));
         assertEq(v.lendable(), 0, "PREMISE: the request is worth more than exitable, so it holds all of it");
         _repay(loanId, 1_000e6);
@@ -88,7 +72,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
 
     /// @notice CASH HELD FOR A REQUEST IS NOT LENT AGAIN: a borrow past lendable is refused while the hold stands.
     function test_Fence_ADrawPastTheFreePotIsRefused() public {
-        (CuratorVault v, uint256 loanId) = _lent(15_000e6);
+        (AceVault v, uint256 loanId) = _lent(15_000e6);
         _request(v, bob, v.balanceOf(bob));
         _repay(loanId, 2_000e6);
         v.crank();
@@ -101,7 +85,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
 
     /// @notice FIRST COME: the first claimer takes all of exitable, and the next requester waits for the next inflow, which it may claim first.
     function test_FirstCome_TheFirstClaimerTakesThePotAndTheNextWaits() public {
-        (CuratorVault v, uint256 loanId) = _lent(19_000e6);
+        (AceVault v, uint256 loanId) = _lent(19_000e6);
         _request(v, alice, v.balanceOf(alice));
         _request(v, bob, v.balanceOf(bob));
         _repay(loanId, 3_000e6);
@@ -125,7 +109,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
 
     /// @notice A CLAIM PAYS AT ITS OWN NAV: a fall between the request and the claim passes through.
     function test_Claim_PricesAtTheClaimsOwnNavAfterAFall() public {
-        (CuratorVault v, uint256 loanId) = _lent(6_000e6);
+        (AceVault v, uint256 loanId) = _lent(6_000e6);
         uint256 sh = v.balanceOf(bob);
         _request(v, bob, sh);
         uint256 before = _worth(v, sh);
@@ -138,7 +122,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
 
     /// @notice A GAIN AFTER THE REQUEST VESTS AS IT DOES FOR A FREE SHARE: a claim inside the vest pays the net price.
     function test_Claim_AGainAfterTheRequestVestsAsForAFreeShare() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, alice, SEED);
         _lpDeposit(v, bob, SEED);
         uint256 sh = v.balanceOf(bob);
@@ -151,12 +135,13 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
         assertApproxEqAbs(_claim(v, bob, sh), p0, 1, "a claim inside the vest took the vesting gain");
         vm.revertToState(snap);
         _warpBy(VEST_W);
-        assertApproxEqAbs(_claim(v, bob, sh), p0 + 1_000e6, 2, "a claim after the vest missed its half of the gain");
+        uint256 share = Math.mulDiv(2_000e6, sh, v.totalSupply() + 1e6); // its half, less the seed's sliver of the gain
+        assertApproxEqAbs(_claim(v, bob, sh), p0 + share, 2, "a claim after the vest missed its pro-rata share of the gain");
     }
 
     /// @notice A CLAIM TAKES EXITABLE CASH, and the hold recomputes to what the rest of the request is worth.
     function test_Claim_PaysHeldCashFirstThenFreeCash() public {
-        (CuratorVault v, uint256 loanId) = _lent(15_000e6);
+        (AceVault v, uint256 loanId) = _lent(15_000e6);
         uint256 sh = v.balanceOf(bob);
         _request(v, bob, sh);
         _repay(loanId, 1_000e6);
@@ -171,7 +156,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
 
     /// @notice A DEPOSIT AFTER A REQUEST WORTH MORE THAN IDLE IS HELD FOR IT, and a claim reaches it at once.
     function test_Claim_ReachesADepositLandedAfterTheRequest() public {
-        (CuratorVault v,) = _lent(19_000e6);
+        (AceVault v,) = _lent(19_000e6);
         _request(v, bob, v.balanceOf(bob));
         uint256 exit0 = _exitable(v);
         _lpDeposit(v, carol, 5_000e6);
@@ -184,7 +169,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
 
     /// @notice `minAssets` BINDS: a claim paying a wei less than it is refused `ClaimUnderMin`, and at it the claim pays.
     function test_Claim_UnderMinAssetsRefuses() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, alice, SEED);
         _lpDeposit(v, bob, SEED);
         uint256 sh = v.balanceOf(bob) / 3;
@@ -199,7 +184,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
 
     /// @notice A CLAIM WORTH NOTHING IS REFUSED `ZeroAssets`, and burns nothing.
     function test_Claim_AClaimWorthNothingRefuses() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, alice, SEED);
         _lpDeposit(v, bob, SEED);
         _request(v, bob, 1e12);
@@ -211,7 +196,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
 
     /// @notice A CLAIM IS THE HOLDER'S OWN: a stranger has no request to claim, and the holder may name any receiver.
     function test_Claim_IsTheHoldersOwnAndPaysTheNamedReceiver() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, alice, SEED);
         _lpDeposit(v, bob, SEED);
         uint256 sh = v.balanceOf(bob) / 2;
@@ -225,12 +210,12 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
         vm.prank(bob);
         _x(v).claimExit(sh, carol, 0);
         assertEq(usdc.balanceOf(carol), w, "the claim did not pay the receiver its holder named");
-        assertEq(v.balanceOf(address(v)), 0, "the claim did not burn its escrow");
+        assertEq(v.balanceOf(address(v)), v.SEED_SHARES(), "the claim did not burn its escrow: only the seed is left at the vault");
     }
 
     /// @notice A CLAIM PAST THE REQUEST IS REFUSED `OverRequest`.
     function test_Claim_PastTheRequestRefuses() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, bob, SEED);
         _lpDeposit(v, alice, SEED);
         _request(v, bob, 1_000e12);
@@ -243,7 +228,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
 
     /// @notice AN INSTANT EXIT NEVER REACHES HELD CASH: its max views stop at exitable less the hold, and a wei past refuses.
     function test_InstantExit_NeverReachesHeldCash() public {
-        (CuratorVault v, uint256 loanId) = _lent(15_000e6);
+        (AceVault v, uint256 loanId) = _lent(15_000e6);
         _request(v, bob, v.balanceOf(bob) / 4);
         _repay(loanId, 2_000e6);
         v.crank(); // the repayment reaches idle at the crank
@@ -261,7 +246,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
 
     /// @notice A CANCEL RETURNS THE SHARES AT ONCE, and the hold falls to what the request still wants.
     function test_Cancel_ReturnsTheSharesAndFreesTheHold() public {
-        (CuratorVault v, uint256 loanId) = _lent(15_000e6);
+        (AceVault v, uint256 loanId) = _lent(15_000e6);
         uint256 sh = v.balanceOf(bob) / 2;
         uint256 keep = 1_000e12;
         _request(v, bob, sh);
@@ -280,7 +265,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
 
     /// @notice A CANCEL PAST THE REQUEST IS REFUSED, and so is one with no request at all.
     function test_Cancel_PastTheRequestRefuses() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, bob, SEED);
         _request(v, bob, 1_000e12);
         vm.prank(bob);
@@ -293,7 +278,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
 
     /// @notice A LAPSE INSIDE THE LEASE IS REFUSED `RequestLive`, at its last second too.
     function test_Lapse_RefusesInsideTheLease() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, bob, SEED);
         _request(v, bob, 1_000e12);
         _warpBy(LEASE - 1);
@@ -304,7 +289,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
 
     /// @notice ANYONE LAPSES A REQUEST ONCE ITS LEASE HAS RUN: the whole escrow goes home and the fence goes with it.
     function test_Lapse_AnyoneLapsesAtTheLeasesEnd() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, bob, SEED);
         _lpDeposit(v, alice, SEED);
         uint256 all = v.balanceOf(bob);
@@ -317,13 +302,13 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
         _x(v).lapseExit(bob);
         assertEq(v.balanceOf(bob), all, "the lapse did not send the shares home");
         assertEq(_escrow(v, bob), 0, "the lapse left a request standing");
-        assertEq(_x(v).requestedShares(), 0, "the aggregate still counts the lapsed request");
+        assertEq(vlens.requestedShares(address(v)), 0, "the aggregate still counts the lapsed request");
         assertEq(_heldReq(v), 0, "the lapsed request still holds cash");
     }
 
     /// @notice A LAPSE OF AN EMPTY RECORD IS REFUSED `NoRequest`: one never made, and one already cancelled whole.
     function test_Lapse_AnEmptyRecordRefuses() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, bob, SEED);
         vm.expectRevert(ICuratorVaultExits.NoRequest.selector);
         _x(v).lapseExit(carol);
@@ -337,12 +322,12 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
 
     /// @notice A REQUEST OF ZERO ONLY RENEWS THE LEASE: the escrow stands and the lapse moves a full lease out.
     function test_Renew_AZeroRequestOnlyRenewsTheLease() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, bob, SEED);
         _request(v, bob, 1_000e12);
         _warpBy(LEASE - 1);
         _request(v, bob, 0);
-        (uint256 esc, uint64 exp) = _x(v).requestOf(bob);
+        (uint256 esc, uint64 exp) = vlens.requestOf(address(v), bob);
         assertEq(esc, 1_000e12, "a renewal moved the escrow");
         assertEq(exp, uint64(_now()) + LEASE, "a renewal did not move the lapse a full lease out");
         _warpBy(LEASE - 1);
@@ -352,7 +337,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
 
     /// @notice A TOP-UP RENEWS THE WHOLE REQUEST, not just its own part.
     function test_Renew_ATopUpRenewsTheWholeRequest() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, bob, SEED);
         _request(v, bob, 1_000e12);
         _warpBy(20 days);
@@ -363,7 +348,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
         _x(v).lapseExit(bob);
         _warpBy(1);
         _x(v).lapseExit(bob);
-        assertEq(v.balanceOf(bob), v.totalSupply(), "the lapse did not return the whole topped-up request");
+        assertEq(v.balanceOf(bob), v.totalSupply() - v.SEED_SHARES(), "the lapse did not return the whole topped-up request");
     }
 
     // ---- the release at the claim ----
@@ -371,7 +356,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
     /// @notice A SANDWICH CANNOT RELEASE THE PILE: an entrant's request and claim beside others' standing requests pays the net price.
     /// @notice Every share is escrow, but the claim is not the last requester's whole claim, so the pile stays to vest for those who held.
     function test_Release_AnEntrantBesideStandingRequestsClaimsAtNet() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, alice, SEED);
         _lpDeposit(v, bob, SEED);
         _request(v, alice, v.balanceOf(alice));
@@ -392,7 +377,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
 
     /// @notice ONLY THE LAST REQUESTER RELEASES THE PILE: a claim beside another request is paid net, and its share stays for whoever is last.
     function test_Release_OnlyTheLastRequesterReleasesThePile() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, alice, SEED);
         _lpDeposit(v, bob, SEED);
         _gift(v, 2_000e6);
@@ -404,13 +389,14 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
         uint256 netA = _worth(v, a0);
         assertApproxEqAbs(_claim(v, alice, a0), netA, 2, "a claim beside another standing request released the pile");
         assertEq(_x(v).maxClaim(bob), b0, "maxClaim did not offer the last requester's whole request");
-        assertApproxEqAbs(_claim(v, bob, b0), 2 * SEED + 2_000e6 - netA, 3, "the last requester's claim did not take the released pile");
-        assertEq(v.totalSupply(), 0, "the last claim left supply standing");
+        uint256 whole = Math.mulDiv(b0, v.grossNav() + 1, v.totalSupply() + 1e6); // every unit of gross, the pile released, but the seed's pro-rata part
+        assertApproxEqAbs(_claim(v, bob, b0), whole, 3, "the last requester's claim did not take the released pile");
+        assertEq(v.totalSupply(), v.SEED_SHARES(), "the last claim left live supply standing");
     }
 
     /// @notice THE LAST REQUESTER'S `maxClaim` REPLAYS THE RELEASE where exitable binds, so its answer is priced as the claim pays it.
     function test_MaxClaim_TheLastRequestersAnswerReplaysTheReleaseSoItPays() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, alice, SEED);
         _crank(v, _open(6_000e6), T2, 0);
         _warpBy(VEST_W);
@@ -426,27 +412,9 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
         assertApproxEqAbs(_claim(v, alice, m), pot, 2, "the last requester's claim of maxClaim did not take all of exitable");
     }
 
-    /// @notice `maxClaim`'S RELEASE REPLAY READS THE VIRTUAL NAV, as the claim does after its release: a lowered NAV is offered whole.
-    function test_MaxClaim_TheReleaseReplayReadsAnOverriddenNav() public {
-        CutNavVault v = new CutNavVault(_cfg(0), _listing());
-        mid = _doorMarket(v, address(collateral));
-        _lpDeposit(v, alice, SEED);
-        _crank(v, _open(1_000e6), T2, 0);
-        _gift(v, 500e6);
-        v.crank();
-        assertGt(v.unvested(), 0, "PREMISE: a gain is vesting");
-        uint256 pot = usdc.balanceOf(address(v));
-        v.setCut(v.grossNav() - pot + 1e6); // the override's NAV after the release sits a unit under the vault's cash
-        uint256 all = v.balanceOf(alice);
-        _request(v, alice, all);
-        assertEq(_x(v).maxClaim(alice), all, "maxClaim did not price the release at the overridden NAV the claim pays");
-        assertLe(_claim(v, alice, all), pot, "the whole claim paid past the vault's cash");
-        assertEq(v.totalSupply(), 0, "the whole claim left supply standing");
-    }
-
     /// @notice THE LAST FREE HOLDER IS REFUSED AN INSTANT EXIT WHILE A GAIN VESTS, requests, and the claim releases the pile to them.
     function test_Release_TheLastHolderRequestsAndTheClaimTakesThePile() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, alice, SEED);
         _gift(v, 500e6);
         v.crank();
@@ -457,13 +425,15 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
         v.redeem(all, alice, alice);
         _request(v, alice, all);
         assertEq(_x(v).maxClaim(alice), all, "maxClaim did not offer the whole request");
-        assertApproxEqAbs(_claim(v, alice, all), SEED + 500e6, 2, "the claim did not release the pile to the last holder out");
-        assertEq(v.totalSupply(), 0, "the last claim left supply standing");
+        uint256 whole = Math.mulDiv(all, v.grossNav() + 1, v.totalSupply() + 1e6); // every unit of gross, the pile released, but the seed's pro-rata part
+        assertApproxEqAbs(_claim(v, alice, all), whole, 2, "the claim did not release the pile to the last holder out");
+        assertGt(whole + 1e4, SEED + 500e6, "PREMISE: the seed's part is under its own 1e4 atoms and its sliver of the gain");
+        assertEq(v.totalSupply(), v.SEED_SHARES(), "the last claim left live supply standing");
     }
 
     /// @notice BESIDE ANOTHER REQUEST `maxClaim` PRICES AT NET, as the claim does, so its answer takes all of exitable.
     function test_MaxClaim_BesideAnotherRequestItsAnswerTakesTheWholePot() public {
-        (CuratorVault v,) = _lent(15_000e6);
+        (AceVault v,) = _lent(15_000e6);
         _request(v, bob, v.balanceOf(bob));
         _gift(v, 1_000e6);
         v.crank();
@@ -481,7 +451,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
 
     /// @notice A TROUGH BURNS NOTHING: with requests standing through a settle, no share leaves until its holder claims.
     function test_Measure_ATroughBurnsNothing() public {
-        (CuratorVault v, uint256 loanId) = _lent(6_000e6);
+        (AceVault v, uint256 loanId) = _lent(6_000e6);
         _request(v, alice, v.balanceOf(alice));
         _request(v, bob, v.balanceOf(bob));
         uint256 supply = v.totalSupply();
@@ -490,7 +460,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
         _warpBy(LEASE - 1);
         v.crank();
         assertEq(v.totalSupply(), supply, "a trough burned shares nobody claimed");
-        assertEq(_escrow(v, alice) + _escrow(v, bob), supply, "or moved a request");
+        assertEq(_escrow(v, alice) + _escrow(v, bob), supply - v.SEED_SHARES(), "or moved a request");
         assertGt(_x(v).maxClaim(alice), 0, "PREMISE: there was cash a forced fill could have taken");
     }
 
@@ -498,7 +468,7 @@ contract CuratorVaultExitRequestTest is CuratorVaultExitsRig {
     /// @notice The first claimer is paid in full at the pre-loss price; the other requester and the stayers carry the loss it escaped.
     /// @notice The escape is `f * L`, the first holder's share of the loss; a request locks no price, so the other two carry it pro rata.
     function test_Measure_TheWorkedExampleFirstComeAmongTwoRequesters() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, alice, 2_000e6);
         _lpDeposit(v, bob, 2_000e6);
         _lpDeposit(v, carol, 6_000e6);

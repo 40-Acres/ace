@@ -53,7 +53,7 @@ contract AcePriceRailTest is WarpClock {
     function _params() internal view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(usdc), address(coll));
         p.record = address(0); // convenience for the rail rows, and it puts the settling row on the forfeit arm
-        p.baseBps = 1;
+        p.lenderAprBps = 1;
         p.settleBountyBps = 0;
     }
 

@@ -7,8 +7,8 @@ import {TickBitmap} from "@uniswap/v4-core/src/libraries/TickBitmap.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {OpenBounds} from "../../src/ace/hub/Types.sol";
 import {Bid, Checkpoint} from "../../src/interfaces/ILaunchAuction.sol";
-import {LaunchVault} from "../../src/curator/LaunchVault.sol";
-import {SetValue} from "../../src/curator/sets/SetValue.sol";
+import {LaunchVault} from "../../src/entities/launch/LaunchVault.sol";
+import {PriceGrid} from "../../src/curator/PriceGrid.sol";
 import {LaunchOpsBudget} from "../../src/entities/launch/LaunchOpsBudget.sol";
 import {LockAccount} from "../../src/entities/launch/LockAccount.sol";
 import {LaunchVaultBase} from "./LaunchVault.t.sol";
@@ -347,7 +347,7 @@ abstract contract LaunchVaultHighPriceCases is LaunchVaultHardeningBase {
     }
 
     function _hTick() internal pure returns (int24) {
-        return TickMath.getTickAtSqrtPrice(SetValue.sqrtPriceX96(HIGH, false));
+        return TickMath.getTickAtSqrtPrice(PriceGrid.sqrtPriceX96(HIGH, false));
     }
 
     /// @notice The room is the hub's line inverted exactly: the account can draw it pledging its credit, and one atom more would need a unit it lacks.

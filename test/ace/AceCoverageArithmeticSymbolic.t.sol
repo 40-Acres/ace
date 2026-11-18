@@ -10,7 +10,7 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 /// @notice The gate-vs-execution question as PURE arithmetic: can settlement need more than the gate left?
 /// @notice `check_` bodies are halmos entry points; the `testFuzz_` twins run the same properties under forge.
 /// @dev The gate side calls the SHIPPED `Borrower.requiredAt`, so only the settlement sum is re-spelled here.
-/// @dev That one line is `LoanAccounting.collateralNeeded`'s body, which is storage-bound and cannot be called pure.
+/// @dev That sum is the per-tick need `LoanAccounting.collateralNeeded` took before a loan held one claim; it takes one ceiling now.
 /// @dev Its fidelity is anchored by the hub-level repro, not by this file: see the issue's named test.
 /// @dev UNROLLED, never looped: halmos bounds loops explicitly, so a loop would not be solvable at all.
 /// @dev ONE `check_` BODY RETURNS A VERDICT: the FullMath-free control passes. The rest time out.
@@ -32,8 +32,8 @@ contract AceCoverageArithmeticSymbolicTest is Test {
 
     /* ============ P1: the bound settlement's need can never exceed ============ */
 
-    /// @notice Settlement's need is under the gate plus the number of funded ticks. THE bound, three ticks.
-    /// @notice Each per-tick ceiling adds under one collateral wei, so `n` ticks add under `n`.
+    /// @notice A three-claim need is under the gate plus three: each ceiling adds under one collateral wei.
+    /// @notice Settlement takes ONE such ceiling now, so this bounds a shape the hub no longer builds.
     /// @dev This is the property that SURVIVES whichever way the confirmed bug is fixed, so it is the one
     /// @dev worth pinning: a fix that lowers the divergence keeps it, a regression that widens it breaks it.
     function _assertBound(uint256 k, uint256 s, uint256 floor, uint256 d0, uint256 d1, uint256 d2, uint256 x1, uint256 x2) internal pure {

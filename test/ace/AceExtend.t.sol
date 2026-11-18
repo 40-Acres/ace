@@ -4,7 +4,7 @@ pragma solidity 0.8.36;
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Borrower, GateRefused, LoanMatured, NoRecordPrice} from "../../src/ace/hub/Borrower.sol";
-import {NotBorrower, PolicyRefused, RecordUnreadable, TriggerAboveFloor} from "../../src/ace/hub/Borrower.sol";
+import {ExtensionTooEarly, PolicyRefused, RecordUnreadable, TriggerAboveFloor} from "../../src/ace/hub/Borrower.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {Loan, MarketParams} from "../../src/ace/hub/Types.sol";
 import {Extension, IRollPolicy} from "../../src/interfaces/IRollPolicy.sol";
@@ -26,7 +26,7 @@ import {
 
 /// @title AceExtendTest
 /// @notice `extend` re-anchors a live loan IN PLACE at its own tenor from now: same id, same title, the fee on the time added, paid in cash.
-/// @notice The borrower extends; the market lender holding the borrower's grant extends in cash it pays itself.
+/// @notice Anyone may extend, in cash it pays itself; a caller who is not the holder or its title operator only in the term's last quarter.
 /// @notice Every extension needs coverage as a new loan at `min(price, record)` and the lender's roll policy returning its selector.
 /// @notice Resting cash never funds one, so no drain reaches it; each lender yes commits at most the loan's own tenor ahead.
 /// @dev Reasoning: the design record,,.
@@ -135,7 +135,7 @@ contract AceExtendTest is ExtendRig {
         assertTrue(ace.isLiveLoan(loanId), "and the loan stays live, for settlement");
     }
 
-    /* ============================== callers (review E-3) ============================== */
+    /* ============================== callers (anyone may extend) ============================== */
 
     function _assertRefusedAs(address who, uint256 loanId, bytes4 err) internal {
         _fund(who, _fee(read.debtOf(loanId), TEN7));
@@ -144,31 +144,40 @@ contract AceExtendTest is ExtendRig {
         ace.extend(loanId, 0, "");
     }
 
-    /// @notice A stranger extends nothing.
-    function test_AStrangerIsRefusedNotBorrower() public {
-        uint256 loanId = _open(P, TEN7, 5000);
-        _assertRefusedAs(stranger, loanId, NotBorrower.selector);
+    /// @dev A day in, `who` is refused `ExtensionTooEarly`; a quarter of the tenor from expiry it extends, paying the fee.
+    function _assertTheLastQuarterOnly(address who, uint256 loanId) internal {
+        _warpBy(1 days);
+        _assertRefusedAs(who, loanId, ExtensionTooEarly.selector);
+        _warpTo(uint256(read.loan(loanId).expiry) - TEN7 / 4);
+        _extend(who, loanId);
+        assertEq(read.loan(loanId).expiry, _now() + TEN7, "in the last quarter the non-holder extends, paying the fee");
     }
 
-    /// @notice Nor does a keeper: without the borrower only the granted market lender extends, in cash.
-    function test_AKeeperIsRefusedNotBorrower() public {
+    /// @notice A stranger extends only in the term's last quarter, at or above the price and out of the band.
+    function test_AStrangerExtendsOnlyInTheLastQuarter() public {
         uint256 loanId = _open(P, TEN7, 5000);
-        _assertRefusedAs(keeper, loanId, NotBorrower.selector);
+        _assertTheLastQuarterOnly(stranger, loanId);
     }
 
-    /// @notice The market lender without the borrower's grant is a stranger here: paying is not consent.
-    function test_ALenderWithoutAGrantIsRefusedNotBorrower() public {
+    /// @notice So does a keeper: anyone may extend, under the non-holder rule.
+    function test_AKeeperExtendsOnlyInTheLastQuarter() public {
         uint256 loanId = _open(P, TEN7, 5000);
-        _assertRefusedAs(alice, loanId, NotBorrower.selector);
+        _assertTheLastQuarterOnly(keeper, loanId);
     }
 
-    /// @notice An operator holding the borrower's grant who is NOT the market lender keeps today's boundary: it opens, never extends.
-    function test_AnOperatorWhoIsNotTheLenderIsRefusedNotBorrower() public {
+    /// @notice The market lender without the borrower's grant is a non-holder, held to the same rule.
+    function test_ALenderWithoutAGrantExtendsOnlyInTheLastQuarter() public {
+        uint256 loanId = _open(P, TEN7, 5000);
+        _assertTheLastQuarterOnly(alice, loanId);
+    }
+
+    /// @notice An operator holding the borrower's credit grant is a non-holder too: a credit grant is no title.
+    function test_AGrantedOperatorExtendsOnlyInTheLastQuarter() public {
         uint256 loanId = _open(P, TEN7, 5000);
         address router = address(0x2077E2);
         vm.prank(borrower);
         ace.setCreditOperator(router, true);
-        _assertRefusedAs(router, loanId, NotBorrower.selector);
+        _assertTheLastQuarterOnly(router, loanId);
     }
 
     /// @notice The borrower extends, paying the fee in cash.
@@ -179,12 +188,10 @@ contract AceExtendTest is ExtendRig {
         assertEq(read.loan(loanId).expiry, _now() + TEN7, "in cash");
     }
 
-    /// @notice E-3: the market lender holding the borrower's credit-operator grant extends in CASH it pays itself; the borrower's debt never moves.
-    function test_TheLenderHoldingTheGrantExtendsInCashPaidByItself() public {
+    /// @notice E-3: the market lender, in the term's last quarter, extends in CASH it pays itself; the borrower's debt never moves.
+    function test_TheLenderExtendsInTheLastQuarterInCashPaidByItself() public {
         uint256 loanId = _open(P, TEN7, 5000);
-        vm.prank(borrower);
-        ace.setCreditOperator(alice, true);
-        _warpBy(1 days);
+        _warpTo(uint256(read.loan(loanId).expiry) - TEN7 / 4);
         uint256 debt = read.debtOf(loanId);
         uint256 fee = _feeNow(loanId);
         _fund(alice, fee);
@@ -198,7 +205,7 @@ contract AceExtendTest is ExtendRig {
         assertEq(read.debtOf(loanId), debt, "and owes nothing more");
     }
 
-    /// @notice A title buyer inherits no operator: the grant is keyed by the borrower who signed it, not by the title.
+    /// @notice A title buyer inherits no operator: the seller's grantee is a non-holder of the bought loan, refused a day in.
     function test_ATitleBuyerInheritsNoOperator() public {
         uint256 loanId = _open(P, TEN7, 5000);
         address buyer = address(0xB0E2);
@@ -206,7 +213,8 @@ contract AceExtendTest is ExtendRig {
         ace.setCreditOperator(alice, true);
         _moveTitle(loanId, borrower, buyer);
         assertEq(ace.borrowerOf(loanId), buyer, "PREMISE: the buyer holds the loan");
-        _assertRefusedAs(alice, loanId, NotBorrower.selector);
+        _warpBy(1 days);
+        _assertRefusedAs(alice, loanId, ExtensionTooEarly.selector);
     }
 
     /* ============================== policy answers (reviews E-5, D-11) ============================== */
@@ -354,9 +362,7 @@ contract AceExtendTest is ExtendRig {
         MatchingPolicy m = new MatchingPolicy();
         _setPolicy(alice, address(m));
         uint256 loanId = _open(P, TEN7, 5000);
-        vm.prank(borrower);
-        ace.setCreditOperator(alice, true);
-        _warpBy(1 days);
+        _warpTo(uint256(read.loan(loanId).expiry) - TEN7 / 4);
         Extension memory e = _extensionOf(loanId, alice);
         assertEq(e.newDebt, e.debt, "PREMISE: an extension leaves the debt");
         m.expect(e, "");

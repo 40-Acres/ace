@@ -3,8 +3,9 @@ pragma solidity 0.8.36;
 
 import {Test} from "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {CuratorVaultInstantHandler} from "./CuratorVaultInstantHandler.sol";
+import {IAceVaultLens, VaultLens} from "../utils/VaultLens.sol";
 
 /// @title CuratorVaultInstantInvariants
 /// @notice THE STATEFUL CAMPAIGN OVER THE PRODUCTION VAULT'S INSTANT EXIT, beside its exit request and its drain.
@@ -18,11 +19,13 @@ import {CuratorVaultInstantHandler} from "./CuratorVaultInstantHandler.sol";
 /// @dev `afterInvariant` guards that a run which tried a claim or the drain landed one.
 contract CuratorVaultInstantInvariantsTest is StdInvariant, Test {
     CuratorVaultInstantHandler internal handler;
-    CuratorVault internal vault;
+    AceVault internal vault;
+    IAceVaultLens internal vlens; // the vault's stored figures: requests and holds
 
     function setUp() public {
         handler = new CuratorVaultInstantHandler();
         vault = handler.vault();
+        vlens = VaultLens.deploy();
         /// @dev DUPLICATES ARE WEIGHTS: the exits are the subject.
         bytes4[] memory sel = new bytes4[](25);
         sel[0] = CuratorVaultInstantHandler.deposit.selector;
@@ -126,14 +129,14 @@ contract CuratorVaultInstantInvariantsTest is StdInvariant, Test {
     /// @notice Entry is shut while the drain stands, and the vault's own balance never reads as exitable.
     function invariant_J8_TheMaxViewsStayInsideTheHoldingAndThePot() public view {
         bool draining = vault.draining();
-        (uint256 exitable, uint256 held) = vault.holds();
+        (uint256 exitable, uint256 held) = vlens.holds(address(vault));
         uint256 cash = draining ? exitable : exitable - held;
         for (uint256 i; i < 5; i++) {
             address who = i < 4 ? handler.actors(i) : vault.CURATOR();
             (uint256 r, uint256 w) = (vault.maxRedeem(who), vault.maxWithdraw(who));
             assertLe(r, vault.balanceOf(who), "maxRedeem offered past the holding");
             assertLe(w, cash, "maxWithdraw offered past the cash an exit may take");
-            (uint256 req,) = vault.requestOf(who);
+            (uint256 req,) = vlens.requestOf(address(vault), who);
             assertLe(vault.maxClaim(who), req, "maxClaim offered past the request");
         }
         if (draining) assertEq(vault.maxDeposit(handler.actors(0)), 0, "entry stood open under the drain");

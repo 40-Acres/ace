@@ -16,7 +16,7 @@ contract AceAllInFeeRoundingTest is Test {
 
     /// @dev Every product this file forms stays under 2^256 at or below it, so no fuzz needs FullMath.
     uint256 internal constant MAX_FEE = type(uint256).max / 100_000;
-    uint256 internal constant FLAT_CEIL = 2272; // the top rate ANY market can carry: b * 11000 <= 2500 * 10000 when maxTenor equals minTenor
+    uint256 internal constant FLAT_CEIL = 2272; // the share rail's top rate at a 365-day term: b * 365 days * 11000 <= 2500 * 1e4 * 365 days
 
     /* ============================== the split closes, at every fee ============================== */
 
@@ -128,12 +128,12 @@ contract AceAllInFeeRoundingTest is Test {
     /// @notice The all-in rounds UP and by strictly less than a wei: the ceil is against the borrower.
     /// @dev Pinned against the ratio itself, not against a second spelling of the same formula.
     function testFuzz_TheAllInRoundsUpAndNeverDown(uint64 minTenorSeed, uint256 baseBpsSeed, uint64 tenorSeed, uint256 principalSeed) public pure {
-        (uint64 minTenor, uint256 baseBps, uint64 tenor) = _admissibleShape(minTenorSeed, baseBpsSeed, tenorSeed);
+        (, uint256 lenderAprBps, uint64 tenor) = _admissibleShape(minTenorSeed, baseBpsSeed, tenorSeed);
         uint256 principal = bound(principalSeed, 1, 1e15);
 
-        uint256 fee = LoanMath.originationFee(principal, tenor, baseBps, minTenor);
-        uint256 num = principal * baseBps * uint256(tenor) * (10000 + PS);
-        uint256 den = 10000 * 10000 * uint256(minTenor);
+        uint256 fee = LoanMath.originationFee(principal, tenor, lenderAprBps);
+        uint256 num = principal * lenderAprBps * uint256(tenor) * (10000 + PS);
+        uint256 den = 10000 * 10000 * uint256(365 days);
 
         assertGe(fee * den, num, "the all-in rounded DOWN: the borrower kept a wei of the lenders' premium");
         if (fee != 0) assertLt((fee - 1) * den, num, "and it overshot: a smaller integer already cleared the ratio");
@@ -145,13 +145,13 @@ contract AceAllInFeeRoundingTest is Test {
         public
         pure
     {
-        (uint64 minTenor, uint256 baseBps, uint64 tenor) = _admissibleShape(minTenorSeed, baseBpsSeed, tenorSeed);
+        (, uint256 lenderAprBps, uint64 tenor) = _admissibleShape(minTenorSeed, baseBpsSeed, tenorSeed);
         uint256 principal = bound(pSeed, 1, 1e15);
         uint256 lifted = principal + bound(liftSeed, 0, 1e15);
 
         assertGe(
-            LoanMath.originationFee(lifted, tenor, baseBps, minTenor),
-            LoanMath.originationFee(principal, tenor, baseBps, minTenor),
+            LoanMath.originationFee(lifted, tenor, lenderAprBps),
+            LoanMath.originationFee(principal, tenor, lenderAprBps),
             "a larger draw priced cheaper: the floor branch could then under-fund the debt"
         );
     }
@@ -161,17 +161,17 @@ contract AceAllInFeeRoundingTest is Test {
     /// @dev `MarketInit` states this as its justification; nothing else in the suite makes it fail if it stops holding.
     function testFuzz_TheRailAtMaxTenorBoundsEveryRungUnderIt(uint64 minTenorSeed, uint256 baseBpsSeed, uint64 longSeed, uint64 shortSeed) public pure {
         uint64 minTenor = uint64(bound(minTenorSeed, 1, 365 days));
-        uint256 baseBps = bound(baseBpsSeed, Constants.MIN_BASE_BPS, FLAT_CEIL);
+        uint256 lenderAprBps = bound(baseBpsSeed, Constants.MIN_LENDER_APR_BPS, FLAT_CEIL);
         uint64 long_ = uint64(bound(longSeed, minTenor, 40 * uint256(minTenor)));
         uint64 short_ = uint64(bound(shortSeed, minTenor, long_));
 
         assertGe(
-            LoanMath.originationFee(1e15, long_, baseBps, minTenor),
-            LoanMath.originationFee(1e15, short_, baseBps, minTenor),
+            LoanMath.originationFee(1e15, long_, lenderAprBps),
+            LoanMath.originationFee(1e15, short_, lenderAprBps),
             "the fee is not monotone in tenor: bounding at maxTenor would not bound the rungs under it"
         );
-        if (LoanMath.feeFundable(baseBps, long_, minTenor)) {
-            assertTrue(LoanMath.feeFundable(baseBps, short_, minTenor), "a rung under an admitted maxTenor was itself unfundable");
+        if (LoanMath.feeFundable(lenderAprBps, long_)) {
+            assertTrue(LoanMath.feeFundable(lenderAprBps, short_), "a rung under an admitted maxTenor was itself unfundable");
         }
     }
 
@@ -181,11 +181,11 @@ contract AceAllInFeeRoundingTest is Test {
     function _admissibleShape(uint64 minTenorSeed, uint256 baseBpsSeed, uint64 tenorSeed)
         private
         pure
-        returns (uint64 minTenor, uint256 baseBps, uint64 tenor)
+        returns (uint64 minTenor, uint256 lenderAprBps, uint64 tenor)
     {
         minTenor = uint64(bound(minTenorSeed, 1 hours, 365 days));
-        baseBps = bound(baseBpsSeed, Constants.MIN_BASE_BPS, FLAT_CEIL);
-        uint256 ceiling = (10000 * 10000 * uint256(minTenor) - 1) / (baseBps * (10000 + PS));
+        lenderAprBps = bound(baseBpsSeed, Constants.MIN_LENDER_APR_BPS, FLAT_CEIL);
+        uint256 ceiling = (10000 * 10000 * uint256(minTenor) - 1) / (lenderAprBps * (10000 + PS));
         tenor = uint64(bound(tenorSeed, minTenor, ceiling < minTenor ? uint256(minTenor) : ceiling));
     }
 }

@@ -19,14 +19,13 @@ import {AceReader} from "../utils/AceReader.sol";
 import {PriceFrame} from "../utils/PriceFrame.sol";
 
 /// @title AceCoverageGuarantee
-/// @notice THE PROPERTY: a loan admitted by `open` covers every claim it created at those claims' own tick prices.
+/// @notice THE PROPERTY: a loan admitted by `open` covers the one claim it created, at the market's price.
 /// @notice So a loan settled with no prior EROSION cannot be short, and shortfall needs post-open unit removal.
 /// @notice THE SECOND HALF: a loan withdrawn to the WITHDRAWAL GATE's own line is covered too.
-/// @dev WHY IT HOLDS: claims sum to the principal, and every funding tick prices at or above the floor.
-/// @dev The floor IS the lowest funding tick, and admission requires `trigger <= floor`.
-/// @dev So settlement needs `SUM(claim_t x unitScale / price_t) <= units / k`: at most `1/k` of it.
+/// @dev WHY IT HOLDS: the claim is the principal, funded at the market's price, which is the loan's floor.
+/// @dev Admission requires `trigger <= floor`.
+/// @dev So settlement needs `claim x unitScale / price <= units / k`: at most `1/k` of it.
 /// @dev At the shipped k = 1.4 that is ~71.4% of the position, leaving a ~29% margin.
-/// @dev Drawing across HIGHER ticks only shrinks the need, so the bound is worst-case, not typical.
 /// @dev WHY IT IS WORTH PROVING RATHER THAN ASSUMING: it was found by accident.
 /// @dev Bounding `settleBountyBps` needed a 6,000 bps bounty to reach the bad-debt tests at all.
 /// @dev The reason was that nothing else CAN make an admitted loan short.
@@ -35,9 +34,9 @@ import {PriceFrame} from "../utils/PriceFrame.sol";
 /// @dev It fails if `k` or the draw gate ever moves against that bound.
 /// @dev A SALE cannot take this margin either: `securedBase` reserves settlement's own requirement before sizing.
 /// @dev That half is pinned by `AceDeleverageCoverageErosion`; this suite owns the no-sale half alone.
-/// @dev THE FIXTURE IS PARAMETERIZED over the pair's decimals and the funded tick triple.
+/// @dev THE FIXTURE IS PARAMETERIZED over the pair's decimals and the market's price.
 /// @dev Both move the margin, which is measured in COLLATERAL WEI rather than in quote.
-/// @dev One collateral wei buys `omega = priceAt(t) / unitScale`, and each per-tick ceiling costs under one wei.
+/// @dev One collateral wei buys `omega = price / unitScale`, and the need's one ceiling costs under one wei.
 /// @dev So the margin is thin exactly where `omega` is large, and no single decimal point can show that.
 /// @dev At the old hardcoded point (18-dec collateral, 6-dec quote) `omega ~ 1e-12` and no ceiling can bite.
 /// @dev That is how a live withdrawal-gate defect passed this suite 4/4.
@@ -68,7 +67,7 @@ contract AceCoverageGuaranteeTest is Test {
     uint256 internal constant SEED_TOKENS = 20_000; // the seed a tick carries, in whole quote tokens
     uint256 internal constant MIN_DEBT_DIVISOR = 2_000; // 20_000 / 2_000 == 10 tokens, the fixture's old literal
     uint256 internal constant MAX_TICK_SEED = uint256(type(uint128).max) / 8; // per-tick cash is a uint128
-    uint256 internal constant TICK_CAP = 32; // re-spelled, not imported: the fixture's own maxClaimTicks, and the coverage line's slack
+    uint256 internal constant TICK_CAP = 32; // UNREAD: the retired maxClaimTicks; the coverage line's slack is one atom
 
     function setUp() public {
         vm.warp(1_000_000);
@@ -135,25 +134,23 @@ contract AceCoverageGuaranteeTest is Test {
         return whole * 10 ** cDec;
     }
 
-    /// @dev The largest principal the gate can admit for `(k, units)` at the CONSERVATIVE floor.
-    /// @dev Conservative because the real floor is whichever tick the top-down walk reaches, never lower.
-    /// @dev The COVERAGE LINE spends `maxClaimTicks` of the position before the trigger sees any of it.
-    /// @dev So the tick cap comes off the units first, and the `1/k` bound is taken on what backs the debt.
+    /// @dev The largest principal the gate can admit for `(k, units)` at the market's price, every loan's funding floor.
+    /// @dev The COVERAGE LINE spends ONE atom of the position before the trigger sees any of it.
+    /// @dev So that atom comes off the units first, and the `1/k` bound is taken on what backs the debt.
     function _maxDebtAt(uint256 k, uint256 units) internal view returns (uint256) {
         uint256 backing = units > 1 ? units - 1 : 0; // the coverage line spends ONE atom before the trigger sees any
         return FullMath.mulDiv(FullMath.mulDiv(tLo, backing, unitScale), 1e18, k);
     }
 
-    /// @dev The units that make `debt` exactly admissible at the lowest seeded tick.
-    /// @dev The COVERAGE LINE is `requiredAt + maxClaimTicks`, so the tick cap rides on the trigger's ceiling.
+    /// @dev The units that make `debt` exactly admissible at the market's price.
+    /// @dev The COVERAGE LINE is `requiredAt + 1`, so the atom rides on the trigger's ceiling.
     /// @dev Without it the admission fuzz would refuse every draw again and go vacuous, which is the trap it names.
     function _unitsFor(uint256 k, uint256 debt) internal view returns (uint256) {
         return FullMath.mulDivRoundingUp(k * debt, unitScale, tLo * 1e18) + 1;
     }
 
     /// @dev What settlement would need: the live claim at the market's price, ceiled as `collateralNeeded` ceils.
-    /// @dev IT SUMMED A CEILING PER FUNDED TICK, each at that tick's OWN price, and the sum of those ceilings
-    /// @dev exceeding the ceiling of the sum is the whole coverage gap this file measures. One claim, one ceiling.
+    /// @dev It once summed a ceiling per funded tick, each at that tick's own price; one claim now takes one ceiling.
     function _need(bytes32 id, uint256 loanId) internal view returns (uint256) {
         uint256 amt = read.claimOf(id, loanId);
         if (amt == 0) return 0;
@@ -167,11 +164,11 @@ contract AceCoverageGuaranteeTest is Test {
     }
 
     /// @notice Take everything the HUB will part with, whichever line it is compiled against.
-    /// @dev The lens's answer first, then a halving descent over the tick cap for whatever is left.
+    /// @dev The lens's answer first, then a halving descent from `maxClaimTicks` for whatever is left.
     /// @dev It must not read the line off the lens alone, or a hub gated LOWER would never be driven to its edge.
     /// @dev The coverage assertion below would then be checking a position the hub does not actually allow.
     /// @param loanId The loan to drain.
-    /// @param maxClaimTicks The market's tick cap, which bounds the residual the descent has to clear.
+    /// @param maxClaimTicks The largest residual the descent has to clear: the line's one atom, so callers pass 1.
     /// @return held The units the loan is left holding.
     function _drainToHubLine(uint256 loanId, uint256 maxClaimTicks) internal returns (uint256 held) {
         bytes32 id = read.loan(loanId).market;
@@ -194,7 +191,7 @@ contract AceCoverageGuaranteeTest is Test {
 
     /// @notice THE GUARANTEE, fuzzed along the ADMISSIBLE EDGE rather than at random.
     /// @dev The draw is a percentage of the largest principal the gate can admit for the fuzzed `(k, units)`.
-    /// @dev It is computed against the LOWEST tick's price, which is conservative: the real floor is never lower.
+    /// @dev It is computed against the market's price, which is every loan's funding floor.
     /// @dev So every run opens a real loan, and `pct = 100` sits exactly on the boundary the property is about.
     /// @dev An earlier version fuzzed `principal` freely and was VACUOUS: almost every draw was refused.
     /// @dev The catch swallowed it, and loosening the admission gate 3x did not fail the test.
@@ -237,7 +234,7 @@ contract AceCoverageGuaranteeTest is Test {
         assertEq(need, lens.collateralNeeded(id, loanId), "the shipped view and this file's derivation must agree");
         assertLe(need, held, "an admitted loan cannot be short at settlement");
 
-        // and the margin is the k margin, not luck: need <= units / k, up to per-tick ceiling dust
+        // and the margin is the k margin, not luck: need <= units / k, up to one ceiling's dust per live claim
         uint256 ceilingDust = read.claimCount(id, loanId);
         assertLe(need, FullMath.mulDiv(held, 1e18, k) + ceilingDust, "coverage margin is exactly the 1/k bound");
     }
@@ -262,10 +259,9 @@ contract AceCoverageGuaranteeTest is Test {
     /* ============ past admission: the withdrawal gate's own line ============ */
 
     /// @notice THE HALF ADMISSION NEVER REACHED: a loan withdrawn to the gate's line, then settled.
-    /// @notice The gate leaves ONE ceiling over the whole debt; settlement takes one per funded tick.
-    /// @dev A sum of ceilings is not the ceiling of a sum, so the gate has to carry the tick count too.
+    /// @notice Settlement ceils the loan's one claim once; the gate's line is `requiredAt` plus one atom.
     /// @dev The debt melts to a FUZZED POWER OF TWO rather than to a fuzzed fraction.
-    /// @dev The exposure is `(k - 1) x debt / omega < n`, which lives in the bottom decades of the debt.
+    /// @dev The exposure is `(k - 1) x debt / omega < 1`, which lives in the bottom decades of the debt.
     /// @dev A uniform residual never visits them, so this is the dimension the old suite had no axis for.
     /// @dev Asserted on `shortfallOf`, which `_settle` itself writes: no mirrored arithmetic decides it.
     function testFuzz_WithdrawnToTheLine_IsAlwaysCoveredAtSettlement(uint256 decSeed, uint256 tickSeed, uint256 spanSeed, uint256 dustSeed, uint256 kSeed)

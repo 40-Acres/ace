@@ -96,7 +96,7 @@ contract MultiPairOracleRecord is IPersistenceRecord, Ownable2Step {
         return _below(_pair(quote, collateral), x);
     }
 
-    /// @notice The settle question, answered as the distress one: an oracle class holds no window.
+    /// @notice The settle question, answered as the distress one: this record holds no window.
     /// @dev A DISTINCT FUNCTION answering identically, never one question: a record with real settle patience answers it off its own windows.
     function persistedBelowSettle(address quote, address collateral, uint256 x) external view returns (bool) {
         return _below(_pair(quote, collateral), x);

@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 
 /// @title CuratorVaultSaleProceedsPull
 /// @notice A SALE CREDITS THE VAULT'S POOL, and the next terminal close in its (lender, quote) pair carries it home with NO crank.
@@ -16,7 +16,7 @@ contract CuratorVaultSaleProceedsPullTest is CuratorVaultBase {
     /// @notice ANOTHER LOAN'S CLOSING REPAY BRINGS A SALE'S PROCEEDS HOME, and no crank runs between.
     /// @dev The balance and NAV differ from the no-sale run by the fill alone, so nothing was banked twice and nothing was lost.
     function test_Close_AnotherLoansCloseCarriesASalesProceedsHomeWithNoCrank() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 doomed = _open(DRAW);
         _crank(v, doomed, T2, 0);

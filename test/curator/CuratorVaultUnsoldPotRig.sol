@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {MarketParams} from "../../src/ace/hub/Types.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {VaultConfig} from "../../src/curator/AceVault.sol";
 import {AceInventoryLens} from "../../src/ace/lens/AceInventoryLens.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
@@ -16,6 +18,7 @@ interface IDeadPotOverride {
 /// @notice The unsold-pot gate's rig: a production instant vault with a guardian, its market, and the hub's two counts.
 /// @dev The gate's errors and event are named here by selector alone, so a row is red on a vault without them rather than uncompilable.
 /// @dev A default is SHALLOW by default: four percent of the seed, so no price gate stands and only the new gate can refuse the entrant.
+/// @dev It pledges ON the coverage line, so the in-term take is the claim's need to two atoms, and no sale of the pot lifts NAV past a price gate.
 abstract contract UnsoldPotRig is CuratorVaultBase {
     error InventoryUnsold();
     error NotGuardian();
@@ -40,7 +43,7 @@ abstract contract UnsoldPotRig is CuratorVaultBase {
     }
 
     /// @dev A production vault, instant by default, with the rig's guardian and the rig collateral listed.
-    function _gateVault() internal returns (CuratorVault v) {
+    function _gateVault() internal returns (AceVault v) {
         VaultConfig memory c = _cfg(0);
         c.guardian = guardian;
         v = _deploy(c, "Gated", "cGATE");
@@ -48,7 +51,7 @@ abstract contract UnsoldPotRig is CuratorVaultBase {
     }
 
     /// @dev The same vault with no guardian named, so nobody holds the override's key.
-    function _keylessVault() internal returns (CuratorVault v) {
+    function _keylessVault() internal returns (AceVault v) {
         VaultConfig memory c = _cfg(0);
         c.guardian = address(0);
         v = _deploy(c, "Keyless", "cKEY");
@@ -56,7 +59,7 @@ abstract contract UnsoldPotRig is CuratorVaultBase {
     }
 
     /// @dev A second market of the vault's: a second collateral listed on its own row and record; returns the door market and the record.
-    function _secondMarket(CuratorVault v) internal returns (bytes32 m2, MockPersistenceRecord r2) {
+    function _secondMarket(AceVault v) internal returns (bytes32 m2, MockPersistenceRecord r2) {
         MockStakeVault c2 = new MockStakeVault(43);
         _list(v, address(c2));
         r2 = record;
@@ -64,13 +67,15 @@ abstract contract UnsoldPotRig is CuratorVaultBase {
     }
 
     /// @dev The hub's two words for this vault's asset: settled pots not yet sold, and pots ever settled.
-    function _counts(CuratorVault v) internal view returns (uint256 unsold, uint256 settled) {
+    function _counts(AceVault v) internal view returns (uint256 unsold, uint256 settled) {
         return ace.lenderUnresolved(address(v), v.asset());
     }
 
-    /// @dev Borrow `principal` through the door on `market`'s collateral, then finalize it on `rec`: the pot is left unsold.
-    function _defaultIn(CuratorVault v, bytes32 market, MockPersistenceRecord rec, uint256 principal) internal returns (uint256 loanId) {
-        loanId = _borrowOn(v, ace.idToMarketParams(market).collateral, principal);
+    /// @dev Borrow `principal` through the door on `market`'s collateral, pledged ON the coverage line, then finalize it on `rec`: the pot is left unsold.
+    function _defaultIn(AceVault v, bytes32 market, MockPersistenceRecord rec, uint256 principal) internal returns (uint256 loanId) {
+        MarketParams memory p = ace.idToMarketParams(market);
+        uint256 line = FullMath.mulDivRoundingUp(p.minCoverageWad * principal, read.marketState(market).unitScale, p.price * 1e18) + 1; // the coverage line
+        loanId = _borrowOnAt(v, p.collateral, line, principal);
         assertEq(ace.loanMarket(loanId), market, "PREMISE: the door lent in the named market");
         v.crank();
         rec.setBelow(true);
@@ -82,7 +87,7 @@ abstract contract UnsoldPotRig is CuratorVaultBase {
     }
 
     /// @dev One shallow default in the rig's market; no pile over the band vests, so no price gate stands.
-    function _shallowDefault(CuratorVault v) internal returns (uint256 loanId) {
+    function _shallowDefault(AceVault v) internal returns (uint256 loanId) {
         loanId = _defaultIn(v, mid, rec1, SHALLOW);
         assertLe(v.unvested() * 10_000, v.totalAssets() * v.GATE_BPS(), "PREMISE: no pile over the band vests, so the pile gate leaves entry open");
     }
@@ -96,7 +101,7 @@ abstract contract UnsoldPotRig is CuratorVaultBase {
     }
 
     /// @dev Entry is shut by the gate: both views read zero and both verbs refuse `InventoryUnsold`, with none of the cash moved.
-    function _assertShut(CuratorVault v, address who) internal {
+    function _assertShut(AceVault v, address who) internal {
         assertEq(v.maxDeposit(who), 0, "maxDeposit reads the gate");
         assertEq(v.maxMint(who), 0, "and so does maxMint");
         uint256 cash = usdc.balanceOf(who) + ENTRY;
@@ -112,7 +117,7 @@ abstract contract UnsoldPotRig is CuratorVaultBase {
     }
 
     /// @dev Entry is open: the view admits and a deposit lands.
-    function _assertOpen(CuratorVault v, address who) internal returns (uint256 shares) {
+    function _assertOpen(AceVault v, address who) internal returns (uint256 shares) {
         assertGt(v.maxDeposit(who), 0, "the deposit view admits");
         assertGt(v.maxMint(who), 0, "and so does the mint view");
         shares = _lpDeposit(v, who, ENTRY);
@@ -120,7 +125,7 @@ abstract contract UnsoldPotRig is CuratorVaultBase {
     }
 
     /// @dev The guardian's override at the settled count it names.
-    function _exempt(CuratorVault v, uint256 s) internal {
+    function _exempt(AceVault v, uint256 s) internal {
         vm.prank(guardian);
         IDeadPotOverride(address(v)).exemptDeadPots(s);
     }

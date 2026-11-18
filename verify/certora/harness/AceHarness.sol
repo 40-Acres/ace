@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {Ace} from "../../../src/ace/hub/Ace.sol";
-import {LenderUnresolved, Loan, Market, Storage} from "../../../src/ace/hub/Types.sol";
+import {LenderUnresolved, Loan, LoanBook, Market, Storage} from "../../../src/ace/hub/Types.sol";
 import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
 
 /// @title AceHarness
@@ -109,6 +109,11 @@ contract AceHarness is Ace {
         return Storage.poolOf(Storage.markets()[id].p).lent;
     }
 
+    /// @notice A market's lender's resting pool in that market's quote, across all that lender's markets in it.
+    function marketRestingPoolOf(bytes32 id) external view returns (uint256) {
+        return Storage.poolOf(Storage.markets()[id].p).resting;
+    }
+
     /// @notice What a market's lender has lent in that market's quote against that market's collateral.
     function marketLentByCollateralOf(bytes32 id) external view returns (uint256) {
         return Storage.byCollateralOf(Storage.markets()[id].p).lent;
@@ -135,12 +140,43 @@ contract AceHarness is Ace {
         return Storage.markets()[id].p.settleBountyBps;
     }
 
-    /// @notice A digest of everything one market holds, so "untouched" is one comparison.
-    /// @dev Params, state, the claim and inventory pot of one loan id, and both append-only list lengths.
+    /// @notice A digest of everything one market record holds, so "untouched" is one comparison.
+    /// @dev Params, state, the claim and inventory pot of one loan id, both list lengths, and one entry of each list.
     /// @param loanId The loan whose per-market claim and inventory pot the digest also covers.
-    function marketDigest(bytes32 id, uint256 loanId) external view returns (bytes32) {
+    /// @param index The position read in both lists; past a list's end it reads zero.
+    function marketDigest(bytes32 id, uint256 loanId, uint256 index) external view returns (bytes32) {
         Market storage M = Storage.markets()[id];
-        return keccak256(abi.encode(M.p, M.s, M.claim[loanId], M.invPotOf[loanId], M.openedLoans.length, M.orderIds.length));
+        bytes32 record = keccak256(abi.encode(M.p, M.s, M.claim[loanId], M.invPotOf[loanId]));
+        bytes32 lists = keccak256(abi.encode(M.openedLoans.length, M.orderIds.length, _entryAt(M.openedLoans, index), _entryAt(M.orderIds, index)));
+        return keccak256(abi.encode(record, lists));
+    }
+
+    /// @notice One entry of a market's opened-loans list; zero past its end.
+    function openedLoanAt(bytes32 id, uint256 index) external view returns (uint256) {
+        return _entryAt(Storage.markets()[id].openedLoans, index);
+    }
+
+    /// @notice One entry of a market's order list; zero past its end.
+    function orderIdAt(bytes32 id, uint256 index) external view returns (uint256) {
+        return _entryAt(Storage.markets()[id].orderIds, index);
+    }
+
+    /// @notice A digest of one id's loan-side entries in the loan book, with one claimant's owed claims on it.
+    /// @dev The loan record, its principal at open, its fee escrow, the claimant's owed units and quote, and its shortfall.
+    function loanRecordDigest(uint256 loanId, address claimant) external view returns (bytes32) {
+        LoanBook storage B = Storage.book();
+        bytes32 owed = keccak256(abi.encode(B.unitsOwed[loanId][claimant], B.quoteOwed[loanId][claimant], B.shortfallOf[loanId]));
+        return keccak256(abi.encode(B.loans[loanId], B.principalOf[loanId], B.feeEscrowOf[loanId], owed));
+    }
+
+    /// @notice A digest of one order's whole record.
+    function orderRecordDigest(uint256 orderId) external view returns (bytes32) {
+        return keccak256(abi.encode(Storage.book().orders[orderId]));
+    }
+
+    /// @dev The one read both list views and the digest share, so a witness on a view vouches for the digest's read.
+    function _entryAt(uint256[] storage list, uint256 index) private view returns (uint256) {
+        return index < list.length ? list[index] : 0;
     }
 
     /// @notice The maker of a credit order; zero for an id no order was posted under.

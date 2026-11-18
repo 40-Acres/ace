@@ -3,15 +3,17 @@ pragma solidity 0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault, Listing} from "../../src/curator/CuratorVault.sol";
-import {VaultConfig} from "../../src/curator/AceVault.sol";
+import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
+import {Listing} from "../../src/entities/curated/CuratorTerms.sol";
+import {CuratedVaults} from "../utils/CuratedVaults.sol";
 import {AceVaultFlows} from "../../src/curator/AceVaultFlows.sol";
+import {CapListing, ProductConfig} from "../../src/curator/AceVaultCaps.sol";
 
 /// @notice The vault with `_stampVest` exposed and its two fields readable, so credits land at chosen instants.
 /// @dev Exposes the shipped internal UNCHANGED -- it substitutes no arithmetic and mocks nothing.
 /// @dev Without it the instant of a stamp is whatever a hub event happens to fall on.
-contract AccumVault is CuratorVault {
-    constructor(VaultConfig memory cfg, Listing[] memory l) CuratorVault(cfg, 10e6, 1.4e18, 1 days, l, "Accum", "cACC") {}
+contract AccumVault is AceVault {
+    constructor(VaultConfig memory cfg, ProductConfig memory pc, CapListing[] memory caps) AceVault(cfg, pc, caps, "Accum", "cACC") {}
 
     function stamp(uint256 amount) external {
         _stampVest(amount);
@@ -48,7 +50,14 @@ contract CuratorVaultVestAccumulatorTest is CuratorVaultBase {
     function _accum(uint64 window) internal returns (AccumVault v) {
         VaultConfig memory cfg = _cfg(0);
         cfg.vestWindow = window;
-        v = new AccumVault(cfg, _listing());
+        v = _newAccum(cfg);
+    }
+
+    /// @dev An accumulator vault from `cfg` on curated terms listing the rig collateral, the terms first at its address-to-be.
+    function _newAccum(VaultConfig memory cfg) internal returns (AccumVault v) {
+        (ProductConfig memory pc, CapListing[] memory c) =
+            CuratedVaults.prepared(cfg, CuratedVaults.Terms(10e6, 1.4e18, 1 days, CuratedVaults.UNCAPPED), _listing());
+        v = new AccumVault(cfg, pc, c);
     }
 
     // ---- PROPERTY ONE: the maturity is monotone ----
@@ -154,7 +163,7 @@ contract CuratorVaultVestAccumulatorTest is CuratorVaultBase {
     /// @dev The seam itself, end to end on the shipped verbs rather than the harness: a quote taken before
     /// @dev a sync must not be beaten by the fill after it, in the direction 4626 fixes.
     function test_Vest_AQuoteSurvivesTheStampTheVerbItselfRuns() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, 20_000e6);
         uint256 loanId = _open(6_000e6);
         _crank(v, loanId, T2, 0);

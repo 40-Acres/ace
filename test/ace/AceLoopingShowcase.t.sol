@@ -185,14 +185,14 @@ contract AceLoopingShowcaseTest is Test {
         p = AceFixtures.marketParams(address(usdc), address(tok1));
         p.record = address(recUsdc);
         p.price = T_PAR;
-        p.baseBps = BASE_BPS;
+        p.lenderAprBps = BASE_BPS;
     }
 
     function _paramsWeth() internal view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(weth), address(usdc));
         p.record = address(recWeth);
         p.price = T_WETH;
-        p.baseBps = BASE_BPS;
+        p.lenderAprBps = BASE_BPS;
         p.minPrincipal = BACK_MIN_DEBT;
     }
 
@@ -200,7 +200,7 @@ contract AceLoopingShowcaseTest is Test {
         p = AceFixtures.marketParams(address(usdc), address(weth));
         p.record = address(recBack);
         p.price = T_BACK;
-        p.baseBps = BASE_BPS;
+        p.lenderAprBps = BASE_BPS;
     }
 
     /// @dev One deposit, deep enough that no leg ever exhausts it. The `price` argument is the market's own,
@@ -225,12 +225,12 @@ contract AceLoopingShowcaseTest is Test {
     /// @notice `trigger <= floor` collapses to `k * debtWhole <= collateralWhole * price`, so LTV caps at 1/k.
     /// @dev ONE floored division, which is exactly the inverse of the trigger's single ceiling: the
     /// @dev result is the largest admissible draw to the wei, and `test_TheLeverageCeiling` pins it there.
-    /// @dev The COVERAGE LINE binds too and is the tighter leg: `units >= requiredAt + maxClaimTicks`.
-    /// @dev The tick cap comes off the units first, so the LTV bound is taken on the backing that remains.
+    /// @dev The COVERAGE LINE binds too and is the tighter leg: `units >= requiredAt + 1`.
+    /// @dev Its atom comes off the units first, so the LTV bound is taken on the backing that remains.
     function _maxDraw(bytes32 mid, uint256 price, uint256 units) internal view returns (uint256) {
         uint256 us = read.marketState(mid).unitScale;
         MarketParams memory p = ace.idToMarketParams(mid);
-        uint256 backing = units - 1; // the slack settlement's per-tick ceilings will spend
+        uint256 backing = units - 1; // the coverage line's one atom of margin
         return FullMath.mulDiv(price * backing, 1e18, p.minCoverageWad * us);
     }
 
@@ -241,7 +241,7 @@ contract AceLoopingShowcaseTest is Test {
         for (uint256 i; i < n; i++) {
             (bytes32 mid, uint256 price) = _hop(i);
             uint256 principal = _maxDraw(mid, price, held);
-            uint256 fee = LoanMath.originationFee(principal, TENOR, ace.idToMarketParams(mid).baseBps, TENOR);
+            uint256 fee = LoanMath.originationFee(principal, TENOR, ace.idToMarketParams(mid).lenderAprBps);
             legs[i] = Leg(mid, price, held, principal, principal - fee);
             held = principal - fee;
         }
@@ -276,7 +276,7 @@ contract AceLoopingShowcaseTest is Test {
     /// @dev The per-hop value ratio the fixture implies: the payout share of a draw, over the coverage k.
     function _legRatioWad() internal view returns (uint256) {
         uint256 p = _maxDraw(mUSDC, T_PAR, START_TOK1);
-        uint256 fee = LoanMath.originationFee(p, TENOR, BASE_BPS, TENOR);
+        uint256 fee = LoanMath.originationFee(p, TENOR, BASE_BPS);
         return FullMath.mulDiv((p - fee) * 1e18, 1e18, p * ace.idToMarketParams(mUSDC).minCoverageWad);
     }
 
@@ -492,7 +492,7 @@ contract AceLoopingShowcaseTest is Test {
         for (uint256 i; i < n; i++) {
             posted[i] = held;
             principals[i] = _maxDraw(mUSDC, T_PAR, held);
-            uint256 fee = LoanMath.originationFee(principals[i], TENOR, BASE_BPS, TENOR);
+            uint256 fee = LoanMath.originationFee(principals[i], TENOR, BASE_BPS);
             held = (principals[i] - fee) * 1e12; // the venue's par rate across the 18/6 decimal gap
         }
     }

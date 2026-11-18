@@ -19,7 +19,7 @@ error LoanClosed(); // the hub's own: a retired loan is refused by name, which i
 /// @notice The borrower keeps only what sits ABOVE that line; everything under it converts to the claims' pots.
 /// @notice A record-backed market is untouched and still credits everything above the claims' own need.
 /// @dev WHY THE CLASS SPLIT: with no record there is no early seizure, so the lender eats the whole drawdown; the coverage pays for that.
-/// @dev The one act left to the lender is refusing an extension, which leaves the loan to `forceClose` and this same bound.
+/// @dev The lender may refuse an extension, which leaves the loan to `forceClose` and this same bound, or extend it late as anyone may.
 /// @dev Every settlement here is `forceClose`, whose keeper sliver comes off the lot first; a row naming a split reads it off the keeper's credit.
 /// @dev THE LINE IS TAKEN FROM THE SHIPPED LENS, never re-derived here: `withdrawableUnits` is
 /// @dev `collateralUnits - coverageLine` on a live loan, so the line is a subtraction and not a second formula.
@@ -48,7 +48,7 @@ contract AceRecordlessForfeitTest is WarpClock {
     uint256 internal constant PRINCIPAL = 11_000_000; // over the fixture's 10e6 minPrincipal; two full ticks and part of a third
     uint256 internal constant COLL = 10_000e18;
     uint64 internal constant TEN7 = 7 days;
-    uint256 internal constant WIDE_TICKS = 32; // the fixture's `maxClaimTicks`, which is the shipped ceiling too
+    uint256 internal constant WIDE_TICKS = 32; // the retired `maxClaimTicks` ceiling, kept as a seed multiplier
     uint256 internal constant WIDE_PRINCIPAL = 159_000_000; // 31 whole ticks and part of a 32nd: the cap, unevenly
 
     OpenBounds internal OFF = OpenBounds(0, 0, 0);
@@ -365,8 +365,8 @@ contract AceRecordlessForfeitTest is WarpClock {
 
     /// @notice WHY `_marketBound`'s ZERO-NEED ARM IS UNREACHABLE, pinned as a tripwire instead of argued in prose.
     /// @notice Paying the last atom CLOSES the loan, so no settlement verb ever meets one carrying no live claim.
-    /// @dev Were that to stop holding, a recordless settle would price a claimless loan off the tick cap alone and
-    /// @dev then spread it over nothing: units retired against no ledger entry, and no conservation row would see it.
+    /// @dev Without that arm a recordless settle would price a claimless loan off the coverage line's one atom alone.
+    /// @dev Spread over no claim, that atom would retire against no ledger entry, and no conservation row would see it.
     function test_AFullRepayClosesTheLoan_SoSettlementNeverMeetsAClaimlessLoan() public {
         uint256 loanId = _ladderLoan();
         uint256 debt = read.debtOf(loanId);

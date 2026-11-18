@@ -97,13 +97,13 @@ contract AceQuotePairRailTest is WarpClock {
     uint256 internal constant CASH6 = 400_000e6;
     uint256 internal constant CASH18 = 400_000e18;
 
-    /// @dev fee(P,30d) = P*44*30/(10000*7) all-in; the protocol's 10% rides on top of the lender's 40.
-    /// @dev The escrow is half of what is left once ACE's cut comes out, which is half the whole fee.
+    /// @dev fee(P,30d) = P*2190*30*1.1/(10000*365) all-in; the protocol's 10% rides on top of the lender's 2190 a year.
+    /// @dev The escrow is half of what is left once ACE's cut comes out.
     /// @dev At t+15d of a 30d term exactly half the escrow is still unearned, and that half is `refundOld`.
-    uint256 internal constant FEE6 = 1_320e6;
-    uint256 internal constant ESCROW9 = 600e9;
-    uint256 internal constant REFUND9 = 300e9;
-    uint256 internal constant REFUND6 = 300e6;
+    uint256 internal constant FEE6 = 1_386e6;
+    uint256 internal constant ESCROW9 = 630e9;
+    uint256 internal constant REFUND9 = 315e9;
+    uint256 internal constant REFUND6 = 315e6;
     /// @dev What the netting leaves the caller to fund: the fresh fee less the refund it picks up.
     uint256 internal constant TOP_UP6 = FEE6 - REFUND6;
 
@@ -144,6 +144,7 @@ contract AceQuotePairRailTest is WarpClock {
         p.minCoverageWad = k;
         p.minTenor = TEN7;
         p.maxTenor = TEN30;
+        p.lenderAprBps = 2190; // bps a year: 6 a day, so every figure here is exact
     }
 
     /// @dev The QUOTE stays a parameter: this suite runs four quote tokens over one collateral, so the
@@ -293,7 +294,7 @@ contract AceQuotePairRailTest is WarpClock {
         holder.armTopUp(address(q6), TOP_UP6);
 
         MarketParams memory p = ace.idToMarketParams(dst6);
-        uint256 credit = P6 - LoanMath.originationFee(P6, TEN30, p.baseBps, p.minTenor) + read.earlyExitRefund(oldId);
+        uint256 credit = P6 - LoanMath.originationFee(P6, TEN30, p.lenderAprBps) + read.earlyExitRefund(oldId);
         uint256 debtOld = read.loan(oldId).debt;
         uint256 newId = holder.migrateComposed(_args(oldId, dst6, P6), credit >= debtOld ? 0 : debtOld - credit);
 

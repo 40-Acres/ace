@@ -13,11 +13,18 @@ import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
 import {RefinanceMath} from "../../utils/RefinanceMath.sol";
 import {Loan, MarketParams} from "../../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../../src/ace/positions/PositionManager.sol";
-import {VaultConfig} from "../../../src/curator/AceVault.sol";
+import {AceVault, VaultConfig} from "../../../src/curator/AceVault.sol";
+import {AceVaultFactory} from "../../../src/curator/AceVaultFactory.sol";
+import {CapListing} from "../../../src/curator/AceVaultCaps.sol";
+import {MockTerms} from "../vault/MockTerms.sol";
 import {BorrowRequest} from "../../../src/curator/AceVaultFlows.sol";
-import {CuratorVault, Listing, Row} from "../../../src/curator/CuratorVault.sol";
+import {CuratorTerms, Listing, Row} from "../../../src/entities/curated/CuratorTerms.sol";
+import {CuratedVaults} from "../../utils/CuratedVaults.sol";
+import {VaultSeed} from "../../utils/VaultSeed.sol";
+import {IAceVaultLens, VaultLens} from "../../utils/VaultLens.sol";
 
-/// @notice The shared rig for the vault-holds-cash suites: one hub, one oracle-priced collateral, one CuratorVault holding the LP cash.
+/// @notice The shared rig for the vault-holds-cash suites: one hub, one oracle-priced collateral, one curated AceVault holding the LP cash.
+/// @dev The vault names CuratorTerms and is deployed through the rig's factory, the terms first against its prediction.
 /// @dev Every market a borrow lands in is the vault's own, built by its door; the rig never creates or funds a market itself.
 /// @dev The laws the plan names are asserted by helpers here, so each suite checks them after the verb it drives.
 abstract contract AceVaultRig is WarpClock {
@@ -27,7 +34,10 @@ abstract contract AceVaultRig is WarpClock {
     MockERC20 internal usdc;
     MockStakeVault internal coll;
     MockPersistenceRecord internal record;
-    CuratorVault internal vault;
+    AceVault internal vault;
+    AceVaultFactory internal vaultFactory;
+    uint256 internal vaultSalt; // each factory deploy from this rig takes the next salt
+    IAceVaultLens internal vlens; // the vault's stored figures: requests, holds, caps
 
     address internal curator = address(0xC0A11);
     address internal guardian = address(0x6A2E);
@@ -41,7 +51,7 @@ abstract contract AceVaultRig is WarpClock {
     uint256 internal constant COVERAGE = 1.4e18;
     uint64 internal constant TIMELOCK = 3 days;
     uint16 internal constant BUFFER_BPS = 1000;
-    uint16 internal constant RATE_BPS = 40;
+    uint16 internal constant RATE_BPS = 2086; // bps a year: the per-year twin of 40 per 7 days
     uint64 internal constant MIN_TENOR = 7 days;
     uint64 internal constant MAX_TENOR = 30 days;
     uint256 internal constant LP_CASH = 1_000_000e6;
@@ -55,9 +65,11 @@ abstract contract AceVaultRig is WarpClock {
         coll = new MockStakeVault(42);
         (ace, pm) = AceFixtures.newAceWithEscrow(AceFixtures.TREASURY);
         read = new AceReader(address(ace));
+        vaultFactory = CuratedVaults.factory(address(ace));
         record = _record(address(coll), 2e18);
-        vault = _newVault(_row(address(record), type(uint192).max));
+        vault = _newVault(_row(address(record)));
         _lp(alice, LP_CASH);
+        vlens = VaultLens.deploy();
     }
 
     /// @dev An oracle-class mock record on the USDC pair, its windowed minimum and last print at `humanWad`.
@@ -67,20 +79,48 @@ abstract contract AceVaultRig is WarpClock {
         r.setObserved(AceFixtures.px(humanWad, address(usdc), c));
     }
 
-    /// @dev The rig's collateral row: a 10% buffer, 40 bps per week, terms from a week to a month.
-    function _row(address rec, uint192 cap) internal pure returns (Row memory) {
-        return Row({record: rec, bufferBps: BUFFER_BPS, baseBps: RATE_BPS, minTenor: MIN_TENOR, maxTenor: MAX_TENOR, cap: cap});
+    /// @dev The rig's collateral row: a 10% buffer, 2086 bps a year, terms from a week to a month; its cap is the vault's.
+    function _row(address rec) internal pure returns (Row memory) {
+        return Row({record: rec, bufferBps: BUFFER_BPS, lenderAprBps: RATE_BPS, minTenor: MIN_TENOR, maxTenor: MAX_TENOR});
     }
 
     function _cfg() internal view returns (VaultConfig memory) {
-        return VaultConfig({ace: address(ace), asset: address(usdc), curator: curator, guardian: guardian, perfFeeBps: 0, vestWindow: VEST_W});
+        return
+            VaultConfig({
+                ace: address(ace), asset: address(usdc), curator: curator, guardian: guardian, perfFeeBps: 0, vestWindow: VEST_W, seed: VaultSeed.SEED
+            });
     }
 
-    /// @dev A CuratorVault listing the rig's collateral on `row` from deploy.
-    function _newVault(Row memory row) internal returns (CuratorVault v) {
+    /// @dev The curated terms every rig vault takes: the rig's floor ticket, coverage and timelock, listed rows uncapped.
+    function _curated() internal pure returns (CuratedVaults.Terms memory) {
+        return CuratedVaults.Terms(MIN_PRINCIPAL, COVERAGE, TIMELOCK, CuratedVaults.UNCAPPED);
+    }
+
+    /// @dev A curated AceVault listing the rig's collateral on `row` from deploy, uncapped, through the rig's factory.
+    function _newVault(Row memory row) internal returns (AceVault v) {
         Listing[] memory l = new Listing[](1);
         l[0] = Listing({collateral: address(coll), row: row});
-        v = new CuratorVault(_cfg(), MIN_PRINCIPAL, COVERAGE, TIMELOCK, l, "Curator", "cVLT");
+        v = CuratedVaults.viaFactory(vaultFactory, bytes32(++vaultSalt), _cfg(), _curated(), l, "Curator", "cVLT");
+    }
+
+    /// @dev The curated terms `v` names, where its rows live.
+    function _terms(AceVault v) internal view returns (CuratorTerms) {
+        return CuratedVaults.terms(v);
+    }
+
+    /// @dev A vault whose product is a `MockTerms` a row steers, seeded with the rig's LP cash: the rig collateral and the total uncapped.
+    function _onMockTerms() internal returns (AceVault v, MockTerms t) {
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
+        t = new MockTerms(predicted, address(ace));
+        CapListing[] memory c = new CapListing[](2);
+        (c[0], c[1]) = (CapListing(address(coll), CuratedVaults.UNCAPPED), CapListing(predicted, CuratedVaults.UNCAPPED));
+        VaultSeed.fund(_cfg(), predicted);
+        v = new AceVault(_cfg(), CuratedVaults.product(address(t), TIMELOCK), c, "Mocked", "mVLT");
+        usdc.mint(alice, LP_CASH);
+        vm.startPrank(alice);
+        usdc.approve(address(v), LP_CASH);
+        v.deposit(LP_CASH, alice);
+        vm.stopPrank();
     }
 
     function _lp(address who, uint256 amt) internal returns (uint256 shares) {
@@ -148,6 +188,6 @@ abstract contract AceVaultRig is WarpClock {
 
     /// @dev The successor principal that retires `debt` at the market's longest term, floored at `minPrincipal`: the retired roll's own sizing, kept test-side.
     function _succUp(MarketParams memory mp, uint256 debt) internal pure returns (uint256) {
-        return Math.max(RefinanceMath.principalForOwed(debt, mp.maxTenor, mp.baseBps, mp.minTenor), mp.minPrincipal);
+        return Math.max(RefinanceMath.principalForOwed(debt, mp.maxTenor, mp.lenderAprBps), mp.minPrincipal);
     }
 }

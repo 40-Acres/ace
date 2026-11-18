@@ -63,7 +63,7 @@ contract AceDrawCapTest is Test {
 
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(record);
-        p.baseBps = 1;
+        p.lenderAprBps = 1;
         p.price = T2;
         AceFixtures.Deployment memory d = AceFixtures.deploy(p);
         (ace, positionManager, read, id) = (d.ace, d.positionManager, d.read, d.id);

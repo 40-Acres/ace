@@ -5,21 +5,22 @@ import {Test, console2} from "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
-import {Loan} from "../../src/ace/hub/Types.sol";
+import {Loan, MarketParams} from "../../src/ace/hub/Types.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {AceReader} from "../utils/AceReader.sol";
 import {AceCoverageHandler} from "./AceCoverageHandler.sol";
 
 /// @title AceCoverageInvariants
 /// @notice TWO properties, in the decimal regime where they can actually fail: coverage, and no loss at settlement.
-/// @notice Settlement asks each funded tick for `ceil(claim_t x unitScale / price_t)` and the loan must hold the sum.
+/// @notice Settlement takes the keeper's sliver, then asks `ceil(claim x unitScale / price)`, and the loan must hold both.
 /// @dev The sibling leg in `AceInvariants` states the same thing over the 6-dec-quote harness, where it cannot bite.
-/// @dev That harness's `unitScale` is 1e30 against tick prices near 1e18, so a per-tick ceiling is negligible dust.
-/// @dev Here it is 1e8, one collateral wei buys ~1e10 of quote, and the whole coverage margin can be a few wei.
-/// @dev `AceLens` is the oracle for both quantities: this file keeps no arithmetic of its own to drift.
+/// @dev There one collateral wei buys ~1e-12 of quote, so the need's ceiling is negligible dust.
+/// @dev Here, 8-dec collateral against an 18-dec quote, one collateral wei buys ~1e10 of quote, and the whole coverage margin can be a few wei.
+/// @dev `AceLens` is the oracle for the need; the keeper's sliver, which no view exposes, is spelled once here from raw market fields.
 /// @dev THIS SUITE PINS ZERO, ON EVERY LOAN: no bound and no per-loan carve-out.
 /// @dev The withdrawal gate covers every verb but a SALE, and `LoanAccounting.securedBase` covers the sale.
 /// @dev It reserves `collateralNeeded + sliverUnits`, so no crank can take an atom settlement is going to need.
-/// @dev Never re-introduce a BOUND here: one bound cannot tell a gate defect from a sale residue, since both are a tick cap wide.
+/// @dev Never re-introduce a BOUND here: one bound cannot tell a gate defect from a sale residue, since both can be the same few atoms wide.
 /// @dev `erodedOnTheLine` is a REACH counter -- a campaign that never sold from a loan on its line has proved nothing.
 /// @dev Config (foundry.toml [invariant]): runs = 256, depth = 32, fail_on_revert = false.
 contract AceCoverageInvariantsTest is StdInvariant, Test {
@@ -66,18 +67,28 @@ contract AceCoverageInvariantsTest is StdInvariant, Test {
         _invariant_noSettlementRealizesALoss();
     }
 
-    /// @notice THE PROPERTY: every OPEN loan holds its own live claims, EXACTLY, with no bound and no carve-out.
+    /// @notice THE PROPERTY: every OPEN loan holds its own live claims plus the keeper's sliver, EXACTLY, with no bound and no carve-out.
     /// @notice The gate covers every verb but a sale, and the sale's own reserve covers the sale.
     /// @dev ONE assertion over every open loan: the state split this carried was DELETED, never merged into a bound.
-    /// @dev TEETH ON THE GATE: revert `Ace.withdrawCollateral` to gate on `requiredAt` and this fails on the line withdrawal.
+    /// @dev TEETH ON THE GATE: drop `requiredAt`'s coverage factor, so the line is the bare need plus one, and this fails on the line withdrawal.
+    /// @dev The `+1` atom itself is margin, so dropping it keeps this green; `test_CoverageLine_SaturatesAtTheSentinel_AndIsOneAtomAboveAdmissibility` pins it.
     /// @dev TEETH ON THE SALE: drop `securedBase`'s keep term and this fails on the deleverage.
     function _invariant_collateralCoversEveryLiveClaim() public view {
         uint256[] memory ids = handler.loanIds();
+        MarketParams memory p = ace.idToMarketParams(mid);
+        uint256 us = lens.marketState(mid).unitScale;
         for (uint256 i; i < ids.length; i++) {
             Loan memory l = read.loan(ids[i]);
             if (l.closedAt != 0) continue;
-            assertLe(lens.collateralNeeded(mid, ids[i]), l.collateralUnits, "coverage: a live loan cannot fill its own claims");
+            uint256 keep = lens.collateralNeeded(mid, ids[i]) + _sliver(l.debt, p.settleBountyBps, us, lens.fundingFloor(mid, ids[i]));
+            assertLe(keep, l.collateralUnits, "coverage: a live loan cannot fill its own claims and the keeper's sliver");
         }
+    }
+
+    /// @notice The keeper's sliver settlement takes off the lot first, UNCAPPED: debt x bounty bps at the loan's funding floor, floored.
+    /// @dev No view exposes it, so it is spelled here; a zero floor, a retired claim, gives zero, as the hub's does.
+    function _sliver(uint256 debt, uint256 bps, uint256 unitScale, uint256 floorPrice) internal pure returns (uint256) {
+        return floorPrice == 0 ? 0 : FullMath.mulDiv(debt * bps, unitScale, 10000 * floorPrice);
     }
 
     /// @notice THE CONSEQUENCE, read off the hub rather than off a view: NO settlement here realizes any loss.

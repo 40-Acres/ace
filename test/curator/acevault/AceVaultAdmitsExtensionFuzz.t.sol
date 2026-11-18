@@ -4,13 +4,14 @@ pragma solidity 0.8.36;
 import {PolicyRefused, TriggerAboveFloor} from "../../../src/ace/hub/Borrower.sol";
 import {Loan, MarketParams} from "../../../src/ace/hub/Types.sol";
 import {Extension, IRollPolicy} from "../../../src/interfaces/IRollPolicy.sol";
-import {AceVaultHarness} from "./AceVaultHarness.sol";
+import {AceVault} from "../../../src/curator/AceVault.sol";
+import {MockTerms} from "../vault/MockTerms.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
 
 /// @title AceVaultAdmitsExtensionFuzz
 /// @notice The vault as its own roll policy, fuzzed across a caller's ask: one consent, every leg.
-/// @notice The base consents exactly when the market is its own, the product's price and curator legs admit, and no drain stands.
-/// @notice CuratorVault's price leg is the record's windowed minimum at or over the price: one high print cannot win it.
+/// @notice The base consents exactly when the market is its own, no drain stands, its caps are open, its tenors sit in the rail, and the product consents.
+/// @notice The curated product's price leg is the record's windowed minimum at or over the price: one high print cannot win it.
 contract AceVaultAdmitsExtensionFuzzTest is AceVaultRig {
     bytes4 internal constant YES = IRollPolicy.admitsExtension.selector;
 
@@ -22,21 +23,25 @@ contract AceVaultAdmitsExtensionFuzzTest is AceVaultRig {
         (e.expiry, e.newExpiry, e.src, e.dst) = (l.expiry, l.expiry + MIN_TENOR, mp, mp);
     }
 
-    /// @notice THE BASE: on a product whose legs a row sets, the answer is the conjunction of the four.
-    function testFuzz_TheBaseConsentsExactlyWhenEveryLegAdmits(bool ours, bool priceOk, bool rollOk, bool drain) public {
-        AceVaultHarness h = new AceVaultHarness(_cfg());
+    /// @notice THE BASE: on a product whose consent a row sets, the answer is the conjunction of the six.
+    /// @dev The extension shortens nothing, so the exit gate is not asked; the market's tenors sit at the rig's week unless the rail leg is closed.
+    function testFuzz_TheBaseConsentsExactlyWhenEveryLegAdmits(bool ours, bool consent, bool drain, bool rowOpen, bool totalOpen, bool inRail) public {
+        (AceVault h, MockTerms t) = _onMockTerms();
         Extension memory e;
         e.dst.lender = ours ? address(h) : stranger;
-        h.setLegs(priceOk, rollOk);
-        if (drain) {
-            vm.prank(curator);
-            h.setDrain(true);
-        }
-        bool expected = ours && priceOk && rollOk && !drain;
+        e.dst.collateral = address(coll);
+        (e.dst.minTenor, e.dst.maxTenor) = (MIN_TENOR, inRail ? MIN_TENOR : h.MAX_TENOR() + 1);
+        t.setConsent(MockTerms.Mode.Answer, consent);
+        vm.startPrank(curator);
+        if (!rowOpen) h.submitCap(address(coll), 0);
+        if (!totalOpen) h.submitCap(address(h), 0);
+        if (drain) h.setDrain(true);
+        vm.stopPrank();
+        bool expected = ours && consent && !drain && rowOpen && totalOpen && inRail;
         assertEq(h.admitsExtension(e, ""), expected ? YES : bytes4(0), "the base's consent is not the conjunction of its legs");
     }
 
-    /// @notice THE PRICE LEG on the shipped CuratorVault, over every record minimum from zero to twice the price.
+    /// @notice THE PRICE LEG on the shipped AceVault, over every record minimum from zero to twice the price.
     /// @notice It is `minPrice >= price`, and a persisted fall below the price moves nothing: the leg reads the minimum alone.
     function testFuzz_ThePriceLegIsTheMinimumAtOrOverThePrice(uint256 mSeed, bool below) public {
         uint256 loanId = _borrow(MIN_TENOR);
@@ -55,7 +60,7 @@ contract AceVaultAdmitsExtensionFuzzTest is AceVaultRig {
         assertEq(vault.admitsExtension(e, ""), YES, "PREMISE: the vault consents to its own market as built");
         uint256 leg = which % 5;
         if (leg == 0) e.dst.record = address(_record(address(coll), 2e18));
-        else if (leg == 1) e.dst.baseBps += 1;
+        else if (leg == 1) e.dst.lenderAprBps += 1;
         else if (leg == 2) e.dst.minTenor += 1;
         else if (leg == 3) e.dst.maxTenor += 1;
         else e.dst.lender = stranger;

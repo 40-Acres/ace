@@ -875,7 +875,7 @@ contract LaunchForkTest is WarpClock {
         id = ace.createMarket(
             LaunchMarketParams.launchParams(
                 LaunchMarketParams.Ctx({
-                    quote: USDC, token: t, lender: lender, price: AceFixtures.px(0.01e18, USDC, t), baseBps: 40, minPrincipal: 10e6, minCoverageWad: 1.4e18
+                    quote: USDC, token: t, lender: lender, price: AceFixtures.px(0.01e18, USDC, t), lenderAprBps: 40, minPrincipal: 10e6, minCoverageWad: 1.4e18
                 })
             )
         );

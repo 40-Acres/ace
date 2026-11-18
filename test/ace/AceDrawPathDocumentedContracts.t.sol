@@ -38,8 +38,9 @@ contract AceDrawPathDocumentedContractsTest is WarpClock {
     uint64 internal constant GRID = 23 days;
     uint256 internal constant P = 70_000e6;
     uint256 internal constant COLL = 200_000e18;
-    uint256 internal constant FEE30 = 1_320e6; // 70_000 * 44 bps all-in * 30d/7d, ceiled
-    uint256 internal constant REFUND30_AT15 = 300e6; // half the lender fee, half the term left
+    uint256 internal constant RATE = 2190; // bps a year to the lender: 6 a day, so every figure below is exact
+    uint256 internal constant FEE30 = 1_386e6; // 70_000 * 2190 bps * 30/365 * 1.1, all-in
+    uint256 internal constant REFUND30_AT15 = 315e6; // half the escrow, half the term left
     uint256 internal constant TOPUP_AT15 = FEE30 - REFUND30_AT15;
 
     uint256 internal HIGH; // this pair's par price, assigned in setUp: par is not a compile-time value
@@ -59,6 +60,7 @@ contract AceDrawPathDocumentedContractsTest is WarpClock {
         p.record = address(record);
         p.minTenor = TEN7;
         p.maxTenor = TEN30;
+        p.lenderAprBps = RATE;
         AceFixtures.Deployment memory d = AceFixtures.deploy(p);
         (ace, pm, read, id) = (d.ace, d.positionManager, d.read, d.id);
         fin = IAceRefinance(address(ace));
@@ -111,7 +113,7 @@ contract AceDrawPathDocumentedContractsTest is WarpClock {
 
         MarketParams memory p = ace.idToMarketParams(id);
         uint256 pNew = 80_000e6;
-        uint256 out = pNew - LoanMath.originationFee(pNew, TEN30, p.baseBps, p.minTenor) + read.earlyExitRefund(oldId) - P;
+        uint256 out = pNew - LoanMath.originationFee(pNew, TEN30, p.lenderAprBps) + read.earlyExitRefund(oldId) - P;
         assertGt(out, 0, "fixture: this refinance really does pay the borrower a net out");
 
         vm.prank(borrower);

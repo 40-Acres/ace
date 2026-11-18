@@ -17,7 +17,7 @@ import {AceReader} from "../utils/AceReader.sol";
 import {_extended} from "../utils/Extended.sol";
 
 /// @title HubAuditPoC
-/// @notice The PoC rows of the 2026-10-18 hub audit suite (`docs/ai/audit/findings/hub-audit-suite-2026-10-18.md`), main `58da8e3c`.
+/// @notice The PoC rows of the 2026-10-18 hub audit suite (the internal record).
 /// @notice Every row is a MEASUREMENT of a disclosed or newly-named mechanism, named `test_<Row>_*`; a row that would FAIL on current code is `test_RED_*`.
 /// @dev One hub and one record-backed USDC/COLL market lent by alice at par; the record's minimum sits 10% over par, so the ask lifts to it.
 /// @dev Row D stands up a second market on a blacklisting quote, since the shipped mock has no transfer hook a treasury can refuse by.
@@ -70,7 +70,7 @@ contract HubAuditPoC is WarpClock {
         p = AceFixtures.marketParams(quote, address(coll));
         p.record = record;
         p.lender = alice;
-        p.baseBps = 40;
+        p.lenderAprBps = 40;
         p.minTenor = TEN7;
         p.maxTenor = TEN7;
         p.settleBountyBps = 50;
@@ -133,7 +133,7 @@ contract HubAuditPoC is WarpClock {
     /* ================================================================== */
 
     /// @notice A buyer who pays one quote atom under the whole-pot charge takes everything but a tail worth ZERO quote atoms, and the tail stays an unsold pot.
-    /// @notice Any CuratorVault lending in this pair reads `unsoldPots == 1` and shuts entry over a pot nobody can value above zero; two quote atoms clear it.
+    /// @notice Any AceVault lending in this pair reads `unsoldPots == 1` and shuts entry over a pot nobody can value above zero; two quote atoms clear it.
     /// @dev The counter does what `lenderUnresolved`'s NatSpec says ("a partial sale leaves it counted"); the row prices how little the partial can leave.
     function test_A1_ATailWorthZeroQuoteAtomsStaysAnUnsoldPot_TwoAtomsClearIt() public {
         uint256 loanId = _open(id, borrower, P);

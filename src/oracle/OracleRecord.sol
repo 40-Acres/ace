@@ -59,7 +59,7 @@ contract OracleRecord is IPersistenceRecord {
 
     /// @notice Below-ness NOW, health-gated; this class holds no window to measure against.
     /// @dev HAVING NO WINDOW IS CORRECT AND RULED, not an omission to be repaired.
-    /// @dev An ORACLE class is TRUSTED BY CONSTRUCTION, one publisher; a market wanting observation time names a windowed record, which ACE ships none of.
+    /// @dev An ORACLE class is TRUSTED BY CONSTRUCTION, one publisher; a market wanting observation time names a windowed record, such as `NftAccountRecord`.
     /// @dev Consequence, accepted: one bad print is settleable in the block it lands. Choose the feed.
     function persistedBelowDistress(address quote, address collateral, uint256 x) external view returns (bool) {
         _requirePair(quote, collateral);

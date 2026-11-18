@@ -31,4 +31,11 @@ contract MockAggregatorOverApi3 is IAggregatorV3 {
         (int224 v, uint32 ts) = PROXY.read();
         return (uint80(ts), int256(v) / int256(SCALE), ts, ts, uint80(ts));
     }
+
+    /// @notice The current round alone, as a dAPI keeps no history: any other id has no data.
+    function getRoundData(uint80 id) external view returns (uint80, int256, uint256, uint256, uint80) {
+        (int224 v, uint32 ts) = PROXY.read();
+        require(id == uint80(ts), "No data present");
+        return (id, int256(v) / int256(SCALE), ts, ts, id);
+    }
 }

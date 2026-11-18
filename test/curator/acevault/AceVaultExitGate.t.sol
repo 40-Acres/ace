@@ -11,7 +11,7 @@ import {PolicyGasMeter} from "../../utils/PolicyGasMeter.sol";
 import {POLICY_YES} from "../../utils/RollPolicyMocks.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
 
-/// @notice The exit gate's shared helpers over the CuratorVault rig: the real hub verb, and request worth priced as the gate prices it.
+/// @notice The exit gate's shared helpers over the AceVault rig: the real hub verb, and request worth priced as the gate prices it.
 abstract contract AceVaultExitGateBase is AceVaultRig {
     /// @dev A loan of `tenor` through the rig, a day old: in its open second an extension adds no time, so every gate row starts here.
     function _borrowAged(uint64 tenor) internal returns (uint256 loanId) {
@@ -23,7 +23,7 @@ abstract contract AceVaultExitGateBase is AceVaultRig {
     function _fundFee(address who, uint256 loanId) internal {
         Loan memory l = read.loan(loanId);
         MarketParams memory mp = ace.idToMarketParams(l.market);
-        uint256 fee = LoanMath.originationFee(l.debt, uint64(_now()) + l.tenor - l.expiry, mp.baseBps, mp.minTenor);
+        uint256 fee = LoanMath.originationFee(l.debt, uint64(_now()) + l.tenor - l.expiry, mp.lenderAprBps);
         usdc.mint(who, fee);
         vm.prank(who);
         usdc.approve(address(ace), fee);
@@ -97,7 +97,7 @@ contract AceVaultExitGateTest is AceVaultExitGateBase {
         (bool ok,,) = ace.tryExtend(loanId, 0, "", borrower);
         assertTrue(ok, "PREMISE: with no request standing the vault consents");
         _requestAll(alice);
-        assertGt(_worth(vault.requestedShares()), vault.idle(), "PREMISE: the requests outweigh idle");
+        assertGt(_worth(vlens.requestedShares(address(vault))), vault.idle(), "PREMISE: the requests outweigh idle");
         _assertRefused(loanId);
     }
 
@@ -127,7 +127,7 @@ contract AceVaultExitGateTest is AceVaultExitGateBase {
         bytes32 mid = _mid(loanId);
         uint256 x = _expiry(loanId);
         uint256 all = _requestAll(alice);
-        assertGt(_worth(vault.requestedShares()), vault.idle(), "PREMISE: the requests outweigh idle");
+        assertGt(_worth(vlens.requestedShares(address(vault))), vault.idle(), "PREMISE: the requests outweigh idle");
         uint256 snap = vm.snapshotState();
         uint256 debt = read.debtOf(loanId);
         vm.prank(borrower);
@@ -157,15 +157,15 @@ contract AceVaultExitGateTest is AceVaultExitGateBase {
         uint256 half = _sharesWorth(vault.idle() / 2);
         vm.prank(alice);
         vault.requestExit(half);
-        assertGt(vault.requestedShares(), 0, "PREMISE: a request stands, so the gate prices it");
-        assertLe(_worth(vault.requestedShares()), vault.idle(), "PREMISE: idle covers it");
+        assertGt(vlens.requestedShares(address(vault)), 0, "PREMISE: a request stands, so the gate prices it");
+        assertLe(_worth(vlens.requestedShares(address(vault))), vault.idle(), "PREMISE: idle covers it");
         _assertLands(loanId);
     }
 
     /// @notice A request worth one atom blocks every extension of a fully lent vault, and a hub push covers it with no vault verb between.
     function test_ADustRequestBlocksAFullyLentVaultUntilAHubPushCoversIt() public {
-        vault = _newVault(_row(address(record), type(uint192).max));
-        _lp(bob, 2 * PRINCIPAL);
+        vault = _newVault(_row(address(record)));
+        _lp(bob, 2 * PRINCIPAL - vault.MIN_SEED()); // with the genesis seed, exactly the two loans' principal
         uint256 a = _borrow(MIN_TENOR);
         uint256 b = _borrowAs(stranger, UNITS, PRINCIPAL, MIN_TENOR);
         _warpBy(1 days);
@@ -219,14 +219,14 @@ contract AceVaultExitGateTest is AceVaultExitGateBase {
         assertLt(aliceShares, vault.balanceOf(alice), "PREMISE: alice's request is partial");
         vm.prank(alice);
         vault.requestExit(aliceShares);
-        (, uint64 expiresAt) = vault.requestOf(alice);
+        (, uint64 expiresAt) = vlens.requestOf(address(vault), alice);
 
         _warpBy(1 days);
-        assertEq(vault.requestedShares(), aliceShares, "PREMISE: alice's request stands");
+        assertEq(vlens.requestedShares(address(vault)), aliceShares, "PREMISE: alice's request stands");
         assertGe(vault.lendable(), PRINCIPAL, "the vault still lends past a standing request");
         uint256 loanId = _borrowAged(MAX_TENOR);
         assertTrue(ace.isLiveLoan(loanId), "the loan opened from the unheld cash");
-        assertEq(vault.requestedShares(), aliceShares, "PREMISE: the request still stands");
+        assertEq(vlens.requestedShares(address(vault)), aliceShares, "PREMISE: the request still stands");
         (bool ok,,) = ace.tryExtend(loanId, 0, "", borrower);
         assertTrue(ok, "CONTROL: idle still covers alice's request, so the extension would land");
 
@@ -234,14 +234,14 @@ contract AceVaultExitGateTest is AceVaultExitGateBase {
         vault.requestExit(bobShares);
         vault.claimExit(bobShares, bob, 0);
         vm.stopPrank();
-        assertGt(_worth(vault.requestedShares()), vault.idle(), "PREMISE: bob's claim left alice's request outweighing idle");
+        assertGt(_worth(vlens.requestedShares(address(vault))), vault.idle(), "PREMISE: bob's claim left alice's request outweighing idle");
         _assertRefused(loanId);
 
         _warpTo(expiresAt);
         assertLt(_now(), _expiry(loanId), "PREMISE: the request lapses inside the term");
         vm.prank(stranger);
         vault.lapseExit(alice);
-        assertEq(vault.requestedShares(), 0, "PREMISE: the lapse cleared the request");
+        assertEq(vlens.requestedShares(address(vault)), 0, "PREMISE: the lapse cleared the request");
         _assertLands(loanId);
     }
 
@@ -256,7 +256,7 @@ contract AceVaultExitGateTest is AceVaultExitGateBase {
         uint256 shares = _sharesWorth(idle + shortfall);
         vm.prank(alice);
         vault.requestExit(shares);
-        (, uint64 expiresAt) = vault.requestOf(alice);
+        (, uint64 expiresAt) = vlens.requestOf(address(vault), alice);
         assertGe(expiresAt, x, "PREMISE: the request lapses no earlier than the loan matures");
         _assertRefused(loanId);
 
@@ -264,7 +264,7 @@ contract AceVaultExitGateTest is AceVaultExitGateBase {
         _warpTo(expiresAt);
         vm.prank(stranger);
         vault.lapseExit(alice);
-        assertEq(vault.requestedShares(), 0, "PREMISE: the lapse cleared the request");
+        assertEq(vlens.requestedShares(address(vault)), 0, "PREMISE: the lapse cleared the request");
         (bool ok, bytes4 why,) = ace.tryExtend(loanId, 0, "", borrower);
         assertFalse(ok, "the lapse came too late: the loan cannot extend");
         assertEq(why, LoanMatured.selector, "it has matured");
@@ -287,7 +287,7 @@ contract AceVaultExitGateTest is AceVaultExitGateBase {
     function test_KNOWN_TheRoundTripLandsWhileEntryIsOpen() public {
         uint256 loanId = _borrowAged(MIN_TENOR);
         _requestAll(alice);
-        uint256 shortfall = _worth(vault.requestedShares()) - vault.idle() + 1;
+        uint256 shortfall = _worth(vlens.requestedShares(address(vault))) - vault.idle() + 1;
         usdc.mint(borrower, shortfall);
         vm.startPrank(borrower);
         usdc.approve(address(vault), shortfall);
@@ -300,7 +300,7 @@ contract AceVaultExitGateTest is AceVaultExitGateBase {
         vm.stopPrank();
         assertEq(_expiry(loanId), _now() + MIN_TENOR, "the extension landed");
         assertApproxEqAbs(back, shortfall, 2, "the borrower took its deposit back, first come");
-        assertGt(_worth(vault.requestedShares()), vault.idle(), "and the older requests are as uncovered as before");
+        assertGt(_worth(vlens.requestedShares(address(vault))), vault.idle(), "and the older requests are as uncovered as before");
     }
 
     /// @notice B-1: an unsold pot shuts entry, so the round trip cannot start and the gate binds.
@@ -352,7 +352,7 @@ contract AceVaultExitGateTest is AceVaultExitGateBase {
         uint256 loanId = _borrowAged(MIN_TENOR);
         vm.prank(curator);
         vault.setDrain(true);
-        assertEq(vault.requestedShares(), 0, "PREMISE: no request stands");
+        assertEq(vlens.requestedShares(address(vault)), 0, "PREMISE: no request stands");
         _assertRefused(loanId);
         _requestAll(alice);
         _assertRefused(loanId);
@@ -373,7 +373,7 @@ contract AceVaultExitGateTest is AceVaultExitGateBase {
 }
 
 /// @title AceVaultExitGateGasTest
-/// @notice The vault's policy with a standing request, asked by the hub in the real order, costs under 150k of the 200k budget.
+/// @notice The vault's policy with a standing request, asked by the hub in the real order, costs under 150k of the 220k budget.
 /// @dev Every setup write lands in `setUp`, so the extension the row sends meets the vault's state cold, as a borrower's own transaction does.
 contract AceVaultExitGateGasTest is AceVaultExitGateBase {
     uint256 internal constant BOUND = 150_000;
@@ -385,7 +385,7 @@ contract AceVaultExitGateGasTest is AceVaultExitGateBase {
         uint256 shares = _sharesWorth(vault.idle() / 2);
         vm.prank(alice);
         vault.requestExit(shares);
-        assertGt(vault.requestedShares(), 0, "PREMISE: a request stands, so the gate prices it");
+        assertGt(vlens.requestedShares(address(vault)), 0, "PREMISE: a request stands, so the gate prices it");
         PolicyGasMeter meter = new PolicyGasMeter(IRollPolicy(address(vault)), BOUND);
         vm.prank(address(vault));
         ace.setRollPolicy(address(meter));

@@ -259,7 +259,7 @@ contract AceS10ValueFlowTest is WarpClock {
         _warpBy(10 days);
         uint256 esc = read.feeEscrowOf(id);
         uint256 refundOld = FullMath.mulDiv(esc, 20 days, 30 days);
-        uint256 feeNew = LoanMath.originationFee(4_000e6, 30 days, 40, 7 days);
+        uint256 feeNew = LoanMath.originationFee(4_000e6, 30 days, ace.idToMarketParams(midRec).lenderAprBps);
         uint256 expectedOut = 4_000e6 - feeNew + refundOld - 3_000e6;
 
         uint256 cashBefore = read.marketState(midRec).cash;
@@ -284,7 +284,7 @@ contract AceS10ValueFlowTest is WarpClock {
         uint256 id = _open(midRec, COLL, 3_000e6, 30 days);
         uint256 refundOld = read.feeEscrowOf(id); // same block: nothing earned yet
         uint256 newP = 2_990e6;
-        uint256 feeNew = LoanMath.originationFee(newP, 7 days, 40, 7 days);
+        uint256 feeNew = LoanMath.originationFee(newP, 7 days, ace.idToMarketParams(midRec).lenderAprBps);
         uint256 expectedOut = newP - feeNew + refundOld - 3_000e6;
         (,, uint256 owedBefore) = read.lenderPools(L1, address(usdc));
         uint256 cashBefore = read.marketState(midRec).cash;
@@ -364,7 +364,8 @@ contract AceS10ValueFlowTest is WarpClock {
         _books("extend");
         assertTrue(_extended(read, id, x), "premise: the extension landed in place");
 
-        assertEq(fee, LoanMath.originationFee(md, 7 days - 1, 40, 7 days), "the fee is charged on the loan's own debt, for the time added");
+        uint256 rate = ace.idToMarketParams(read.loan(id).market).lenderAprBps;
+        assertEq(fee, LoanMath.originationFee(md, 7 days - 1, rate), "the fee is charged on the loan's own debt, for the time added");
         assertEq(read.loan(id).debt, md, "and the debt stays its own: the fee did not join it");
         assertEq(read.quoteOwedOf(id, BORROWER), 0, "BOOKED: nothing is credited, since nothing was drawn");
         assertEq(walletBefore - usdc.balanceOf(BORROWER), fee, "MOVED: the borrower paid the fee");

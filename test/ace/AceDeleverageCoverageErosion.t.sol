@@ -231,7 +231,7 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
 
     /* ===================== the shipped-shape reproduction ===================== */
 
-    /// @notice THE HEADLINE, INVERTED: at SHIPPED-shape dials a 400-crank decline stops ON the claim-tick floor.
+    /// @notice THE HEADLINE, INVERTED: at SHIPPED-shape dials a 400-crank decline stops one atom clear of the need's floor.
     /// @notice k = 1.4, eps = 100 bps, no protocol cut, band 3000 / target 4000 / stop 1000.
     /// @notice This row was written to prove the breach and its fixture is unchanged; only its subject moved.
     /// @dev The genesis sell-max rail clears by ~0.486e18 here, so no rail margin is doing the holding.
@@ -257,10 +257,9 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
         assertEq(shortUnits, 0, "an admitted loan must not settle short after a decline it survived");
     }
 
-    /// @notice The SAME sequence at the SHIPPED claim-tick cap, which is 10 and not the 32 ceiling.
-    /// @notice `Defaults.MAX_CLAIM_TICKS` is 10, so 32 is creator-admissible rather than what ships.
-    /// @dev The floor `need` bottoms out at is the LIVE TICK COUNT, so a lower cap lowers the floor with it.
-    /// @dev That made the breach EASIER to reach before the reserve, so the cap is worth pinning both ways.
+    /// @notice The SAME sequence over 10 lots of cash rather than 32, the count that was once the shipped claim-tick cap.
+    /// @notice A draw funds one claim whatever the lot count, so `need` bottoms out at the same ONE ATOM.
+    /// @dev The floor once moved with the live tick count, which is why this row was pinned; it is a control now.
     function test_ShippedTickCap_TenClaimTicks_AlsoStopsOnTheFloor() public {
         Shape memory sh = _shipped();
         uint256 loanId = _decline(sh, 0, 10, 60_000, 400);
@@ -340,7 +339,7 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
     function testFuzz_DeleveragedLoan_IsAlwaysCoveredAtSettlement(uint256 dialSeed, uint256 decSeed, uint256 unitSeed) public {
         uint256 units = bound(unitSeed, 8, 4_000);
         Shape memory sh = _fuzzShape(dialSeed, decSeed, units);
-        if (units <= 4 * sh.lots) return; // too few atoms to carry one atom per funded tick
+        if (units <= 4 * sh.lots) return; // the thinnest shapes skip, as when each funded tick needed its own atom
 
         uint256 loanId = _declineOrSkip(sh, units, 200);
         if (loanId == 0) return; // the fixture could not open a loan at this shape

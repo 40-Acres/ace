@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 
 /// @notice An exit request placed by an address holding NO shares: the phantom request through the front door, closed by escrow.
 /// @dev A request moves real shares onto the vault, so a holder of none cannot request any and an escrow cannot leave.
@@ -16,7 +16,7 @@ contract CuratorVaultPhantomOrderTest is CuratorVaultBase {
 
     address internal mallory = address(0xBAD);
 
-    CuratorVault internal v;
+    AceVault internal v;
     uint256 internal loanId;
 
     function setUp() public override {
@@ -36,7 +36,7 @@ contract CuratorVaultPhantomOrderTest is CuratorVaultBase {
     }
 
     function _escrow(address who) internal view returns (uint256 shares) {
-        (shares,) = v.requestOf(who);
+        (shares,) = vlens.requestOf(address(v), who);
     }
 
     // ---- premise ----
@@ -52,7 +52,7 @@ contract CuratorVaultPhantomOrderTest is CuratorVaultBase {
     function test_AStrangerCannotStandAnOrderAtAll() public {
         _phantomRefused();
         assertEq(_escrow(mallory), 0, "nothing was stored for an address that holds nothing");
-        assertEq(v.requestedShares(), 0, "and the request total never moved");
+        assertEq(vlens.requestedShares(address(v)), 0, "and the request total never moved");
     }
 
     /// @dev The bound is on the BALANCE, not on the caller: a real holder is refused the same way past their own.
@@ -82,12 +82,12 @@ contract CuratorVaultPhantomOrderTest is CuratorVaultBase {
         uint256 a0 = v.balanceOf(alice);
         vm.prank(alice);
         v.requestExit(a0);
-        (uint256 ex0, uint256 held0) = v.holds();
+        (uint256 ex0, uint256 held0) = vlens.holds(address(v));
         assertGt(held0, 0, "PREMISE: the request holds the cash already idle, at once");
         assertEq(held0, ex0, "PREMISE: all of it, her request being worth more than the cash left");
         _repay(loanId, BACK);
         v.crank(); // the repayment reaches the vault's balance at the crank
-        (uint256 exitable, uint256 held) = v.holds();
+        (uint256 exitable, uint256 held) = vlens.holds(address(v));
         assertEq(held, exitable, "the repayment joined the hold her request earned");
         uint256 m = v.maxClaim(alice); // BEFORE the prank: a read is a call, and a call would eat it
         vm.prank(alice);
@@ -120,7 +120,7 @@ contract CuratorVaultPhantomOrderTest is CuratorVaultBase {
         v.transfer(bob, a0 / 2);
         vm.stopPrank();
         assertEq(_escrow(alice), a0, "the request stands untouched");
-        assertEq(v.balanceOf(address(v)), v.requestedShares(), "and every requested share is still escrowed behind it");
+        assertEq(v.balanceOf(address(v)), vlens.requestedShares(address(v)) + v.SEED_SHARES(), "and every requested share is still escrowed behind it");
     }
 
     /// @dev A request is ADDITIVE: each call moves real shares in, so a second one adds to the first; a cancel is what hands shares back.
@@ -132,7 +132,7 @@ contract CuratorVaultPhantomOrderTest is CuratorVaultBase {
         v.requestExit(a0 / 4);
         vm.stopPrank();
         assertEq(_escrow(alice), a0 / 2, "and the second ADDS to it rather than replacing it");
-        assertEq(v.requestedShares(), a0 / 2, "with the total accumulating in step");
+        assertEq(vlens.requestedShares(address(v)), a0 / 2, "with the total accumulating in step");
         assertEq(v.balanceOf(alice), a0 - a0 / 2, "and the rest of her shares are still free");
     }
 }

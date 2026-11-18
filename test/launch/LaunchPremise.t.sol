@@ -64,7 +64,7 @@ contract LaunchPremiseTest is RunwayFixture {
                     token: m.token,
                     lender: lender,
                     price: AceFixtures.px(0.1e18, address(usdc), m.token),
-                    baseBps: 40,
+                    lenderAprBps: 40,
                     minPrincipal: 10e6,
                     minCoverageWad: 1.4e18
                 })

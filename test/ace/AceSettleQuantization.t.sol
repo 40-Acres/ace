@@ -35,8 +35,8 @@ contract AceSettleQuantizationTest is Test {
     uint256 internal constant T0 = 1 << 96; // the frame's one-to-one price: one collateral atom buys one quote atom
     uint256 internal constant LADDER = 20_000e6;
     uint256 internal constant DRAW = 4_500e6;
-    uint256 internal constant COVERED_0DEC = 35; // the coverage line at T_HI: requiredAt is 3 atoms, plus the 32-tick cap
-    uint256 internal constant COVERED_AT_T0 = 7_000_000_000; // the same line at tick 0, where one atom buys one atom
+    uint256 internal constant COVERED_0DEC = 35; // over the coverage line at T_HI, which is requiredAt's 3 atoms plus one; sized when it carried a 32-tick cap
+    uint256 internal constant COVERED_AT_T0 = 7_000_000_000; // over the line at T0 too, where one atom buys one atom
 
     function setUp() public {
         vm.warp(1_000_000);

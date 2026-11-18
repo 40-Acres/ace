@@ -57,7 +57,7 @@ contract AceDeployCapTest is Test {
         p.record = address(0);
         p.fillFeeBps = 25; // under the absolute cap, the fill fee's only rail
         p.minCoverageWad = PocDeployConfig.MIN_COVERAGE_WAD;
-        p.baseBps = PocDeployConfig.BASE_BPS;
+        p.lenderAprBps = PocDeployConfig.LENDER_APR_BPS;
         p.minTenor = ProtocolPolicy.MIN_TENOR;
         p.maxTenor = ProtocolPolicy.MAX_TENOR;
         p.minPrincipal = PocDeployConfig.MIN_PRINCIPAL;

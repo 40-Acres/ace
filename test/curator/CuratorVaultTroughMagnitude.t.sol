@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {AceInventoryLens} from "../../src/ace/lens/AceInventoryLens.sol";
 import {Storage} from "../../src/ace/hub/Types.sol";
 import {PriceFrame} from "../utils/PriceFrame.sol";
@@ -25,7 +25,7 @@ contract CuratorVaultTroughMagnitudeTest is CuratorVaultBase {
     uint256 internal constant DRAW = 6_000e6;
 
     /// @dev A vault holding ONE loan, cranked, then settled. The trough is open when this returns.
-    function _settled(CuratorVault v) internal returns (uint256 loanId) {
+    function _settled(AceVault v) internal returns (uint256 loanId) {
         _lpDeposit(v, alice, SEED);
         loanId = _open(DRAW);
         _crank(v, loanId, T2, 0);
@@ -35,7 +35,7 @@ contract CuratorVaultTroughMagnitudeTest is CuratorVaultBase {
 
     /// @notice THE SIZE OF THE HOLE: how far NAV falls, and how much of that fall is recoverable value.
     function test_Magnitude_HowFarNavFallsAndHowMuchOfItIsRecoverable() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(DRAW);
         _crank(v, loanId, T2, 0);
@@ -61,7 +61,7 @@ contract CuratorVaultTroughMagnitudeTest is CuratorVaultBase {
     /// @notice AN ENTRANT AT THE TROUGH IS REFUSED UNTIL THE POT SELLS, so it captures none of the recovery.
     /// @dev The trough gate is deleted; the settled pot is unsold, so Bob's deposit reverts `InventoryUnsold` and mints no share.
     function test_Magnitude_AnEntrantIntoTheTroughIsRefusedUntilTheSale() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _settled(v);
         assertGt(read.invPotOf(mid, loanId), 0, "PREMISE: the settled pot is unsold");
         _assertEntryWaitsForTheSale(v, bob);
@@ -71,7 +71,7 @@ contract CuratorVaultTroughMagnitudeTest is CuratorVaultBase {
     /// @dev The row above refuses the trough entrant; this one shows the entry the sale reopens is priced fairly.
     /// @dev Bob enters once the recovery has VESTED: before that, the pile gate refuses him.
     function test_Magnitude_EnteringAfterTheRecoveryCapturesNothing() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _settled(v);
 
         AceInventoryLens inv = new AceInventoryLens(address(ace), address(lens));
@@ -97,7 +97,7 @@ contract CuratorVaultTroughMagnitudeTest is CuratorVaultBase {
     /// @dev The rig's `minPrice = 2e18` over a market the door prices at half of it is what inflated the earlier rows 2x:
     /// @dev `_convertClaim` sizes the pot at the market's price while the mark takes `max(price, recordMin)`.
     function test_Magnitude_TheTroughIsLargestWhenTheRecoveryIsBest() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(DRAW);
         _crank(v, loanId, T2, 0);
@@ -137,7 +137,7 @@ contract CuratorVaultTroughMagnitudeTest is CuratorVaultBase {
 
     /// @dev Settle one loan at a chosen recovery rate and report the trough it opens.
     function _measureAt(uint256 recoveryBps) internal {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, U_SEED);
         uint256 loanId = _open(U_DOOMED);
         record.setMinPrice(T2); // AT par, after the door priced its market: stops `inventoryMark` inflating the pot
@@ -177,7 +177,7 @@ contract CuratorVaultTroughMagnitudeTest is CuratorVaultBase {
         _measureAt(10000);
     }
 
-    function _depositAs(CuratorVault v, address who, uint256 amt) internal returns (uint256 shares) {
+    function _depositAs(AceVault v, address who, uint256 amt) internal returns (uint256 shares) {
         usdc.mint(who, amt);
         vm.startPrank(who);
         usdc.approve(address(v), amt);

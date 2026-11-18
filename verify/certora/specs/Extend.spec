@@ -3,9 +3,13 @@
 //
 // An extension lengthens a live loan IN PLACE: the same id and title, its term re-anchored at now and run for the loan's
 // own tenor again, so the new expiry is `now + tenor`, at most `now + maxTenor`, and the tenor never moves. It lands only
-// strictly inside the term: in the open second it adds no time and refuses, and from the expiry second it refuses
-// `LoanMatured`. Its fee is `originationFee(debt, newExpiry - expiry, ...)`, the fee on the time it adds, and the CALLER
-// pays it in cash: the protocol cut to revenue, the tick cut to `owed`, the escrow cut funded. First the funded escrow
+// strictly inside the term: at `expiry - tenor` it adds no time and refuses, and from the expiry second it refuses
+// `LoanMatured`. Its fee is `originationFee(debt, newExpiry - expiry, ...)`, the fee on the time it adds, and the CALLER,
+// whoever it is, pays it in cash: the protocol cut to revenue, the tick cut to `owed`, the escrow cut funded. A caller who
+// is neither the holder nor an operator of its title lands only with the record at or above the price, the trigger out of
+// the deleverage band, and at most a quarter of the tenor left. A top-up (`drawMore`) moves the debt and the claim by
+// exactly its amount and re-anchors the fee schedule at now, so `openTime` is the schedule's start, and `addCollateral`
+// moves the lot alone. First the funded escrow
 // earns on the old schedule, its earned part into `owed`. The debt and the claim never move, and resting cash never funds
 // an extension. The market lender's roll policy is asked LAST, through one gas-capped STATICCALL, before any write; no
 // policy, or any answer but its selector, refuses. `refinanceTo` refuses from the expiry second before any write or ask;
@@ -21,9 +25,13 @@
 //   - each `FullMath` mulDiv the prover can locate is an uninterpreted, deterministic function. The fee rule compares the
 //     verb against `originationFeeOf`, which runs the same `LoanMath.originationFee` on the same summary.
 //   - the record and admission legs (`tryRecordState`, `_admissibleLeg`) and the open path's gates and health arithmetic,
-//     as HubLeanGates.spec does: `view` or `pure`, so "returns anything, never reverts" is a superset. The extension's
-//     caller, matured, no-time and borrower-rule legs stay REAL, as do `_preChecks`, `_payoutCheck`, `_askPolicy`'s
-//     zero-policy test and the refinance gate.
+//     as HubLeanGates.spec does: `view` or `pure`, so "returns anything, never reverts" is a superset. The record's answer
+//     is RECORDED into persistent ghosts as it is returned, still unconstrained, so a rule can read the cap the verb saw.
+//     The extension's matured, no-time and borrower-rule legs and the non-holder rule stay REAL, as do `_preChecks`,
+//     `_payoutCheck`, `_askPolicy`'s zero-policy test and the refinance gate.
+//   - THE HOLDER TEST, `Borrower.actsForHolder`, asks the title collection, which is NONDET here; it is summarized to an
+//     uninterpreted ghost of (loan, holder, caller), so a rule names which callers count as the holder. If via-IR inlines
+//     it the summary fails to bind and the non-holder rule FAILS rather than passes: read the run's "unable to locate" lines.
 //   - THE POLICY ASK, `Probe.askBool`: a STATICCALL writes nothing, so answering anything is a superset. Its summary records
 //     that it ran, whom it asked, with what budget, for which word, and the answer. It never reverts, where the real one
 //     reverts `PolicyGasShort` on a short limit, which only adds paths. If via-IR inlines it, the rules reading the record
@@ -35,8 +43,9 @@
 // code; `anExtensionCanPullItsFee` and `aRefinanceCanPayOut` prove a pull and a payout move it.
 // THE DOMAIN, stated: the quote under proof is not the market's collateral, its record, the custodian or the title
 // collection, and the clock is real and past the loan's open.
-// NO WRITE BEFORE THE ASK is read off a RAW store hook, which sees every slot the hub writes, packed or not; the reentrancy
-// guard is transient and never reaches it. `theStoreHookSeesAnExtensionsWrites` is its witness.
+// NO WRITE BEFORE THE ASK is ExtendAskOrder.spec's, and so is every rule that reads it: its raw store hook needs storage
+// splitting off, so it runs in its own conf. Splitting here also needs the hub's two `extsload` views gone, since a raw
+// sload turns it off for the whole contract: scripts/certora-munge.sh cuts them from the munged copy.
 
 using DummyERC20 as quoteToken;
 
@@ -44,9 +53,12 @@ methods {
     function FullMath.mulDiv(uint256 a, uint256 b, uint256 d) internal returns (uint256) => fmDown(a, b, d);
     // NO SUMMARY for mulDivRoundingUp: via-IR inlines it, so one cannot bind and requesting it fails the run. Its body runs on the mulDiv above; see HubLoans.spec.
 
-    // the extension's read-only record and admission legs
-    function Borrower.tryRecordState(ExtendHarness.Cfg memory) internal returns (bool, ExtendHarness.RecordState, uint256) => NONDET;
+    // the extension's read-only record and admission legs; the record's answer is recorded, unconstrained
+    function Borrower.tryRecordState(ExtendHarness.Cfg memory) internal returns (bool, ExtendHarness.RecordState, uint256) => recordSays();
     function Borrower._admissibleLeg(ExtendHarness.Cfg memory, uint256, uint256, uint256, uint256) internal returns (bytes4) => NONDET;
+    // the holder test, an uninterpreted ghost: which callers count as the holder is the rule's to name
+    function Borrower.actsForHolder(ExtendHarness.Cfg memory, uint256 id, address holder, address caller) internal returns (bool)
+        => holderTest(id, holder, caller);
     // the open path's gates and the health arithmetic, as HubLeanGates.spec summarizes them
     function Borrower._gateCheck(ExtendHarness.Cfg memory, Borrower.OpenArgs memory) internal => NONDET;
     function Borrower._previewFloor(ExtendHarness.Market storage, ExtendHarness.Cfg memory, uint256) internal returns (uint256) => NONDET;
@@ -91,6 +103,8 @@ methods {
     function marketOf(bytes32) external returns (address, uint256, uint256, uint256) envfree;
     function marketWiringOf(bytes32) external returns (address, address, address) envfree;
     function marketTermsOf(bytes32) external returns (uint64, uint64, uint256) envfree;
+    function priceOf(bytes32) external returns (uint256) envfree;
+    function bandLevelOf(uint256) external returns (uint256) envfree;
     function originationFeeOf(bytes32, uint256, uint64) external returns (uint256) envfree;
     function drawCountOf(bytes32) external returns (uint64) envfree;
     function poolOf(bytes32) external returns (uint256, uint256, uint256) envfree;
@@ -103,6 +117,25 @@ methods {
 }
 
 persistent ghost fmDown(uint256, uint256, uint256) returns uint256;
+
+// which callers the hub counts as a loan's holder: the holder, or an operator of its title, as the collection answers
+persistent ghost holderTest(uint256, address, address) returns bool;
+
+// ---- the record's answer, recorded as the verb receives it; every value stays unconstrained, so this is NONDET's superset ----
+
+persistent ghost bool recordRead;
+persistent ghost bool recordLive;
+persistent ghost uint256 recordCap;
+
+function recordSays() returns (bool, ExtendHarness.RecordState, uint256) {
+    bool got;
+    ExtendHarness.RecordState s;
+    uint256 cap;
+    recordRead = got;
+    recordLive = s == ExtendHarness.RecordState.Live;
+    recordCap = cap;
+    return (got, s, cap);
+}
 
 function moveFromHub(address token, address to, uint256 value) {
     if (token == quoteToken) {
@@ -126,8 +159,6 @@ persistent ghost address askedOf;
 persistent ghost uint256 askedGas;
 persistent ghost bytes32 askedFor;
 persistent ghost bool said;
-persistent ghost bool wroteBeforeAsk;
-persistent ghost bool wroteAfterAsk;
 
 function askPolicy(address target, uint256 gasCap, bytes32 yes) returns bool {
     bool answer;
@@ -140,19 +171,8 @@ function askPolicy(address target, uint256 gasCap, bytes32 yes) returns bool {
     return answer;
 }
 
-// every persistent-storage write the hub's own code makes, split at the first ask
-hook ALL_SSTORE(uint256 loc, uint256 v) {
-    if (executingContract == currentContract) {
-        if (asked) {
-            wroteAfterAsk = true;
-        } else {
-            wroteBeforeAsk = true;
-        }
-    }
-}
-
 function nothingAskedYet() {
-    require !asked && asks == 0 && !wroteBeforeAsk && !wroteAfterAsk;
+    require !asked && asks == 0;
 }
 
 // ---- one-word reads of the harness's views ----
@@ -286,21 +306,78 @@ function debtIsClaim(uint256 id) returns bool {
 
 // ---- I1 and I2: the term ----
 
-// I1: every loan's term is one tenor long. `_record` writes it so at the open and `respread` at an extension, the only two
-// writers of the term; an unissued id reads 0 + 0 == 0. The no-time refusal rests on it to fire only in the open second,
-// and no safety leg does: the extension checks `newExpiry > expiry` and charges `newExpiry - expiry` directly
+// THE HUB'S OWN VERBS, as HubLoans.spec's `freshIdVerb` takes them: a multicall is a sequence of these, so it composes
+definition hubVerb(method f) returns bool = !f.isView && f.contract == currentContract
+    && f.selector != sig:multicall(bytes[]).selector;
+
+function quoteIn(bytes32 m) returns address {
+    address q; uint256 cash; uint256 rev; uint256 pot;
+    q, cash, rev, pot = marketOf(m);
+    return q;
+}
+
+// PROVEN facts the frame rules start from: an issued loan sits at or under the id counter (HubLoans.spec
+// `aFreshIdHasNeverClosed`) and in a created market (HubClaims.spec `aLoanSitsInACreatedMarket`, O56)
+function anIssuedLoanIsCountedAndCreated(uint256 id) {
+    require homeOf(id) != to_bytes32(0) => to_mathint(id) <= idCount() && quoteIn(homeOf(id)) != 0;
+}
+
+// THE FOUR VERBS THAT ISSUE A LOAN, each through `_record`, which takes `++count`: so the loan a call issues sits above
+// the counter as the call found it, and every loan that already stood sits at or under it
+definition issuesALoan(method f) returns bool =
+    f.selector == sig:open(bytes32,uint256,uint256,uint64,address,ExtendHarness.OpenBounds).selector
+    || f.selector == sig:openWithPermit2(bytes32,uint256,uint256,uint64,address,ExtendHarness.OpenBounds,bytes).selector
+    || f.selector == sig:fillOrder(uint256,uint256,uint256).selector
+    || f.selector == sig:refinanceTo(ExtendHarness.MigrateArgs).selector;
+
+// I1's statement, shared by the invariant and the two halves of its step on the issuing verbs
+definition termWhole(uint256 id) returns bool =
+    to_mathint(loanExpiry(id)) - to_mathint(loanTenor(id)) <= to_mathint(loanOpenTime(id))
+        && to_mathint(loanOpenTime(id)) <= to_mathint(loanExpiry(id));
+
+// I1: every loan's fee schedule opens inside the last tenor before its expiry, `expiry - tenor <= openTime <= expiry`.
+// `_record` writes `openTime + tenor == expiry` at the open and `respread` at an extension; a top-up moves `openTime` to
+// now, strictly before expiry, and the clock never runs behind the schedule's start, which is the domain the preserved
+// block states. An unissued id reads 0 <= 0 <= 0. The no-time refusal fires exactly when now is `expiry - tenor`, and no
+// safety leg rests on I1: the extension checks `newExpiry > expiry` and charges `newExpiry - expiry` directly.
+// ON THE FOUR ISSUING VERBS its induction step is the two rules below, one per case of `id` against the counter the call
+// found, so together they are that step; the invariant takes every other verb, its base case and the transient reset
 invariant theTermIdentityHolds(uint256 id)
-    to_mathint(loanOpenTime(id)) + to_mathint(loanTenor(id)) == to_mathint(loanExpiry(id))
+    termWhole(id)
+    filtered { f -> hubVerb(f) && !issuesALoan(f) }
     {
         preserved with (env e) {
-            require e.msg.sender != currentContract && aRealClock(e);
+            require e.msg.sender != currentContract && aRealClock(e) && aClockPastTheOpen(e, id);
         }
     }
 
+// I1's step on an issuing verb, for a loan that already stood: the call never breaks its term
+rule anIssuingVerbLeavesEveryStandingTermWhole(env e, method f, calldataarg args, uint256 id) filtered { f -> issuesALoan(f) } {
+    require e.msg.sender != currentContract && aRealClock(e) && aClockPastTheOpen(e, id);
+    require to_mathint(id) <= to_mathint(idCount());
+    require termWhole(id);
+
+    f(e, args);
+
+    assert termWhole(id), "an issuing verb broke the term of a loan that already stood";
+}
+
+// I1's step on an issuing verb, for the id it may issue: the loan starts with its term whole
+rule aLoanIsIssuedWithItsTermWhole(env e, method f, calldataarg args, uint256 id) filtered { f -> issuesALoan(f) } {
+    require e.msg.sender != currentContract && aRealClock(e) && aClockPastTheOpen(e, id);
+    require to_mathint(id) > to_mathint(idCount());
+    require termWhole(id);
+
+    f(e, args);
+
+    assert termWhole(id), "a loan was issued with its term broken";
+}
+
 // I2: no verb moves an issued loan's tenor; an extension runs it again, and only the open that issues a loan writes it
-rule aLoansTenorNeverMoves(env e, method f, calldataarg args, uint256 id) filtered { f -> !f.isView } {
+rule aLoansTenorNeverMoves(env e, method f, calldataarg args, uint256 id) filtered { f -> hubVerb(f) } {
     require e.msg.sender != currentContract && aRealClock(e);
     require homeOf(id) != to_bytes32(0);
+    anIssuedLoanIsCountedAndCreated(id);
     uint64 t0 = loanTenor(id);
 
     f(e, args);
@@ -308,14 +385,40 @@ rule aLoansTenorNeverMoves(env e, method f, calldataarg args, uint256 id) filter
     assert loanTenor(id) == t0, "a verb moved an issued loan's tenor";
 }
 
-// I2: an issued loan's tenor sits on its market's grid, from the open that issued it on, and the grid is write-once
-rule aLoansTenorStaysOnItsGrid(env e, method f, calldataarg args, uint256 id) filtered { f -> !f.isView } {
+// I2: an issued loan's tenor sits on its market's grid, from the open that issued it on, and the grid is write-once.
+// The created-market premise is what makes it write-once here: `createMarket` refuses `MarketExists` on a live quote.
+// On the four issuing verbs it is the two rules below, split as I1's step is
+rule aLoansTenorStaysOnItsGrid(env e, method f, calldataarg args, uint256 id) filtered { f -> hubVerb(f) && !issuesALoan(f) } {
     require e.msg.sender != currentContract && aRealClock(e);
     require homeOf(id) != to_bytes32(0) => onItsGrid(id);
+    anIssuedLoanIsCountedAndCreated(id);
 
     f(e, args);
 
     assert homeOf(id) != to_bytes32(0) => onItsGrid(id), "an issued loan's tenor left its market's grid";
+}
+
+// I2 on an issuing verb, for a loan that already stood: the call never moves it off its market's grid
+rule anIssuingVerbKeepsEveryStandingLoanOnItsGrid(env e, method f, calldataarg args, uint256 id) filtered { f -> issuesALoan(f) } {
+    require e.msg.sender != currentContract && aRealClock(e);
+    require to_mathint(id) <= to_mathint(idCount());
+    require homeOf(id) != to_bytes32(0) => onItsGrid(id);
+    anIssuedLoanIsCountedAndCreated(id);
+
+    f(e, args);
+
+    assert homeOf(id) != to_bytes32(0) => onItsGrid(id), "an issuing verb moved a standing loan off its market's grid";
+}
+
+// I2 on an issuing verb, for the id it may issue: the loan starts on its market's grid
+rule aLoanIsIssuedOnItsMarketsGrid(env e, method f, calldataarg args, uint256 id) filtered { f -> issuesALoan(f) } {
+    require e.msg.sender != currentContract && aRealClock(e);
+    require to_mathint(id) > to_mathint(idCount());
+    anIssuedLoanIsCountedAndCreated(id);
+
+    f(e, args);
+
+    assert homeOf(id) != to_bytes32(0) => onItsGrid(id), "a loan was issued off its market's grid";
 }
 
 // ---- O72: an extension keeps its loan and runs its own tenor again from now ----
@@ -360,31 +463,7 @@ rule anExtensionRunsItsOwnTenorFromNow(env e, uint256 id, uint256 minBufferWad, 
     assert to_mathint(expiry1) <= stamp + maxTenorIn(m), "an extension committed the lender past one maxTenor";
 }
 
-// THE SAME SECOND: in the loan's open second its own tenor from now ends where it already does, so the extension adds no
-// time and refuses before any write or policy ask
-rule aSameSecondExtensionRefuses(env e, uint256 id, uint256 minBufferWad, bytes data) {
-    sceneHolds(e, id);
-    requireInvariant theTermIdentityHolds(id);
-    require to_mathint(e.block.timestamp) == to_mathint(loanOpenTime(id));
-    nothingAskedYet();
-
-    extend@withrevert(e, id, minBufferWad, data);
-
-    assert lastReverted, "an extension in the loan's open second landed";
-    assert !asked && !wroteBeforeAsk, "an extension in the loan's open second asked a policy or wrote";
-}
-
-// FROM EXPIRY: a matured loan's extension refuses, `LoanMatured`, before any write or policy ask; `forceClose` then settles it
-rule anExtensionRefusesFromExpiry(env e, uint256 id, uint256 minBufferWad, bytes data) {
-    sceneHolds(e, id);
-    require to_mathint(e.block.timestamp) >= to_mathint(loanExpiry(id));
-    nothingAskedYet();
-
-    extend@withrevert(e, id, minBufferWad, data);
-
-    assert lastReverted, "an extension landed from the loan's expiry";
-    assert !asked && !wroteBeforeAsk, "a matured loan's extension asked a policy or wrote";
-}
+// the same-second and from-expiry refusals, before any write or ask, are ExtendAskOrder.spec's
 
 // the preview agrees: from expiry `tryExtend` answers no, at no fee
 rule thePreviewRefusesFromExpiry(env e, uint256 id, uint256 minBufferWad, bytes data, address caller) {
@@ -410,17 +489,22 @@ rule anExtensionChargesTheTimeAdded(env e, uint256 id, uint256 minBufferWad, byt
     assert fee == originationFeeOf(m, debt0, added), "an extension charged other than the fee on the time it added";
 }
 
-// THE CALLER: the holder, or the market lender holding the holder's credit grant (review E-3); nobody else extends
-rule onlyTheHolderOrItsGrantedLenderExtends(env e, uint256 id, uint256 minBufferWad, bytes data) {
+// THE CALLER: anyone may extend. One who is neither the holder nor an operator of its title lands only with the record
+// read and at or above the market's price, the record at or above the band's level, and at most a quarter of the tenor
+// left; a credit grant makes no holder. The holder and its operators meet only the legs every caller meets
+rule aNonHolderExtendsOnlyAtPriceOutsideTheBand(env e, uint256 id, uint256 minBufferWad, bytes data) {
     sceneHolds(e, id);
-    address holder = holderOf(id);
-    address lender = lenderIn(homeOf(id));
-    bool granted = creditOperatorOf(holder, e.msg.sender);
+    bool holderLike = holderTest(id, holderOf(id), e.msg.sender);
+    mathint left = loanExpiry(id) - e.block.timestamp;
+    mathint tenor = loanTenor(id);
+    uint256 price = priceOf(homeOf(id));
+    uint256 bandLevel = bandLevelOf(id);
 
     extend(e, id, minBufferWad, data);
 
-    assert e.msg.sender == holder || (e.msg.sender == lender && granted),
-        "an extension landed for a caller who is neither the holder nor its granted lender";
+    assert !holderLike => recordRead && (recordLive => recordCap >= price), "a non-holder extended under the market's price";
+    assert !holderLike => (recordLive => recordCap >= bandLevel), "a non-holder extended a loan the deleverage band admits";
+    assert !holderLike => 4 * left <= tenor, "a non-holder extended before the term's last quarter";
 }
 
 // ---- O72: the accounting ----
@@ -469,7 +553,7 @@ rule anExtensionConservesTheBookedPots(env e, uint256 id, uint256 minBufferWad, 
     assert booked1 - booked0 == quoteToken.balanceOf(currentContract) - hub0, "an extension moved booked quote it did not hold";
 }
 
-// ---- O72c: no extension moves the debt, and the granted lender pays its own fee ----
+// ---- O72c: no extension moves the debt, and whoever extends pays its own fee ----
 
 rule anExtensionNeverMovesTheDebt(env e, uint256 id, uint256 minBufferWad, bytes data) {
     sceneHolds(e, id);
@@ -483,8 +567,8 @@ rule anExtensionNeverMovesTheDebt(env e, uint256 id, uint256 minBufferWad, bytes
     assert to_mathint(claimOf(m, id)) == claim0, "an extension moved the claim";
 }
 
-// E-3: a lender extending under the holder's grant pays the fee itself, and the holder's quote never moves
-rule aGrantedLenderPaysItsOwnFee(env e, uint256 id, uint256 minBufferWad, bytes data) {
+// whoever extends for a holder pays the fee itself, and the holder's quote never moves: a stranger, an operator, a lender
+rule theCallerPaysItsOwnFee(env e, uint256 id, uint256 minBufferWad, bytes data) {
     sceneHolds(e, id);
     address holder = holderOf(id);
     require e.msg.sender != holder && holder != currentContract;
@@ -493,8 +577,72 @@ rule aGrantedLenderPaysItsOwnFee(env e, uint256 id, uint256 minBufferWad, bytes 
 
     uint256 fee = extend(e, id, minBufferWad, data);
 
-    assert to_mathint(quoteToken.balanceOf(holder)) == holder0, "a granted lender's extension moved the holder's quote";
-    assert to_mathint(quoteToken.balanceOf(e.msg.sender)) == payer0 - fee, "a granted lender's extension was not paid by the lender";
+    assert to_mathint(quoteToken.balanceOf(holder)) == holder0, "another caller's extension moved the holder's quote";
+    assert to_mathint(quoteToken.balanceOf(e.msg.sender)) == payer0 - fee, "another caller's extension was not paid by that caller";
+}
+
+// ---- the top-up and the add: what each moves, and nothing else ----
+
+// A TOP-UP moves the debt and the claim by exactly its amount and re-anchors the fee schedule at now; the expiry, the
+// tenor, the market, the holder and the lot hold, and the claim stays live, so the funding floor, the market's price,
+// never moves. No id is issued. The rail is genesis's: `createMarket` refuses `minPrincipal < 2` and the params are
+// write-once, so the top-up's `minPrincipal` floor never admits a zero amount (without it, a zero top-up in a market with
+// no floor left a zero claim at zero)
+rule aTopUpMovesTheDebtAndTheClaimByExactlyTheAmount(env e, uint256 id, uint256 amount, ExtendHarness.OpenBounds bnd) {
+    sceneHolds(e, id);
+    bytes32 m = homeOf(id);
+    require minPrincipalIn(m) >= 2;
+    address holder = holderOf(id);
+    uint256 units = unitsOf(id);
+    mathint debt0 = loanDebt(id);
+    mathint claim0 = claimOf(m, id);
+    uint64 tenor0 = loanTenor(id);
+    uint64 expiry0 = loanExpiry(id);
+    mathint count0 = idCount();
+
+    drawMore(e, id, amount, bnd);
+
+    assert to_mathint(loanDebt(id)) == debt0 + amount && to_mathint(claimOf(m, id)) == claim0 + amount,
+        "a top-up moved the debt or the claim by other than its amount";
+    assert loanTenor(id) == tenor0 && loanExpiry(id) == expiry0, "a top-up moved the loan's tenor or expiry";
+    assert to_mathint(loanOpenTime(id)) == to_mathint(e.block.timestamp), "a top-up did not re-anchor the fee schedule at now";
+    assert homeOf(id) == m && holderOf(id) == holder && unitsOf(id) == units && closedOf(id) == 0,
+        "a top-up moved the loan's market, holder or lot, or closed it";
+    assert claimOf(m, id) != 0 && to_mathint(idCount()) == count0, "a top-up retired the claim or issued an id";
+}
+
+// AN ADD moves the lot alone: units rise by exactly the add, and the debt, the claim, the term, the escrow and every
+// booked pot hold
+rule anAddMovesOnlyTheUnits(env e, uint256 id, uint256 units, bytes permit2) {
+    sceneHolds(e, id);
+    bytes32 m = homeOf(id);
+    address holder = holderOf(id);
+    mathint units0 = unitsOf(id);
+    mathint debt0 = loanDebt(id);
+    mathint claim0 = claimOf(m, id);
+    mathint esc0 = feeEscrowOf(id);
+    uint64 open0; uint64 tenor0; uint64 expiry0;
+    open0, tenor0, expiry0 = termOf(id);
+    mathint cash0 = cashIn(m);
+    mathint rev0 = revenueIn(m);
+    mathint pot0 = potIn(m);
+    mathint owed0 = owedIn(m);
+    mathint resting0 = restingIn(m);
+    mathint lent0 = lentIn(m);
+
+    addCollateral(e, id, units, permit2);
+
+    assert to_mathint(unitsOf(id)) == units0 + units, "an add moved the lot by other than the add";
+    assert to_mathint(loanDebt(id)) == debt0 && to_mathint(claimOf(m, id)) == claim0 && to_mathint(feeEscrowOf(id)) == esc0,
+        "an add moved the debt, the claim or the escrow";
+    uint64 open1; uint64 tenor1; uint64 expiry1;
+    open1, tenor1, expiry1 = termOf(id);
+    assert open1 == open0 && tenor1 == tenor0 && expiry1 == expiry0, "an add moved the term";
+    assert homeOf(id) == m && holderOf(id) == holder && closedOf(id) == 0, "an add moved the market or the holder, or closed the loan";
+    assert to_mathint(cashIn(m)) == cash0 && to_mathint(revenueIn(m)) == rev0 && to_mathint(potIn(m)) == pot0,
+        "an add moved resting cash, revenue or the claims pot";
+    assert to_mathint(owedIn(m)) == owed0 && to_mathint(restingIn(m)) == resting0 && to_mathint(lentIn(m)) == lent0,
+        "an add moved the lender's pools";
 }
 
 // ---- O72b: the lender's yes, asked last, before any write ----
@@ -515,62 +663,10 @@ rule anExtensionLandsOnlyOnItsLendersYes(env e, uint256 id, uint256 minBufferWad
     assert askedFor == policyYes(), "an extension took a word other than the policy's selector for a yes";
 }
 
-// NO WRITE BEFORE THE ANSWER: every leg before the ask only reads, so the policy sees the loan as it stands, and a refusal,
-// which reverts there, leaves storage as it was
-rule anExtensionWritesNothingBeforeItsPolicyAnswers(env e, uint256 id, uint256 minBufferWad, bytes data) {
-    sceneHolds(e, id);
-    nothingAskedYet();
+// NO WRITE BEFORE THE ANSWER, its store-hook witness, the matured refinance's refusal and the refinance's claim reuse on its
+// lender's yes are ExtendAskOrder.spec's
 
-    extend(e, id, minBufferWad, data);
-
-    assert !wroteBeforeAsk, "an extension wrote storage before its lender's policy answered";
-}
-
-// ANTI-HOLLOW for the store hook: an extension's writes land after the ask, and the hook sees them
-rule theStoreHookSeesAnExtensionsWrites(env e, uint256 id, uint256 minBufferWad, bytes data) {
-    sceneHolds(e, id);
-    nothingAskedYet();
-    extend(e, id, minBufferWad, data);
-    satisfy wroteAfterAsk;
-}
-
-// ---- refinanceTo: refused from expiry; before it, the retiring claim is reused only in its own market, on its lender's yes ----
-
-// THE REFINANCE GATE: from the expiry second a refinance refuses `LoanMatured`, into any market, before any write and any
-// policy ask, so a matured live loan leaves only by repay, forceClose, or finalize on persisted distress
-rule aMaturedLoanNeverRefinances(env e, ExtendHarness.MigrateArgs a) {
-    sceneHolds(e, a.id);
-    require to_mathint(e.block.timestamp) >= to_mathint(loanExpiry(a.id));
-    nothingAskedYet();
-
-    refinanceTo@withrevert(e, a);
-
-    assert lastReverted, "a matured loan refinanced";
-    assert !asked && !wroteBeforeAsk, "a matured loan's refinance asked a policy or wrote";
-}
-
-// the policy is asked only when the refinance stays in the loan's own market, of its stored policy with POLICY_GAS and before
-// any write; on its yes the successor draws only what the retiring claim does not recycle, and otherwise its whole
-// principal. Anyone may create a market naming any lender, so another market, the same lender's included, draws it all
-rule aRefinanceReusesTheClaimOnlyOnItsLendersYes(env e, ExtendHarness.MigrateArgs a) {
-    sceneHolds(e, a.id);
-    nothingAskedYet();
-    bytes32 src = homeOf(a.id);
-    mathint claim0 = claimOf(src, a.id);
-    mathint cash0 = cashIn(a.dst);
-    bool inPlace = a.dst == src;
-    address policy = rollPolicyOf(lenderIn(src));
-
-    refinanceTo(e, a);
-
-    mathint p = a.newPrincipal;
-    mathint recycle = claim0 < p ? claim0 : p;
-    assert asked => inPlace && askedOf == policy && askedGas == POLICY_GAS(), "a refinance asked a policy outside the loan's own market";
-    assert !inPlace => to_mathint(cashIn(a.dst)) == cash0 - p, "a refinance reused a claim outside the loan's own market";
-    assert asked => !wroteBeforeAsk, "a refinance wrote storage before its lender's policy answered";
-    assert (asked && said) => to_mathint(cashIn(a.dst)) == cash0 - (p - recycle), "a reusing refinance drew other than the fresh rest";
-    assert !(asked && said) => to_mathint(cashIn(a.dst)) == cash0 - p, "a refinance reused a claim without its lender's yes";
-}
+// ---- refinanceTo: floored at the destination's minPrincipal, and its home leg's accounting ----
 
 // O55: every refinance is floored at the destination's minPrincipal: the successor is a birth
 rule aRefinanceIsFlooredAtMinPrincipal(env e, ExtendHarness.MigrateArgs a) {

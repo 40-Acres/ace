@@ -41,7 +41,7 @@ abstract contract ExtendRig is WarpClock, DeleverageCrank {
 
     uint64 internal constant TEN7 = 7 days;
     uint64 internal constant MAX_T = 28 days;
-    uint256 internal constant BASE = 40;
+    uint256 internal constant BASE = 2190; // bps a year to the lender: 6 a day, so a day's fee is a whole number
     uint256 internal constant P = 10_000e6;
     uint256 internal constant K = 1.4e18;
     uint256 internal constant S = 1 << 96;
@@ -67,7 +67,7 @@ abstract contract ExtendRig is WarpClock, DeleverageCrank {
         p = AceFixtures.marketParams(address(usdc), address(coll));
         p.record = address(rec);
         p.lender = lender;
-        p.baseBps = BASE;
+        p.lenderAprBps = BASE;
         p.minTenor = TEN7;
         p.maxTenor = MAX_T;
         p.minCoverageWad = K;
@@ -83,7 +83,7 @@ abstract contract ExtendRig is WarpClock, DeleverageCrank {
     /// @dev Another market of `lender`'s on the rig's pair, at another rate so another id, resting `cash`.
     function _siblingOf(address lender, uint256 cash) internal returns (bytes32 mid) {
         MarketParams memory p = _params(lender);
-        p.baseBps = BASE + 10;
+        p.lenderAprBps = BASE + 10;
         mid = ace.createMarket(p);
         if (cash != 0) _deposit(mid, lender, cash);
     }
@@ -137,7 +137,7 @@ abstract contract ExtendRig is WarpClock, DeleverageCrank {
 
     /// @dev The origination fee on `debt` for `tenor`; an extension's fee is this on the time it adds.
     function _fee(uint256 debt, uint64 tenor) internal pure returns (uint256) {
-        return LoanMath.originationFee(debt, tenor, BASE, TEN7);
+        return LoanMath.originationFee(debt, tenor, BASE);
     }
 
     /// @dev The fee an extension of `loanId` would charge now: the fee on its own tenor from now, past its expiry.
@@ -165,12 +165,13 @@ abstract contract ExtendRig is WarpClock, DeleverageCrank {
         fee = ace.extend(loanId, 0, "");
     }
 
-    /// @dev The unearned share of `e` on `loanId` now, floored, exactly as the hub refunds an escrow.
+    /// @dev The unearned share of `e` on `loanId` now, floored, exactly as the hub refunds an escrow: over its schedule, `expiry - openTime`.
     function _unearned(uint256 loanId, uint256 e) internal view returns (uint256) {
         Loan memory l = read.loan(loanId);
-        if (l.tenor == 0) return 0;
+        uint256 span = l.expiry > l.openTime ? l.expiry - l.openTime : 0;
+        if (span == 0) return 0;
         uint256 remaining = l.expiry > _now() ? l.expiry - _now() : 0;
-        uint256 r = FullMath.mulDiv(e, remaining, l.tenor);
+        uint256 r = FullMath.mulDiv(e, remaining, span);
         return r < e ? r : e;
     }
 

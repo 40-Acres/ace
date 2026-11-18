@@ -58,7 +58,7 @@ contract AceFloorsAndArmableTest is WarpClock {
         p = AceFixtures.marketParams(address(usdc), address(coll));
         p.record = address(rec);
         p.lender = lender;
-        p.baseBps = 40;
+        p.lenderAprBps = 40;
         p.minTenor = TEN7;
         p.maxTenor = TEN28;
         p.settleBountyBps = 50;
@@ -174,7 +174,7 @@ contract AceFloorsAndArmableTest is WarpClock {
         coll.approve(address(pm), UNITS);
         uint256 loanId = ace.open(id, UNITS, P, TEN28, borrower, OpenBounds(0, 0, 0));
         vm.stopPrank();
-        uint256 x = 100e6;
+        uint256 x = 1e6;
         uint256 np = P - x; // the long term's refund covers the short term's fee and the shortfall, so the refinance nets
         uint256 cashBefore = ace.restingOf(id);
         (uint256 restBefore, uint256 lentBefore, uint256 owedBefore) = read.lenderPools(alice, address(usdc));
@@ -182,7 +182,7 @@ contract AceFloorsAndArmableTest is WarpClock {
         uint256 newId = ace.refinanceTo(MigrateArgs(loanId, id, np, TEN7, OpenBounds(0, 0, 0), 0, address(0)));
         (uint256 restAfter, uint256 lentAfter, uint256 owedAfter) = read.lenderPools(alice, address(usdc));
         MarketParams memory p = ace.idToMarketParams(id);
-        uint256 tick = LoanMath.tickCut(LoanMath.originationFee(np, TEN7, p.baseBps, p.minTenor));
+        uint256 tick = LoanMath.tickCut(LoanMath.originationFee(np, TEN7, p.lenderAprBps));
         assertEq(ace.restingOf(id), cashBefore, "the successor drew no fresh cash");
         assertEq(restAfter, restBefore, "and the lender's resting pool did not move");
         assertEq(lentBefore - lentAfter, x, "lent carries only the smaller successor");

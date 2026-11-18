@@ -43,7 +43,7 @@ contract AceWithdrawStatedAmountTest is WarpClock {
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(coll));
         p.record = address(rec);
         p.lender = alice;
-        p.baseBps = 40;
+        p.lenderAprBps = 40;
         p.minTenor = TEN7;
         p.maxTenor = TEN7;
         p.minCoverageWad = 1.4e18;
@@ -84,7 +84,7 @@ contract AceWithdrawStatedAmountTest is WarpClock {
     }
 
     /// @notice The max sentinel empties the market beside a live loan, and a third party's `forceClose` at expiry then settles it.
-    /// @dev A CuratorVault does exactly this after every call; an extension draws no resting cash, so its loans lose nothing by it.
+    /// @dev An AceVault does exactly this after every call; an extension draws no resting cash, so its loans lose nothing by it.
     function test_TheMaxSentinelEmptiesTheMarketBesideALiveLoanWhichThenSettles() public {
         uint256 resting = ace.restingOf(id);
         assertEq(_withdraw(type(uint256).max, 0), resting, "max takes everything resting");

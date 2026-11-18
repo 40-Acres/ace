@@ -100,7 +100,7 @@ contract AceCreditRoutingTest is WarpClock {
     function _paramsEthBtc() internal view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(wbtc), address(weth));
         p.record = address(recEB);
-        p.baseBps = BASE_BPS;
+        p.lenderAprBps = BASE_BPS;
         p.minPrincipal = 1e4; // 0.0001 WBTC: the dust floor follows the 8dp quote
         p.price = T_EB; // the rung this market funded at is its own price now
         p.minTenor = TEN7;
@@ -111,7 +111,7 @@ contract AceCreditRoutingTest is WarpClock {
         p = AceFixtures.marketParams(address(usdc), address(wbtc));
         p.record = address(recBU);
         p.price = T_BU;
-        p.baseBps = BASE_BPS;
+        p.lenderAprBps = BASE_BPS;
         p.minTenor = TEN7;
         p.maxTenor = TEN30;
     }
@@ -133,13 +133,13 @@ contract AceCreditRoutingTest is WarpClock {
     function _maxDraw(bytes32 mid, uint256 units) internal view returns (uint256) {
         uint256 us = read.marketState(mid).unitScale;
         MarketParams memory p = ace.idToMarketParams(mid);
-        uint256 backing = units - 1; // the one atom settlement's own ceiling will spend
+        uint256 backing = units - 1; // the coverage line's one atom of margin
         return FullMath.mulDiv(p.price * backing, 1e18, p.minCoverageWad * us);
     }
 
     function _payout(bytes32 mid, uint256 principal, uint64 tenor) internal view returns (uint256) {
         MarketParams memory p = ace.idToMarketParams(mid);
-        return principal - LoanMath.originationFee(principal, tenor, p.baseBps, p.minTenor);
+        return principal - LoanMath.originationFee(principal, tenor, p.lenderAprBps);
     }
 
     /// @notice The two-hop chain in ONE batch, at the two tenors given; returns both loan ids.

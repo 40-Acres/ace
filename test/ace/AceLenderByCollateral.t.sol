@@ -381,7 +381,7 @@ contract AceLenderByCollateralTest is WarpClock, DeleverageCrank {
         _warpTo(uint256(x0) - 1);
         uint256 n = read.loanCount();
         uint256 claim0 = read.claimOf(mx.id, id);
-        uint256 fee = LoanMath.originationFee(read.debtOf(id), tenor, ace.idToMarketParams(mx.id).baseBps, ace.idToMarketParams(mx.id).minTenor);
+        uint256 fee = LoanMath.originationFee(read.debtOf(id), tenor, ace.idToMarketParams(mx.id).lenderAprBps);
         usdc.mint(borrower, fee);
         vm.startPrank(borrower);
         usdc.approve(address(ace), fee);

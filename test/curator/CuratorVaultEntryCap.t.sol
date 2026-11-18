@@ -2,26 +2,31 @@
 pragma solidity 0.8.36;
 
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
 import {AceVault} from "../../src/curator/AceVault.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVaultCapHarness} from "./harness/CuratorVaultCapHarness.sol";
+import {MockTerms} from "./vault/MockTerms.sol";
 
 /// @title CuratorVaultEntryCap
 /// @notice The entry-cap hook: a product tightens entry by one view, and the base turns it into both max views and the verb's refusal.
 /// @dev The cap is asked INSIDE the verb, after the base's own gates, so the view and the verb cannot answer apart.
+/// @dev The product is a `MockTerms` whose entry cap is a settable number, and zero for one named receiver.
 contract CuratorVaultEntryCapTest is CuratorVaultBase {
     uint256 internal constant SEED = 10_000e6;
     uint256 internal constant CAP = 1_234e6;
     address internal carol = address(0xCA401);
 
-    CuratorVaultCapHarness internal v;
+    AceVault internal v;
+    MockTerms internal mt;
 
     function setUp() public override {
         super.setUp();
-        v = new CuratorVaultCapHarness(_cfg(0), _listing());
-        mid = _doorMarket(v, address(collateral));
+        (v, mt) = _onMockTerms(0);
         _lpDeposit(v, alice, SEED);
+    }
+
+    /// @dev The entry cap the product answers for every receiver but the shut one.
+    function _setCap(uint256 c) internal {
+        mt.setEntryCap(MockTerms.Mode.Answer, c);
     }
 
     /// @dev `who` holds `amt` of cash and has approved the vault for all of it.
@@ -39,7 +44,7 @@ contract CuratorVaultEntryCapTest is CuratorVaultBase {
 
     /// @notice `maxDeposit` IS the cap, and `maxMint` is the cap in shares at the previews' own price.
     function test_EntryCap_MaxDepositIsTheCap_MaxMintIsItsPreview() public {
-        v.setCap(CAP);
+        _setCap(CAP);
         assertEq(v.maxDeposit(bob), CAP, "the deposit view reads the product's cap");
         assertEq(v.maxMint(bob), v.previewDeposit(CAP), "and the mint view is that cap at the deposit preview's price");
         assertGt(v.maxMint(bob), 0, "PREMISE: a cap worth some shares");
@@ -47,7 +52,7 @@ contract CuratorVaultEntryCapTest is CuratorVaultBase {
 
     /// @notice AT THE DEFAULT CAP BOTH VIEWS ADVERTISE NO CEILING, on the plain base and on a product that sets none.
     function test_EntryCap_TheDefaultCapAdvertisesNoCeiling() public {
-        CuratorVault plain = _newVault(0);
+        AceVault plain = _newVault(0);
         _lpDeposit(plain, alice, SEED);
         assertGt(plain.totalSupply(), 0, "PREMISE: a live vault, so the gates are really asked");
         assertEq(plain.maxDeposit(bob), type(uint256).max, "the plain base caps nothing");
@@ -60,7 +65,7 @@ contract CuratorVaultEntryCapTest is CuratorVaultBase {
 
     /// @notice A DEPOSIT PAST THE CAP IS REFUSED NAMING THE RECEIVER, THE ASK AND THE CAP; one at the cap lands.
     function test_EntryCap_ADepositPastTheCapIsRefusedByTheStandardError() public {
-        v.setCap(CAP);
+        _setCap(CAP);
         _fund(bob, CAP + 1);
         vm.prank(bob);
         vm.expectRevert(_exceeded(bob, CAP + 1, CAP));
@@ -71,7 +76,7 @@ contract CuratorVaultEntryCapTest is CuratorVaultBase {
 
     /// @notice A MINT PAST THE CAP IS REFUSED IN ASSETS, and a mint of exactly `maxMint` lands at or under the cap.
     function test_EntryCap_AMintPastTheCapIsRefusedInAssets() public {
-        v.setCap(CAP);
+        _setCap(CAP);
         uint256 room = v.maxMint(bob);
         uint256 past = v.previewMint(room + 1);
         assertGt(past, CAP, "PREMISE: one share past the mint view costs more than the cap");
@@ -87,7 +92,7 @@ contract CuratorVaultEntryCapTest is CuratorVaultBase {
 
     /// @notice THE CAP IS ASKED OF THE RECEIVER, NOT THE CALLER: bob depositing for a shut receiver is refused, for himself admitted.
     function test_EntryCap_TheCapIsTheReceiversNotTheCallers() public {
-        v.setShut(carol);
+        mt.setShut(carol);
         assertEq(v.maxDeposit(carol), 0, "the shut receiver reads no room");
         assertEq(v.maxMint(carol), 0, "in either unit");
         _fund(bob, 2e6);
@@ -100,7 +105,7 @@ contract CuratorVaultEntryCapTest is CuratorVaultBase {
 
     /// @notice A CAP OF ZERO SHUTS BOTH DOORS, and both views say so.
     function test_EntryCap_ACapOfZeroShutsBothDoors() public {
-        v.setCap(0);
+        _setCap(0);
         assertEq(v.maxDeposit(bob), 0, "no deposit room");
         assertEq(v.maxMint(bob), 0, "and no mint room");
         uint256 cost = v.previewMint(1e6);
@@ -120,7 +125,7 @@ contract CuratorVaultEntryCapTest is CuratorVaultBase {
         _gift(v, SEED / 10); // a counted rise past GATE_BPS of NAV, so the pile gate shuts entry
         uint256[2] memory caps = [type(uint256).max, CAP];
         for (uint256 i; i < 2; ++i) {
-            v.setCap(caps[i]);
+            _setCap(caps[i]);
             assertEq(v.maxDeposit(bob), 0, "the base's gate shuts the deposit view whatever the cap");
             assertEq(v.maxMint(bob), 0, "and the mint view");
         }
@@ -136,7 +141,7 @@ contract CuratorVaultEntryCapTest is CuratorVaultBase {
     function test_EntryCap_MaxMintSaturatesAtAHugeFiniteCap() public {
         uint256[3] memory caps = [type(uint256).max - 1, uint256(1) << 255, uint256(1) << 240];
         for (uint256 i; i < 3; ++i) {
-            v.setCap(caps[i]);
+            _setCap(caps[i]);
             assertEq(v.maxMint(bob), type(uint256).max, "a cap past what a preview can price reads as no ceiling");
         }
     }
@@ -148,7 +153,7 @@ contract CuratorVaultEntryCapTest is CuratorVaultBase {
             _giftPart(v, gain + 10e6, gain); // a counted rise, synced and vested below; the donor keeps its market's minimum resting
             _crankAndRecognize(v);
         }
-        v.setCap(cap);
+        _setCap(cap);
         uint256 room = v.maxMint(bob);
         if (room == type(uint256).max) return;
         assertLe(v.previewMint(room), cap, "the mint view's shares never cost past the cap");

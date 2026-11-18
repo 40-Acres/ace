@@ -34,7 +34,7 @@ import {WarpClock} from "../utils/WarpClock.sol";
 /// @dev It is the sale's own room: at the line `C - collateralNeeded - sliverUnits` is about `h * requiredAt/k`.
 /// @dev `settleBountyBps <= 200` and `minCoverageWad >= 1.05e18` are enforced INDEPENDENTLY at genesis.
 /// @dev So their corner product `h = 0.03` is admissible through `createMarket` and nothing bounds it.
-/// @dev 18-DECIMAL COLLATERAL ON PURPOSE: the per-tick ceiling is noise against a 1e22-atom position.
+/// @dev 18-DECIMAL COLLATERAL ON PURPOSE: the need's one ceiling is noise against a 1e22-atom position.
 /// @dev The measurement is a RATE, not an atom count, which is why the atom regime does not belong here.
 /// @dev THE RESERVE DOES NOT MOVE THIS RACE: three measurements, each read clamped and then with the keep mutated out.
 /// @dev All three come back EQUAL, so the numbers below are the sizing geometry's, not the reserve's.

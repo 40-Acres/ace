@@ -2,6 +2,8 @@
 pragma solidity 0.8.36;
 
 import {Test} from "forge-std/Test.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
 import {IERC721Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
@@ -120,20 +122,22 @@ contract AceSettleDestinationsTest is WarpClock {
         uint256 loanId = _openStd();
         uint256 claim = read.claimOf(id, loanId);
         uint256 units = COLL - _sliver(loanId);
-        uint256 need = _need(claim, T4);
+        uint256 k = ace.idToMarketParams(id).minCoverageWad;
+        uint256 line = FullMath.mulDivRoundingUp(k * claim, UNIT_SCALE, T4 * 1e18) + 1; // the coverage line, requiredAt plus one atom
+        uint256 take = Math.max(_need(claim, T4), Math.min(FullMath.mulDivRoundingUp(COLL, 1e18, k), line)); // the in-term take
 
         assertEq(claim, PRINCIPAL, "guard: the whole principal is one claim at T4");
-        assertGt(units, need, "the residual branch is the ORDINARY case: units exceed what the market takes");
+        assertGt(units, take, "the residual branch is the ORDINARY case: units exceed what the market takes");
 
         record.setBelow(true);
         vm.prank(keeper);
         ace.finalize(loanId);
 
         assertTrue(read.loan(loanId).closedAt != 0, "the loan settles");
-        assertEq(read.unitsOwedOf(loanId, borrower), units - need, "and the residual is credited to the title holder");
+        assertEq(read.unitsOwedOf(loanId, borrower), units - take, "and the residual is credited to the title holder");
         assertEq(coll.balanceOf(borrower), 0, "nothing was pushed at settlement time");
-        assertEq(_claim(loanId, borrower, borrower), units - need, "and the pull delivers it in kind, in full");
-        assertEq(coll.balanceOf(borrower), units - need, "into the holder's own wallet");
+        assertEq(_claim(loanId, borrower, borrower), units - take, "and the pull delivers it in kind, in full");
+        assertEq(coll.balanceOf(borrower), units - take, "into the holder's own wallet");
         assertEq(read.claimOf(id, loanId), 0, "the claim is zeroed");
         assertGt(read.invPotOf(id, loanId), 0, "the class pot is filled");
     }
@@ -378,7 +382,7 @@ contract AceSettleDestinationsTest is WarpClock {
     // ============ the quote leg, and what the aggregate must not touch ============
 
     /// @notice A quote credit is lender-blind: `lenderAssets` is the number a share price is built on.
-    /// @dev A `CuratorVault` sums it into NAV.
+    /// @dev An `AceVault` sums it into NAV.
     /// @dev A borrower's unclaimed equity inside it would inflate the share price and pin the market.
     function test_LenderAssetsIsUnmovedByAQuoteCredit() public {
         uint256 loanId = _openStd();

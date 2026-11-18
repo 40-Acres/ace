@@ -43,7 +43,7 @@ contract VaultExtensionEdgesTest is AceVaultRig {
     function _fundFee() internal {
         Loan memory l = read.loan(newId);
         MarketParams memory mp = ace.idToMarketParams(l.market);
-        uint256 fee = LoanMath.originationFee(l.debt, uint64(_now()) + l.tenor - l.expiry, mp.baseBps, mp.minTenor);
+        uint256 fee = LoanMath.originationFee(l.debt, uint64(_now()) + l.tenor - l.expiry, mp.lenderAprBps);
         usdc.mint(borrower, fee);
         vm.prank(borrower);
         usdc.approve(address(ace), fee);

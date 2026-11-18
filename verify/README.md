@@ -15,7 +15,7 @@ scripts/certora-run.sh verify/certora/confs/HubLoans.conf --rule aClosedLoanStay
 ```
 
 `certora-run.sh` compiles via-IR with the settings in `foundry.toml`, so a spec runs against the bytecode that
-deploys, with two exceptions:
+deploys, with four exceptions:
 
 - **Harnesses add views** (`verify/certora/harness/`), because under via-IR the prover cannot read raw slots or
   resolve ERC-7201 annotations. A harness adds getters and no state.
@@ -23,6 +23,16 @@ deploys, with two exceptions:
   `scripts/certora-munge.sh` builds `verify/certora/munged/` with the six libraries made `internal` and inlined. Its
   header carries the equivalence argument. The full forge suite also passes against the munged hub, apart from two
   tests that measure a call frame's gas, which inlining removes.
+- **The vault is munged.** `AceVault` forwards thirteen verbs' own calldata into its linked libraries by `DELEGATECALL`,
+  its figures appended as a suffix the prover's inliner cannot load. `scripts/certora-munge-vault.sh` builds
+  `verify/certora/munged-vault/` with each forward a typed internal call, dispatched by
+  `verify/certora/munge-vault/AceVaultMunged.sol`; its header carries the equivalence argument, and `VaultForwardProbe`
+  checks that each forward runs its library body.
+- **The sAERO receipt is munged, one line.** A receipt is a clone whose three args are bytes after its own code, read
+  by an EXTCODECOPY of itself, and the prover havocs each such read afresh, so two reads of one arg disagree.
+  `scripts/certora-munge-receipt.sh` builds `verify/certora/munged-receipt/` with `_args()` made virtual, and the harness
+  template in `verify/certora/munge-receipt/` answers it from three storage words no function writes, standing in for
+  the clone's code. Its header carries the equivalence argument.
 
 Every conf runs with `rule_sanity: basic`, which fails a rule whose preconditions are unsatisfiable. Loops unroll
 twice, so a result on the batch verb `refinanceByPolicies` covers batches of at most two. Each result was also
@@ -46,8 +56,15 @@ each excludes the verbs its property does not apply to (`multicall` everywhere, 
 | `PositionManager` | `PositionManager` | **O40** Only the hub moves a ledger, only the named loan's collateral moves, and custody never exceeds the balance | PROVEN, every mutator |
 | `PositionTitleNFT` | `PositionTitleNFT` | **O42** Only the hub mints title, nothing burns it, and every transfer tells the hub exactly that move | PROVEN, every mutator; one base case by inspection |
 | `LoanMath` | `LoanMath` | **O41** The fee chain rounds as documented, the protocol never over-takes, and the principal-for-owed inverse is exact | PROVEN for every input |
-| `VaultArithmetic` | `CuratorVault` | The fee high-water mark never falls at a collection and rises correctly at a deposit or mint | PROVEN; the vesting rules TIMEOUT |
-| `VaultSplit` | `CuratorVault` | Entry split-additivity: one deposit and the same deposit in two parts price alike | Rewritten for the current vault, not yet re-run |
+| `VaultArithmetic` | `AceVault`, munged (harness `CuratorVaultHarness`) | The fee high-water mark never falls at a collection and rises correctly at a deposit or mint; per virtual share, no collection or entry lowers it and an exit lowers it by under one wei | The fee rules PROVEN on `AceVault`; per virtual share, the collection's rule PROVEN, the entry's and exit's unfinished at the time limit and re-running one at a time; the vesting rules PROVEN on 15 verbs, the rest TIMEOUT or UNKNOWN |
+| `VaultVest` | `AceVault`, munged (harness `VaultVestHarness`) | The vest maturity, at its one write, never moves earlier and stays within one window | All four rules PROVEN at the write; the caught mutant is owed |
+| `VaultSplit` | `AceVault`, munged (harness `CuratorVaultHarness`) | Entry split-additivity: one deposit and the same deposit in two parts price alike | The pile-decay lemma PROVEN and the mint witness found; the split rules not yet re-run on the current vault |
+| `VaultForwardProbe` | `AceVault`, munged (harness `VaultForwardHarness`) | Each forwarded verb runs its library body on the vault's storage, rather than havoc it or no-op | 12 of the 14 forwards PROVEN; the in-kind collect's and `refinanceFor`'s effect rows TIMEOUT |
+| `VaultBoundary` | `AceVault`, munged (harness `VaultBoundaryHarness`), a stand-in hub that records and moves the asset | What the vault enforces whatever its terms and door answer: the NAV identity, share authority, cash out only at exits or as a placement under lendable cash, the row and the total, the tenor rail, timelocked raises, the drawdown, no exit calling the product, the seized ledger | The NAV identity, the consent rail and the lock (16 verbs) PROVEN; the rest not yet run |
+| `VaultBoundaryLite` | `AceVault`, munged (harness `VaultBoundaryHarness`), the hub, title and product left arbitrary | The VaultBoundary rules over the forwarded verbs that are the vault's own checks: the lock, share authority, timelocked raises, the write-off clock, the seized ledger, never pledging the asset | The lock (all 12 forwarded verbs), a return lowers only its key, and an accepted write-off clears only its key PROVEN; never pledging the asset on a refinance timed out; the rest not yet run |
+| `SaeroTerms` | `SAeroTerms` | The sAERO terms' bid, dials and listing floor; only the settings timelock moves the dials, and the curator's raise only raises the buffer | The bid and floor rules PROVEN before the settings timelock replaced the pending set; that change's restated bid rule and the two dial-door rules are PROOF OWED |
+| `SaeroStakeReceiptFactory` | `SAeroStakeReceiptFactory` | **O82** The receipt registry only grows, only `make` writes it or `latest`, and `make` blesses only the receipt it returns. `make` refuses while the portfolio's last receipt for the stake has units out, and lands otherwise; it refuses custody, a non-portfolio, a stake the caller does not hold, a decaying or empty stake, and an unbooked one | PROVEN on every rule, the parametric one on every method; the calls in `make` are dispatched to mocks, as the spec header argues; dropping any one of `make`'s nine guards or writes turns exactly one rule red |
+| `SaeroReceipt` | `SAeroStakeReceipt`, munged (harness `SAeroStakeReceiptHarness`) | **O86** A seized receipt's cash pays the vault's open claim first, then the lenders' fee, then the owner, and the owner only out of cash beyond both, a short door take included; the fee is booked only at the seizure, at the bps frozen once at mint and capped at 10%; a payout moves only its vault leg and its owner leg; every unit leaving the custodian burns; the reward repay admits only the portfolio, its owner or the operator, never leaves the debt under the floor or the caller's bound, and only the portfolio or its owner closes | PROVEN, every rule and every method of the parametric ones, each group with a witness; the invariants' base case at a fresh clone's zero state, since a clone runs no constructor; eight mutants caught |
 | `RunwayHookWindow` | `RunwayHook` | The window's roll, its read and the swap callback never revert, since a pool's hook is permanent | PROVEN |
 
 ## Kani (`verify/den353`)

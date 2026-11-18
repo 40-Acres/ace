@@ -4,7 +4,8 @@ pragma solidity 0.8.36;
 import {MockPersistenceRecord} from "../../mocks/MockPersistenceRecord.sol";
 import {AceVault} from "../../../src/curator/AceVault.sol";
 import {BorrowRequest} from "../../../src/curator/AceVaultFlows.sol";
-import {CuratorVault, Listing} from "../../../src/curator/CuratorVault.sol";
+import {Listing} from "../../../src/entities/curated/CuratorTerms.sol";
+import {CuratedVaults} from "../../utils/CuratedVaults.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
 
 /// @notice A collateral whose pull into custody reads the vault's views, from inside the hub's open.
@@ -69,15 +70,15 @@ contract PeekingCollateral {
 /// @notice Read from inside the door's hub call, the vault's views refuse or answer the pre-door figure: never the bracket's rested zero.
 contract AceVaultMidCallTest is AceVaultRig {
     PeekingCollateral internal peek;
-    CuratorVault internal pv;
+    AceVault internal pv;
 
     function setUp() public override {
         super.setUp();
         peek = new PeekingCollateral();
         MockPersistenceRecord r = _record(address(peek), 2e18);
         Listing[] memory l = new Listing[](1);
-        l[0] = Listing({collateral: address(peek), row: _row(address(r), type(uint192).max)});
-        pv = new CuratorVault(_cfg(), MIN_PRINCIPAL, COVERAGE, TIMELOCK, l, "Peek", "PEEK");
+        l[0] = Listing({collateral: address(peek), row: _row(address(r))});
+        pv = CuratedVaults.make(_cfg(), MIN_PRINCIPAL, COVERAGE, TIMELOCK, l, "Peek", "PEEK");
         usdc.mint(alice, LP_CASH);
         vm.startPrank(alice);
         usdc.approve(address(pv), LP_CASH);

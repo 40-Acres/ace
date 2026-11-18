@@ -53,7 +53,7 @@ contract AceKeeperGasTest is WarpClock {
         record.setMinPrice(_px(1.1e18));
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(coll));
         p.record = address(record);
-        p.baseBps = 40;
+        p.lenderAprBps = 40;
         p.minTenor = TEN7;
         p.maxTenor = TEN7;
         p.settleBountyBps = 50;

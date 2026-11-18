@@ -10,8 +10,8 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {OpenBounds} from "../../src/ace/hub/Types.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
-import {LaunchVault} from "../../src/curator/LaunchVault.sol";
-import {SetValue} from "../../src/curator/sets/SetValue.sol";
+import {LaunchVault} from "../../src/entities/launch/LaunchVault.sol";
+import {PriceGrid} from "../../src/curator/PriceGrid.sol";
 import {LaunchLock} from "../../src/entities/launch/LaunchLock.sol";
 import {LockAccount} from "../../src/entities/launch/LockAccount.sol";
 import {RunwayHook} from "../../src/entities/launch/RunwayHook.sol";
@@ -36,7 +36,7 @@ contract LaunchVaultLedgerHandler is WarpClock {
     LaunchLock internal lock;
     PoolKey internal key;
     address internal curator;
-    uint16 internal baseBps;
+    uint16 internal lenderAprBps;
     int24 internal cTick;
     address[2] internal who;
     address[3] internal holders;
@@ -62,9 +62,9 @@ contract LaunchVaultLedgerHandler is WarpClock {
     constructor(Ace ace_, LaunchVault vault_, MockERC20 usdc_, PoolKey memory key_, address[2] memory who_, address[3] memory holders_) {
         (ace, read, vault, usdc, key) = (ace_, new AceReader(address(ace_)), vault_, usdc_, key_);
         LaunchVault.Terms memory t = vault_.terms();
-        (token, lock, curator, baseBps) = (IERC20(t.token), t.lock, t.curator, t.baseBps);
+        (token, lock, curator, lenderAprBps) = (IERC20(t.token), t.lock, t.curator, t.lenderAprBps);
         (who, holders) = (who_, holders_);
-        cTick = TickMath.getTickAtSqrtPrice(SetValue.sqrtPriceX96(t.auction.checkpoints(t.auction.endBlock()).clearingPrice, false));
+        cTick = TickMath.getTickAtSqrtPrice(PriceGrid.sqrtPriceX96(t.auction.checkpoints(t.auction.endBlock()).clearingPrice, false));
         inflow = usdc_.balanceOf(address(vault_));
     }
 
@@ -138,7 +138,7 @@ contract LaunchVaultLedgerHandler is WarpClock {
             ++draws;
             loans.push(loanId);
             acctOf[loanId] = address(a);
-            pnl += int256(LoanMath.lenderCut(LoanMath.originationFee(principal, term, baseBps, vault.MIN_TENOR())));
+            pnl += int256(LoanMath.lenderCut(LoanMath.originationFee(principal, term, lenderAprBps)));
         } catch {}
     }
 

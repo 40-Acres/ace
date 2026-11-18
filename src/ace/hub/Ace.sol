@@ -39,7 +39,7 @@ error LoanClosed(); // the loan is retired: nothing may touch it
 error NotBorrower(); // only the loan's title holder may withdraw its collateral, and a title moves only from its holder
 error ZeroCollateral(); // the withdrawal would strip the loan bare: an unsecured loan never settles
 error ZeroWithdrawal(); // a zero-unit request; nothing to take, and the loan is untouched
-error BelowWithdrawLine(); // a withdrawal leg falling under the coverage line: the settlement slack refuses it, not the trigger
+error BelowWithdrawLine(); // a withdrawal leg falling under the coverage line: the coverage margin refuses it, not the trigger
 error NotPositionTitle(); // retitle answers to the hub's own PositionTitleNFT collection, nothing else
 error RetitleToZero(); // title must always resolve; a live loan held by zero would strand what its close credits its holder
 error RetitleToCollection(); // the title collection can neither move its own token nor claim what the loan credits its holder
@@ -51,7 +51,7 @@ error PolicyGasOutOfRange(); // the constructor's roll-policy budget sits outsid
 /* ========================================================================= */
 /*  TABLE OF CONTENTS                                                        */
 /*  1. MARKET      genesis, the open quote, the params a market was made at  */
-/*  2. BORROWER    open, repay, extend, collateral, credit delegation        */
+/*  2. BORROWER    open, repay, extend, top up, collateral, credit grants    */
 /*  3. LENDER      depth in, depth out, and what a funded loan pays back     */
 /*  4. KEEPER      deleverage, the refinance door, settlement                */
 /*  5. REVENUE     the protocol sweep, and the inventory bid                 */
@@ -70,11 +70,12 @@ error PolicyGasOutOfRange(); // the constructor's roll-policy budget sits outsid
 /// @dev LIVENESS: quote, collateral and record are all the CREATOR'S choice.
 /// @dev What follows is therefore that market's trust statement, never the hub's.
 /// @dev The named borrower and lender are ADDRESS compares, never calls: `GateRefused` means a wrong party, never a sick dependency.
-/// @dev The borrower rule refuses NEW credit alone, an extension included; it never blocks an exit or a settlement.
+/// @dev The borrower rule refuses NEW credit alone, an extension and a top-up included; it never blocks an exit, an add or a settlement.
 /// @dev `collect` checks neither, and pays the caller's own pool unconditionally.
 /// @dev A RECORD that cannot answer refuses six verbs by name with `RecordUnreadable`.
 /// @dev Draw, deposit, collateral withdrawal, deleverage, finalize and the inventory ask, and those six exactly.
-/// @dev The extension predicate reads it through the TRY twin instead, so `extend` refuses by its selector.
+/// @dev The extension and top-up predicates read it through the TRY twin instead, so `extend` and `drawMore` refuse by their selectors.
+/// @dev `addCollateral` reads no record, so no record can block a cure.
 /// @dev So a record CAN close a borrower's exit; the lender's exit reads no record and stays open.
 /// @dev It can NEVER stop settlement at tenor: `forceClose` CALLS no record.
 /// @dev Whether a record is WIRED is still read at every settle, and it sets how much of the lot the lenders take.
@@ -156,6 +157,13 @@ contract Ace is ReentrancyGuardTransient {
     /// @dev The domain over the LIVE chain id; the cache is an optimisation of this and never an alternative to it.
     function _buildSeparator() private view returns (bytes32) {
         return keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256(bytes("ACE")), keccak256(bytes("1")), block.chainid, address(this)));
+    }
+
+    /// @notice The period, in seconds, every market's rate is quoted per: one 365-day year, so a rate reads as bps a year.
+    /// @dev A product binding this hub asks it first; a hub that names no period priced each market per its own `minTenor`.
+    /// @return The rate period, `Constants.SECONDS_PER_YEAR`.
+    function RATE_PERIOD() external pure returns (uint256) {
+        return Constants.SECONDS_PER_YEAR;
     }
 
     /* ============================== 1. MARKET ============================== */
@@ -251,8 +259,8 @@ contract Ace is ReentrancyGuardTransient {
     /// @notice Grants or revokes an operator's right to open loans in the caller's name.
     /// @notice Spends ONE nonce, so it kills the signature standing at that nonce and ARMS the one after it.
     /// @dev CREDIT delegation, not the title's ERC-721 `setApprovalForAll`; `_open` is the one gate every open passes.
-    /// @dev The operator cannot repay, refinance, settle or withdraw the borrower's existing loans.
-    /// @dev The one widening: an operator that is a loan's market lender may `extend` it, in cash the operator pays.
+    /// @dev The grant opens loans and nothing else: no top-up, refinance or withdrawal; those take the holder, a top-up also its title operator.
+    /// @dev It widens no extension: anyone may extend, and a grantee, the market lender included, meets the non-holder rule as a stranger does.
     /// @dev NEVER short-circuit on an unchanged value: `setCreditOperator(anyone, false)` is the borrower's nonce burn.
     /// @dev Unguarded: two storage writes and an event, reaching no external code at all.
     function setCreditOperator(address operator, bool allowed) external {
@@ -282,11 +290,16 @@ contract Ace is ReentrancyGuardTransient {
 
     /// @notice Re-anchor a live loan in place at its own tenor from now: same id, same title, the debt unchanged, the fee on the time added, in cash.
     /// @notice The new expiry is now plus the loan's own tenor, and the extended loan is admitted as a new one at `min(price, record)`.
-    /// @notice It lands only before expiry and never in the term's open second: those refuse `LoanMatured` and `ExtensionAddsNoTime`.
+    /// @notice It lands only before expiry and never in the second its term began, `expiry - tenor`: those refuse `LoanMatured` and `ExtensionAddsNoTime`.
     /// @notice The fee never exceeds the fee on the loan's whole tenor: a caller signing for a later landing signs for that.
     /// @notice It needs the market lender's roll policy to return its selector; no policy, or any other answer, refuses `PolicyRefused`.
-    /// @notice The borrower extends, and so does the market lender holding the borrower's credit grant; whoever calls pays the fee.
-    /// @notice A lender pays on the holder's behalf: the unearned part of the escrow it funds refunds to the holder at close, never to the payer.
+    /// @notice The policy sees the lot at the ask, and a withdrawal to the coverage line may follow in one call: a lot condition above the line is advisory.
+    /// @notice ANYONE may extend, and whoever calls pays the fee; the holder and an operator of its title meet only the legs above.
+    /// @notice Any other caller, a credit grantee included, needs the record at or above the price (`UnderPrice`) and the band's level (`BufferBelowMin`).
+    /// @notice It needs, too, at most a quarter of the tenor left (`ExtensionTooEarly`), so no stranger can keep rolling a loan early.
+    /// @notice The rule reads the record, so a record lagging a fall can let a last-block stranger extend at a true price under the market's.
+    /// @notice A non-holder pays on the holder's behalf: the unearned part of the escrow it funds refunds to the holder at close, never to the payer.
+    /// @notice A stranger may land a vault holder's renewal first on its copied consent payload: the holder's own call then refuses, costing gas alone.
     /// @notice It pulls quote as `repay` does, so a quote that refuses the caller leaves the loan to mature and `forceClose` to settle it.
     /// @notice A limit that cannot hand the policy its whole budget past EIP-150's 1/64 reverts `PolicyGasShort`: resend with more gas.
     /// @dev `msg.data[0:0]` is the empty-blob sentinel: it routes the pull to the caller's allowance, as `repay` does.
@@ -329,8 +342,48 @@ contract Ace is ReentrancyGuardTransient {
         return Borrower.tryExtend(_book(), _cache(_book().loans[id].market), id, minBufferWad, data, caller);
     }
 
+    /// @notice Draw `amount` more on a live loan from its own market's resting cash at the one price: debt and claim rise by it, the term holds.
+    /// @notice The fee is the origination fee on the term left, `expiry - now`, netted from the payout, which goes to the holder whoever calls.
+    /// @notice The holder or an operator of its title calls; a credit grant is no title, so the lender holding one cannot.
+    /// @notice It refuses with under `minTenor` left: extend first. An extension landing first lengthens the term charged; bound it with `minPayout`.
+    /// @notice Admission is `open`'s on the new debt at the price, the draw cap included; `bnd` bounds the payout, the buffer and the clock.
+    /// @dev Resting cash is the lender's standing consent to any admissible draw: a vault rests only inside its own door, so its markets rest none here.
+    /// @param id The loan to top up.
+    /// @param amount Quote to draw, at least `minPrincipal`.
+    /// @param bnd Bounds on the payout, the buffer and the deadline, or all-zero for none.
+    /// @return The top-up's fee.
+    function drawMore(uint256 id, uint256 amount, OpenBounds calldata bnd) external nonReentrant returns (uint256) {
+        bytes32 mid = _book().loans[id].market;
+        return Borrower.drawMore(_book(), _market()[mid], _cache(mid), id, amount, bnd);
+    }
+
+    /// @notice What `drawMore` would do if `caller` sent it now: whether it lands, why not, its fee and the term charged.
+    /// @notice It answers for any loan's id; an id naming no loan, an order's included, reverts `NoMarket` before the predicate runs.
+    /// @dev `nonReentrantView`: the answer reads a loan and a market a mid-call sees torn, so a call inside a hub call reverts on the guard.
+    /// @param caller The address that would call `drawMore`.
+    /// @return ok Whether the top-up would land.
+    /// @return reason The first failing leg's selector; zero when `ok`.
+    /// @return fee The top-up's fee; zero when refused.
+    /// @return term The term the fee is charged on; zero when refused.
+    function tryDrawMore(uint256 id, uint256 amount, OpenBounds calldata bnd, address caller)
+        external
+        view
+        nonReentrantView
+        returns (bool ok, bytes4 reason, uint256 fee, uint64 term)
+    {
+        bytes32 mid = _book().loans[id].market;
+        return Borrower.tryDrawMore(_book(), _market()[mid], _cache(mid), id, amount, bnd, caller);
+    }
+
+    /// @notice Add `units` of collateral to a live loan, paid by the caller: anyone may, and only the lot moves; it cures distress as a repay does.
+    /// @notice It reads no record and refuses from expiry; `permit2` empty pulls on the caller's allowance to custody.
+    /// @dev The market is read from the loan alone, so an order's id or an unused one fails closed `NoMarket`.
+    function addCollateral(uint256 id, uint256 units, bytes calldata permit2) external nonReentrant {
+        Borrower.addCollateral(_book(), _cache(_book().loans[id].market), id, units, permit2);
+    }
+
     /// @notice Withdraw collateral above this loan's COVERAGE LINE, at the live fold of funding floor and record.
-    /// @notice The line exceeds what the debt secures by one atom, which is what settlement's own ceiling costs.
+    /// @notice The line is the admissibility level `requiredAt` plus one atom of margin.
     /// @notice `to` is the caller's own choice, and the caller is the title holder: a token's refusal of it is theirs to avoid.
     /// @notice `to` is never zero, the hub or the positionManager, refused before the amount, the clock or the record is read.
     /// @dev The line bounds settlement, not the deleverage band's LEVEL test, so a withdrawal into the band is crankable in the same block.
@@ -530,7 +583,11 @@ contract Ace is ReentrancyGuardTransient {
         return (_book().unitsOwed[loanId][claimant], _book().quoteOwed[loanId][claimant]);
     }
 
-    /// @notice The cash resting in one market, which under sole tenancy IS its lender's balance there, and all of it a fresh draw may take.
+    /// @notice The cash resting in one market, which under sole tenancy IS its lender's balance there.
+    /// @notice An open, a fill or a top-up draws at least `minPrincipal`; only an own-market refinance, net of the claim it recycles, takes a rest under it.
+    /// @notice Resting cash is the lender's STANDING CONSENT to any admissible draw on this market, a top-up of a live loan included.
+    /// @dev A vault rests only inside its own door and drains before it returns, so no direct top-up reaches its cash.
+    /// @dev A LaunchVault reservation rests across calls, but its market names one lock account, which has no top-up door and moves no title.
     function restingOf(bytes32 id) external view returns (uint256) {
         return _market()[id].s.cash;
     }
@@ -634,10 +691,12 @@ contract Ace is ReentrancyGuardTransient {
     /// @notice The net out is PAID to the borrower in this call, as `open` pays; a quote that refuses it reverts the refinance.
     /// @notice Optionally sheds collateral off the SUCCESSOR in the same call; zero units to no recipient skips that leg.
     /// @notice A named `withdrawTo` is checked even with zero units: zero with units, the hub or the positionManager refuses.
-    /// @dev Borrower-only, because it is a new borrowing decision rather than maintenance; no keeper or periphery moves a loan.
+    /// @dev Borrower-only, because it is a new borrowing decision rather than maintenance; no keeper or periphery re-terms a loan here.
+    /// @dev `extend` is the one term verb a non-holder may call, and only under its non-holder rule.
     /// @dev NO health gate on the old loan: its debt is retired in full, so its lenders take cash at par.
     /// @dev Every admissibility question is open()'s, asked of the NEW loan; its cash leg needs only what the old claim does not recycle.
     /// @dev Only into its own market does the claim recycle, on its lender's roll policy's yes; any other market, the same lender's too, draws it all fresh.
+    /// @dev The roll policy sees the lot net of this call's withdrawal leg; a later withdrawal to the line may follow, so a lot condition above it is advisory.
     /// @dev A re-term drawing NO fresh cash is judged at `min(price, record)`; one drawing fresh cash meets the draw cap.
     /// @dev THE compatibility rules are collateral AND quote; fee, coverage, price and windows may differ.
     /// @dev Floor and claim reseed from the destination; only the collateral and the holder ride across.
@@ -823,7 +882,7 @@ contract Ace is ReentrancyGuardTransient {
     /// @notice The storage half of a position transfer: the token moves there, `Loan.borrower` here.
     /// @notice One transaction, both ledgers, or neither.
     /// @notice `to` is never the hub, the positionManager, the title collection or the treasury (in production a router): none claims a holder's credit.
-    /// @notice In a market that NAMES its borrower, a holder it does not name may hold the title but can never extend the loan.
+    /// @notice In a market that NAMES its borrower, a holder it does not name may hold the title but no one can extend or top up the loan.
     /// @dev NO solvency check: one `Loan` holds both legs, so trigger, debt and units cannot move here.
     /// @dev Every field keyed by the loan alone rides along; NEVER make a health input address-keyed.
     /// @dev Each close credits by loan AND claimant, the holder at the close or the crank's caller, so a title moved after any close carries none of them.

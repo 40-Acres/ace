@@ -2,23 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault, Listing} from "../../src/curator/CuratorVault.sol";
-import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
-
-/// @notice A vault whose NAV a test can grow by a set amount, as a product's override may add NAV the base does not see.
-contract LastOutGrownNavVault is CuratorVault {
-    uint256 public extra;
-
-    constructor(VaultConfig memory cfg, Listing[] memory l) CuratorVault(cfg, 10e6, 1.4e18, 1 days, l, "Grown", "cGROW") {}
-
-    function grow(uint256 amount) external {
-        extra += amount;
-    }
-
-    function totalAssets() public view override returns (uint256) {
-        return super.totalAssets() + extra;
-    }
-}
+import {AceVault} from "../../src/curator/AceVault.sol";
 
 /// @title CuratorVaultLastOutAtTheClaim
 /// @notice A vault whose every holder requests is wound down by its claims: the requests are paid every wei of cash, up to their worth.
@@ -37,7 +21,7 @@ contract CuratorVaultLastOutWindDownTest is CuratorVaultBase {
     uint256 internal constant DONATED = 1; // one share-wei sent to the vault: the only supply nobody can redeem
     uint256 internal constant DUST = 10; // asset-wei: the virtual and donated shares' slice of the last pot, plus rounding
 
-    CuratorVault internal v;
+    AceVault internal v;
     uint256 internal premiumLoan;
     uint256 internal arrivalLoan;
     uint256 internal doomedLoan;
@@ -46,7 +30,7 @@ contract CuratorVaultLastOutWindDownTest is CuratorVaultBase {
     function _claimAll() internal {
         address[3] memory who = [alice, bob, curator];
         for (uint256 i; i < who.length; i++) {
-            (uint256 esc,) = v.requestOf(who[i]);
+            (uint256 esc,) = vlens.requestOf(address(v), who[i]);
             if (esc == 0) continue;
             vm.prank(who[i]);
             (bool ok,) = address(v).call(abi.encodeCall(AceVault.claimExit, (esc, who[i], 0)));
@@ -149,9 +133,9 @@ contract CuratorVaultLastOutWindDownTest is CuratorVaultBase {
 
         uint256 n = (v.VEST_WINDOW() + ROUND - 1) / ROUND + 2;
         uint256 feeRounds; // rounds after the recovery in which the curator held fresh fee shares to re-request
-        uint256 offsetWorth; // the most the virtual-share offset and the donated share-wei were worth before any of those rounds
+        uint256 offsetWorth; // the most the virtual offset, the seed and the donated share-wei were worth before any of those rounds
         for (uint256 i; i < n; i++) {
-            uint256 w = v.convertToAssets(1e6 + DONATED);
+            uint256 w = v.convertToAssets(1e6 + DONATED + v.SEED_SHARES());
             if (w > offsetWorth) offsetWorth = w;
             _warpBy(ROUND);
             v.crank();
@@ -164,12 +148,12 @@ contract CuratorVaultLastOutWindDownTest is CuratorVaultBase {
         emit log_named_uint("rounds that minted the curator fresh fee shares", feeRounds);
         emit log_named_uint("rounds after the recovery", n);
         emit log_named_uint("supply left", v.totalSupply());
-        emit log_named_uint("of it, still requested", v.requestedShares());
+        emit log_named_uint("of it, still requested", vlens.requestedShares(address(v)));
         emit log_named_uint("the vault's own book left", v.grossNav());
         emit log_named_uint("book bound", DUST + offsetWorth);
         emit log_named_uint("cash left on the vault", usdc.balanceOf(address(v)));
         emit log_named_uint("NAV left", v.totalAssets());
-        assertEq(v.totalSupply(), DONATED, "the wind-down left redeemable supply behind: it is not donations only");
+        assertEq(v.totalSupply(), v.SEED_SHARES() + DONATED, "the wind-down left redeemable supply behind: it is not the seed and donations only");
         assertLe(v.grossNav(), DUST + offsetWorth, "the wind-down stranded the vault's own book");
         assertLe(usdc.balanceOf(address(v)), DUST + offsetWorth, "the wind-down stranded cash on the vault, owed to nobody");
     }
@@ -196,11 +180,10 @@ contract CuratorVaultLastOutWindDownTest is CuratorVaultBase {
 contract CuratorVaultLastOutReleaseAtTheClaimTest is CuratorVaultBase {
     uint256 internal constant SEED = 20_000e6;
     uint256 internal constant STAKE = 5_000e6;
-    uint256 internal constant EXTRA = 1e6; // NAV a subclass adds; under idle's surplus, so idle still covers the escrow
     address internal mallory = address(0xBAD);
 
     /// @dev Alice the sole holder, every cent idle, a lump standing on the ladder.
-    function _premiumThenAllCash(CuratorVault v) internal {
+    function _premiumThenAllCash(AceVault v) internal {
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(6_000e6);
         _crank(v, loanId, T2, 0);
@@ -211,24 +194,29 @@ contract CuratorVaultLastOutReleaseAtTheClaimTest is CuratorVaultBase {
     }
 
     /// @dev Escrow alice's whole balance as one request.
-    function _stand(CuratorVault v) internal returns (uint256 escrow) {
+    function _stand(AceVault v) internal returns (uint256 escrow) {
         escrow = v.balanceOf(alice);
         vm.prank(alice);
         v.requestExit(escrow);
     }
 
     /// @dev Alice claims `shares` of her request, paid to herself.
-    function _claim(CuratorVault v, uint256 shares) internal returns (uint256) {
+    function _claim(AceVault v, uint256 shares) internal returns (uint256) {
         vm.prank(alice);
         return v.claimExit(shares, alice, 0);
     }
 
-    function _left(CuratorVault v) internal view returns (uint256 shares) {
-        (shares,) = v.requestOf(alice);
+    function _left(AceVault v) internal view returns (uint256 shares) {
+        (shares,) = vlens.requestOf(address(v), alice);
+    }
+
+    /// @dev What the shares held at the vault itself, the seed's and any donated ones, are worth now: the book's part no holder is paid.
+    function _vaultOwn(AceVault v) internal view returns (uint256) {
+        return v.convertToAssets(v.balanceOf(address(v)) - vlens.requestedShares(address(v)));
     }
 
     /// @dev A fee-charging vault: alice its only holder, a loan out, the fee high-water at NAV, the curator holding nothing, no pile.
-    function _feeRigNoPile(CuratorVault v) internal returns (uint256 loanId) {
+    function _feeRigNoPile(AceVault v) internal returns (uint256 loanId) {
         _lpDeposit(v, alice, SEED);
         loanId = _open(6_000e6);
         v.crank(); // a sync that charges nothing: the open's own rise is on the ladder, unvested, and the fee reads only the vested part
@@ -243,22 +231,23 @@ contract CuratorVaultLastOutReleaseAtTheClaimTest is CuratorVaultBase {
 
     /// @notice THE LAST HOLDER IS PAID THE BOOK: the claim releases before it prices, and one claim takes it all.
     function test_LastOut_AClaimOfTheWholeRequestPaysTheBookAndEmptiesTheVault() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _premiumThenAllCash(v);
         uint256 book = v.grossNav();
         uint256 escrow = _stand(v);
 
         assertEq(v.maxClaim(alice), escrow, "maxClaim did not offer the last holder her whole request");
         uint256 paid = _claim(v, escrow);
-        assertApproxEqAbs(paid, book, 1, "the last holder was paid the gross");
-        assertEq(v.totalSupply(), 0, "so no share is outstanding after the claim's burn");
+        assertApproxEqAbs(paid + _vaultOwn(v), book, 2, "the last holder was paid the gross but the seed's part");
+        assertLe(_vaultOwn(v), 2 * v.MIN_SEED(), "and the seed's part is no more than the seed's own worth");
+        assertEq(v.totalSupply(), v.SEED_SHARES(), "so no live share is outstanding after the claim's burn");
         assertEq(v.unvested(), 0, "and the deferral released");
         assertEq(usdc.balanceOf(alice), paid, "the book, paid in one call");
     }
 
     /// @notice ANY PART CLAIMED BY THE LAST HOLDER RELEASES, AND THE REST PAYS THE BOOK: the request is claimable in parts.
     function testFuzz_LastOut_AnyAskByTheLastHolderReleasesAndTheRestPaysTheBook(uint256 want) public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _premiumThenAllCash(v);
         uint256 book = v.grossNav();
         uint256 escrow = _stand(v);
@@ -268,13 +257,14 @@ contract CuratorVaultLastOutReleaseAtTheClaimTest is CuratorVaultBase {
         assertEq(v.unvested(), 0, "the claim released the deferral");
         uint256 left = _left(v);
         if (left != 0 && v.previewRedeem(left) != 0) _claim(v, left);
-        assertApproxEqAbs(usdc.balanceOf(alice), book, 3, "the part plus the later claim pay the book");
+        assertApproxEqAbs(usdc.balanceOf(alice) + _vaultOwn(v), book, 3, "the part plus the later claim pay the book but the seed's part");
+        assertLe(_vaultOwn(v), 2 * v.MIN_SEED(), "and the seed's part is no more than the seed's own worth");
         assertLe(usdc.balanceOf(alice), book, "and never more");
     }
 
     /// @notice AN ENTRANT AFTER A PARTIAL LAST-HOLDER CLAIM PAYS FULL NAV AND TAKES NOTHING: the pile left with the release.
     function test_LastOut_AnEntrantAfterAPartialLastHolderClaimPaysFullNavAndTakesNothing() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _premiumThenAllCash(v);
         uint256 escrow = _stand(v);
         _claim(v, escrow / 2);
@@ -294,7 +284,7 @@ contract CuratorVaultLastOutReleaseAtTheClaimTest is CuratorVaultBase {
 
     /// @notice UNDER A FEE, THE FEE SHARES A VERB MINTS FIRST DO NOT SHIELD THE LAST LP: her whole instant exit is refused, and her claim releases.
     function test_LastOut_UnderAFeeTheLastLpIsRefusedAtOnceAndHerClaimReleasesThePile() public {
-        CuratorVault v = _newVault(2000);
+        AceVault v = _newVault(2000);
         uint256 loanId = _feeRigNoPile(v);
         _repay(loanId, lens.loan(loanId).debt);
         _crankAll(v); // stamped now, so the wait below vests part of it; every cent is idle, so cash is not what stops the release
@@ -311,12 +301,14 @@ contract CuratorVaultLastOutReleaseAtTheClaimTest is CuratorVaultBase {
         assertGt(v.balanceOf(curator), 0, "the claim's own collection minted the curator in");
         assertEq(v.unvested(), 0, "and the release ran beside its fee shares");
         assertEq(_left(v), 0, "alice is fully paid");
-        assertApproxEqAbs(paid + v.convertToAssets(v.balanceOf(curator)), book, 3, "and the book went to alice and the fee shares alone");
+        uint256 fee = v.convertToAssets(v.balanceOf(curator));
+        assertApproxEqAbs(paid + fee + _vaultOwn(v), book, 3, "and the book went to alice, the fee shares and the seed alone");
+        assertLe(_vaultOwn(v), 2 * v.MIN_SEED(), "and the seed's part is no more than the seed's own worth");
     }
 
     /// @notice A DONATED SHARE DOES NOT BLOCK THE RELEASE: a share on the vault backs no request and can never claim.
     function test_LastOut_ADonatedShareDoesNotBlockTheRelease() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _premiumThenAllCash(v);
         vm.prank(alice);
         v.transfer(address(v), 1);
@@ -326,28 +318,13 @@ contract CuratorVaultLastOutReleaseAtTheClaimTest is CuratorVaultBase {
         assertEq(v.maxClaim(alice), escrow, "maxClaim did not replay the release past the donation");
         uint256 paid = _claim(v, escrow);
         assertEq(v.unvested(), 0, "the claim released despite the donation");
-        assertEq(v.totalSupply(), v.balanceOf(address(v)), "leaving only the donated share");
-        assertApproxEqAbs(paid, book, 2, "and paying the book");
-    }
-
-    /// @notice WHAT A SUBCLASS ADDS TO NAV IS PAID TO THE LAST HOLDER AT ITS SHARE: the claim prices off the `virtual` door after the release.
-    /// @dev Idle is exactly the gross book, so NAV the subclass adds is not cash: the last holder claims half, which idle covers.
-    function test_LastOut_ASubclassesAddedNavIsPaidToTheLastHolderInFull() public {
-        LastOutGrownNavVault v = new LastOutGrownNavVault(_cfg(0), _listing());
-        mid = _doorMarket(v, address(collateral));
-        _premiumThenAllCash(v);
-        v.grow(EXTRA);
-        uint256 g = v.grossNav();
-        uint256 escrow = _stand(v);
-
-        uint256 paid = _claim(v, escrow / 2);
-        assertEq(v.unvested(), 0, "the last holder's claim did not release");
-        assertApproxEqAbs(paid, (g + EXTRA) / 2, 1, "the claim did not pay its half of the gross plus what the subclass adds");
-        assertEq(v.totalSupply(), escrow - escrow / 2, "and the claim burned other than its half");
+        assertEq(v.totalSupply(), v.balanceOf(address(v)), "leaving only the seed and the donated share");
+        assertApproxEqAbs(paid + _vaultOwn(v), book, 2, "and paying the book but the seed's and the donation's part");
+        assertLe(_vaultOwn(v), 2 * v.MIN_SEED(), "which is no more than the seed's own worth");
     }
 
     /// @dev A SOLE holder, a deferral standing, and every wei of it banked into idle.
-    function _lastOutWithADeferral(CuratorVault v) internal {
+    function _lastOutWithADeferral(AceVault v) internal {
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(6_000e6);
         _crank(v, loanId, T2, 0);
@@ -355,16 +332,16 @@ contract CuratorVaultLastOutReleaseAtTheClaimTest is CuratorVaultBase {
         _repay(loanId, lens.loan(loanId).debt);
         _crankAll(v); // banks the premium into idle AND defers the rise, in one sync
         assertGt(v.unvested(), 0, "fixture: a deferral is standing when the last holder leaves");
-        assertEq(v.totalSupply(), v.balanceOf(alice), "fixture: one holder, so the exit below is the last");
+        assertEq(v.totalSupply(), v.balanceOf(alice) + v.SEED_SHARES(), "fixture: one holder beside the seed, so the exit below is the last");
         assertGe(v.idle(), v.grossNav(), "fixture: idle covers the book, so the claim can pay a full exit");
     }
 
     /// @notice THE CLAIM RE-PRICES AFTER THE RELEASE: the deferral it retires lifts the payout, so the last holder takes the gross.
     /// @dev MUTATION TARGET: `claimExit` releases, then reads NAV once and collects the fee; read NAV before `_release(g)` and this must fail.
     function test_LastOut_AClaimRePricesAfterTheReleaseAndPaysTheWholeBook() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lastOutWithADeferral(v);
-        uint256 sh = v.totalSupply();
+        uint256 sh = v.balanceOf(alice);
         vm.prank(alice);
         v.requestExit(sh);
         uint256 g = v.grossNav();
@@ -372,15 +349,16 @@ contract CuratorVaultLastOutReleaseAtTheClaimTest is CuratorVaultBase {
         assertLt(preRelease, g, "PREMISE: the standing deferral is still deducted from the price");
 
         uint256 paid = _claim(v, sh);
-        assertEq(v.totalSupply(), 0, "the last holder really did leave");
+        assertEq(v.totalSupply(), v.SEED_SHARES(), "the last holder really did leave");
         assertEq(v.unvested(), 0, "and the release retired the whole deferral");
         assertGt(paid, preRelease, "LIVENESS: the read after the release really did lift the payout");
-        assertApproxEqAbs(paid, g, 2, "so the last holder out took the whole gross book, not a deferred fraction");
+        assertApproxEqAbs(paid + _vaultOwn(v), g, 2, "so the last holder out took the whole gross book but the seed's part, not a deferred fraction");
+        assertLe(_vaultOwn(v), 2 * v.MIN_SEED(), "and the seed's part is no more than the seed's own worth");
     }
 
     /// @notice A SOLE HOLDER'S REQUEST IS CLAIMABLE WHOLE AT ONCE AND ONE CLAIM TAKES IT, with no residue behind.
     function test_LastOut_ASoleHoldersClaimLeavesNoResidueAtAll() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lastOutWithADeferral(v);
         uint256 held = v.balanceOf(alice); // BEFORE the prank: a read is a call, and a call would eat it
         vm.prank(alice);
@@ -388,7 +366,7 @@ contract CuratorVaultLastOutReleaseAtTheClaimTest is CuratorVaultBase {
         assertEq(v.maxClaim(alice), held, "the whole request is claimable at once");
 
         assertGt(_claim(v, held), 0, "and one claim takes it");
-        assertEq(v.totalSupply(), 0, "with no residue behind it: this really was the last out");
+        assertEq(v.totalSupply(), v.SEED_SHARES(), "with no residue behind it but the seed: this really was the last out");
         assertEq(v.unvested(), 0, "so the release fired, and nothing is left ownerless");
         assertEq(_left(v) + v.maxClaim(alice), 0, "and the request is spent");
     }
@@ -397,7 +375,7 @@ contract CuratorVaultLastOutReleaseAtTheClaimTest is CuratorVaultBase {
     /// @dev A FREE dust holder does delay it, and that is the ACCEPTED residual: alice is paid at the net price and leaves the pile behind.
     /// @dev So the dust holder collects alice's share of the pile as it vests, at most the pile, and alice is paid the book less it.
     function test_LastOut_ADonationDoesNotDelayTheReleaseAndLosesNoValue() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _premiumThenAllCash(v);
         uint256 snap = vm.snapshotState();
 
@@ -406,7 +384,8 @@ contract CuratorVaultLastOutReleaseAtTheClaimTest is CuratorVaultBase {
         uint256 book = v.grossNav();
         uint256 paid = _claim(v, _stand(v));
         assertEq(v.unvested(), 0, "a donated share delayed the release");
-        assertApproxEqAbs(paid, book, 2, "and the book was not paid whole");
+        assertApproxEqAbs(paid + _vaultOwn(v), book, 2, "and the book was not paid whole but the seed's and the donation's part");
+        assertLe(_vaultOwn(v), 2 * v.MIN_SEED(), "which is no more than the seed's own worth");
 
         vm.revertToState(snap);
         uint256 dust = _lpDeposit(v, mallory, 1); // one asset-wei of free shares: a holder the predicate must count
@@ -422,13 +401,13 @@ contract CuratorVaultLastOutReleaseAtTheClaimTest is CuratorVaultBase {
         assertGt(v.balanceOf(mallory), 0, "PREMISE: the dust holder stayed in");
         assertEq(_left(v), 0, "PREMISE: alice was paid whole");
         assertLe(dustAfter, 1 + pile + 2, "the dust holder took more than the pile");
-        assertGe(paid + pile + 2, book, "and alice was paid less than the book less the pile");
+        assertGe(paid + pile + _vaultOwn(v) + 2, book, "and alice was paid less than the book less the pile and the seed's part");
     }
 
     /// @notice A DUST HOLDER BLOCKING THE RELEASE COLLECTS THE CLAIM'S PILE: the accepted residual of a claim at the net price. ACCEPTANCE.
     /// @dev Alice claims whole at once at the net price; the pile her shares would have shared vests to the one free holder.
     function test_LastOut_ADustHolderBlockingTheReleaseCollectsTheClaimsPile() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _premiumThenAllCash(v);
         uint256 dust = _lpDeposit(v, mallory, 1);
         _gift(v, 4_000e6); // a fifth of the book, deferred
@@ -442,6 +421,6 @@ contract CuratorVaultLastOutReleaseAtTheClaimTest is CuratorVaultBase {
         emit log_named_uint("the pile at the request", pile);
         emit log_named_uint("the pile handed on: the dust holder's worth once it vests", dustAfter);
         assertLe(dustAfter, 1 + pile + 2, "the dust holder took more than the pile");
-        assertGe(paid + pile + 2, book, "and alice was paid less than the book less the pile");
+        assertGe(paid + pile + _vaultOwn(v) + 2, book, "and alice was paid less than the book less the pile and the seed's part");
     }
 }

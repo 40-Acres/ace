@@ -496,7 +496,7 @@ contract AceDeleverageActivationTest is Test {
     /// @notice The planner's witness was ARITHMETIC ONLY; this drives the same numbers through createMarket, a draw and a real crank.
     /// @dev What fires here is the SIZING cap; `test_ScopeCappedCrank_NoCutFallback` covers the SCOPE cap, and nothing covered this.
     /// @dev `unitsSold == collateralUnits` did not arise at the hub, and the reason is structural rather than a fixture limit.
-    /// @dev Admission demands `units >= requiredAt(debt, floor) + maxClaimTicks` while `securedBase` caps at `requiredAt`, so base < units at open.
+    /// @dev Admission demands `units >= requiredAt(debt, floor) + 1` while `securedBase` caps at `requiredAt`, so base < units at open.
     /// @dev Either arm leaves `charge` false, so the no-cut melt is unchanged whichever cap fires.
     /// @dev The cap now also withholds what settlement needs, so the crank melts debt WITHOUT repaying and the loan stays open.
     /// @dev That is the point of the reserve: a sell-max sizing may not sell the units a settlement would have to pay claims with.
@@ -519,10 +519,8 @@ contract AceDeleverageActivationTest is Test {
         emit log_named_uint("witness collateral units held", w.units);
         emit log_named_uint("witness collateral units sold", sold);
         emit log_named_uint("witness proceeds", out);
-        /// @dev WAS a STRICT `assertLt`. `securedBase` is `min(requiredAt, units - keep)`, and `keep` carries
-        /// @dev the coverage line's epsilon -- which was `maxClaimTicks` atoms and is ONE now. So `sellable`
-        /// @dev grew and `requiredAt` became the binding term rather than the slack one: the cap lands ON the
-        /// @dev debt-securing units instead of a whole ladder's worth under them. The bound is what matters.
+        /// @dev WAS a STRICT `assertLt`, while `keep` in `min(requiredAt, units - keep)` carried a ceiling per funded tick.
+        /// @dev `keep` takes one ceiling now, so `requiredAt` binds and the cap can land ON the debt-securing units.
         assertLe(sold, base, "the scope cap did not hold the sale to the debt-securing units");
         assertLt(sold, w.units, "unitsSold reached collateralUnits: the coverage line's dust reserve stopped being structural");
         assertEq(w.d.read.protocolRevenue(w.d.id), rev0, "a crank that could not restore took a protocol cut");

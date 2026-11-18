@@ -86,16 +86,16 @@ contract AceCrossMarketRefinanceTest is WarpClock {
     uint256 internal constant P = 70_000e6;
     uint256 internal constant COLL = 100_000e18;
     uint256 internal constant FLOAT = 2_000_000e6;
-    /// @dev The ELAPSED half of a 30-day loan's 600 fee escrow at t+15d, which the retirement earns.
+    /// @dev The ELAPSED half of a 30-day loan's 630 fee escrow at t+15d, which the retirement earns.
     /// @dev It credits A's own funding ticks before the melt, so A's cash takes it ON TOP of the debt.
-    uint256 internal constant EARNED30_AT15 = 300e6;
-    uint256 internal constant REFUND30_AT15 = 300e6; // the UNEARNED half of that escrow, which the retirement pays back
-    uint256 internal constant FEE30_B = 2_640e6; // B's ALL-IN origination on a 30-day draw of P, at its own 80 bps
+    uint256 internal constant EARNED30_AT15 = 315e6;
+    uint256 internal constant REFUND30_AT15 = 315e6; // the UNEARNED half of that escrow, which the retirement pays back
+    uint256 internal constant FEE30_B = 2_772e6; // B's ALL-IN origination on a 30-day draw of P, at its own 4380 bps a year
     uint256 internal constant TOP_UP_B = FEE30_B - REFUND30_AT15; // what the netting leaves the caller to fund
 
-    /// @dev A's origination is 40 bps per 7d; B's is 80. The whole point of test 5.
-    uint256 internal constant BASE_BPS_A = 40;
-    uint256 internal constant BASE_BPS_B = 80;
+    /// @dev A's origination is 2190 bps a year, 6 a day, so every figure is exact; B's is twice that. The whole point of test 5.
+    uint256 internal constant BASE_BPS_A = 2190;
+    uint256 internal constant BASE_BPS_B = 4380;
     uint256 internal constant K_A = 1.4e18;
     uint256 internal constant K_B = 1.2e18;
     uint256 internal constant HWM_B = 1.5e18; // B's record's windowed minimum, as a human WAD
@@ -168,11 +168,11 @@ contract AceCrossMarketRefinanceTest is WarpClock {
         return AceFixtures.priceAt(address(usdc), address(vault), offset);
     }
 
-    /// @dev Market A: the source. k = 1.4, 40 bps, deleverage OFF.
+    /// @dev Market A: the source. k = 1.4, 2190 bps a year, deleverage OFF.
     function _paramsA() internal view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(recA);
-        p.baseBps = BASE_BPS_A;
+        p.lenderAprBps = BASE_BPS_A;
         p.minCoverageWad = K_A;
         p.minTenor = TEN7;
         p.maxTenor = TEN30;
@@ -183,7 +183,7 @@ contract AceCrossMarketRefinanceTest is WarpClock {
     function _paramsB() internal view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(recB); // the differentiator: its own record is what makes B a distinct id
-        p.baseBps = BASE_BPS_B;
+        p.lenderAprBps = BASE_BPS_B;
         p.minCoverageWad = K_B;
         p.deleverageFloorEpsBps = ProtocolPolicy.DELEVERAGE_FLOOR_EPS_BPS;
         p.deleverageBandBps = 3000; // the decline channel is OFF in A and ON here
@@ -221,7 +221,7 @@ contract AceCrossMarketRefinanceTest is WarpClock {
     /// @dev The fee is the DESTINATION's, which is the whole reason a cross-market roll can fall short.
     function _gap(MigrateArgs memory m) internal view returns (uint256) {
         MarketParams memory p = ace.idToMarketParams(m.dst);
-        uint256 feeNew = LoanMath.originationFee(m.newPrincipal, m.newTenor, p.baseBps, p.minTenor);
+        uint256 feeNew = LoanMath.originationFee(m.newPrincipal, m.newTenor, p.lenderAprBps);
         uint256 credit = m.newPrincipal - feeNew + read.earlyExitRefund(m.id);
         uint256 debtOld = read.loan(m.id).debt;
         return credit >= debtOld ? 0 : debtOld - credit;
@@ -375,7 +375,7 @@ contract AceCrossMarketRefinanceTest is WarpClock {
         /// @dev position, so the migration's credit and the new draw's credit land in the same number.
         assertEq(
             owedAfter - owedBefore,
-            P + EARNED30_AT15 + _lenderCutAtOpen(P, TEN30, BASE_BPS_B, TEN7),
+            P + EARNED30_AT15 + _lenderCutAtOpen(P, TEN30, BASE_BPS_B),
             "and par returned to the pool, plus the escrow the served term earned and B's own cut"
         );
         assertEq(_liveClaims(idA, oldId), 0, "A holds no claim for the retired loan");
@@ -410,8 +410,8 @@ contract AceCrossMarketRefinanceTest is WarpClock {
 
     // ============ 5-8. whose config prices the new loan ============
 
-    /// @notice Plan test 5: B's `baseBps` prices the origination -- B's lenders fund it, B's pot takes it.
-    /// @dev The one-Cfg shape is what guarantees this; threading A's would price the loan at 40 bps.
+    /// @notice Plan test 5: B's `lenderAprBps` prices the origination -- B's lenders fund it, B's pot takes it.
+    /// @dev The one-Cfg shape is what guarantees this; threading A's would price the loan at 2190 bps a year.
     function test_CrossMarket_BsFeePricesTheNewLoan() public {
         uint256 oldId = _open(idA, P, TEN30);
         _warpTo(t0 + 15 days);
@@ -420,7 +420,7 @@ contract AceCrossMarketRefinanceTest is WarpClock {
 
         _migrate(borrower, _args(oldId, idB, P, TEN30));
 
-        uint256 den = 10000 * 10000 * uint256(TEN7);
+        uint256 den = 10000 * 10000 * uint256(365 days);
         uint256 feeA = (P * BASE_BPS_A * TEN30 * 11000 + den - 1) / den;
         uint256 feeB = (P * BASE_BPS_B * TEN30 * 11000 + den - 1) / den;
         assertEq(feeB, feeA * 2, "fixture: B's origination is exactly twice A's");
@@ -584,7 +584,7 @@ contract AceCrossMarketRefinanceTest is WarpClock {
         (, uint256 lentAfter, uint256 owedAfter) = read.poolOf(idA);
         assertApproxEqAbs(
             owedAfter - owedBefore,
-            P + EARNED30_AT15 + _lenderCutAtOpen(35_000e6, TEN30, BASE_BPS_B, TEN7),
+            P + EARNED30_AT15 + _lenderCutAtOpen(35_000e6, TEN30, BASE_BPS_B),
             4,
             "the migrating loan repays the lender at par, in full, plus the served term's earn and B's own cut"
         );
@@ -599,8 +599,8 @@ contract AceCrossMarketRefinanceTest is WarpClock {
     /// @dev The lender's IMMEDIATE cut of a new draw's origination, which lands in the pool at the open.
     /// @dev A AND B SHARE A POOL -- same lender, same quote -- so a migration's `owed` delta carries this
     /// @dev alongside par and the escrow the served term earned. It was invisible while `owed` was per-market.
-    function _lenderCutAtOpen(uint256 principal, uint64 tenor, uint256 baseBps, uint64 minTenor) private pure returns (uint256) {
-        return LoanMath.tickCut(LoanMath.originationFee(principal, tenor, baseBps, minTenor));
+    function _lenderCutAtOpen(uint256 principal, uint64 tenor, uint256 lenderAprBps) private pure returns (uint256) {
+        return LoanMath.tickCut(LoanMath.originationFee(principal, tenor, lenderAprBps));
     }
 
     /// @dev What the LENDER is owed in quote. WAS a per-class walk of the loan's funded ticks; there is one

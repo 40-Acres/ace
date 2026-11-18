@@ -5,8 +5,9 @@ storage record keyed by its parameters, so creating one deploys nothing. Lenders
 price per unit of collateral, borrowers draw against collateral for a fixed tenor, and a loan that ends in default
 transfers title to its collateral to the lender who funded it.
 
-**Curator vaults** sit above the hub: `CuratorVault` is an ERC-4626 vault a curator runs. It holds its depositors'
-cash and lends it into ACE markets that name it as their lender, on terms the curator sets. `AceVault` is its base.
+**Curator vaults** sit above the hub: `AceVault` is an ERC-4626 vault a curator runs. It holds its depositors' cash
+and lends it into ACE markets that name it as their lender, on terms a separate product contract answers; `CuratorTerms`,
+an oracle-priced collateral table, is the first. `AceVaultFactory` deploys and registers each vault.
 
 **Runway** is a token-launch stack built on ACE: a fixed-supply token, a continuous clearing auction, a Uniswap v4
 pool opened at migration, and locked allocations that vest on a schedule and can be pledged as ACE collateral while
@@ -26,13 +27,14 @@ that exercise them.
 | `src/ace/positions/` | `PositionManager`, the custodian holding pledged collateral, and `PositionTitleNFT`, the loan titles |
 | `src/ace/treasury/` | `RevenueRouter`, where the protocol's fees are paid |
 | `src/ace/lens/` | Read-only views over the hub; redeployable |
-| `src/entities/launch/` | Runway: `LaunchTokenFactory`, `LaunchToken`, `LaunchLock`, `LockAccount`, `LaunchOpsBudget`, `RunwayHook` |
+| `src/entities/launch/` | Runway: `LaunchTokenFactory`, `LaunchToken`, `LaunchLock`, `LockAccount`, `LaunchOpsBudget`, `RunwayHook`; `LaunchVault`, the launch lending vault |
+| `src/entities/curated/`, `src/entities/inkind/` | The vault products `CuratorTerms` (the curated collateral table) and `InKindTerms` (appraiser-signed quotes) |
 | `src/entities/vesting/ScheduleLock.sol` | The schedule and account base `LaunchLock` inherits |
-| `src/curator/` | `CuratorVault` and its base `AceVault` (with `AceVaultFlows`); `LaunchVault`, the launch lending vault, with `PriceGrid` and `sets/SetValue` |
+| `src/curator/` | `AceVault` (with `AceVaultFlows`, `AceVaultCaps`, `AceVaultInKind` and `AceVaultTail`), `AceVaultLens`, `AceVaultFactory` and `PriceGrid` |
 | `src/oracle/`, `src/config/`, `src/interfaces/`, `src/utils/` | Price records the hub can read, default market parameters, interfaces, helpers |
 | `vendor/` | Third-party source copied verbatim, licences beside it: Uniswap's liquidity-launcher `InitializerHook`, OpenZeppelin's `VestingWalletUpgradeable`, and a copy of v4's `PoolManager` that only the tests deploy |
 | `test/` | Unit, fuzz, invariant and fork tests |
-| `verify/` | Formal verification: Certora specs over the hub, the custodian, the title NFT, `LoanMath`, `CuratorVault` and `RunwayHook`, and a Kani proof; see `verify/README.md` |
+| `verify/` | Formal verification: Certora specs over the hub, the custodian, the title NFT, `LoanMath`, `AceVault` and `RunwayHook`, and a Kani proof; see `verify/README.md` |
 | `scripts/` | Building the local prover, munging the hub for it, and running a spec |
 
 ## Build and test
@@ -63,8 +65,10 @@ cleanly when it is not. The deployed bytecode is compiled via-IR; `FOUNDRY_PROFI
 
 1. **The hub** (`src/ace/hub`, `src/ace/positions`, `src/ace/treasury`). It is immutable once deployed: there is no
    owner, no pause and no proxy, and every market lives in it.
-2. **The curator vaults** (`CuratorVault`, `AceVault`, `AceVaultFlows`).
-3. **Runway** (`src/entities/launch`, `ScheduleLock`).
+2. **The curator vaults** (`AceVault`, `AceVaultFlows`, `AceVaultCaps`, `AceVaultInKind`, `AceVaultTail`, `CuratorTerms`,
+   `InKindTerms`, `AceVaultLens`, `AceVaultFactory`).
+3. **Runway** (`RunwayHook`, `LaunchToken`, `LaunchTokenFactory`, `LaunchLock`, `LockAccount`, `LaunchOpsBudget`,
+   `ScheduleLock`).
 4. **LaunchVault**.
 
 ## Intentional behaviour

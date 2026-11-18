@@ -78,7 +78,7 @@ contract AceS1NamedBorrowerTitleTest is WarpClock {
     /// @dev Mint `who` the extension fee on `loanId` for `TEN7` and approve the hub for it.
     function _fundFee(address who, uint256 loanId) internal {
         MarketParams memory p = ace.idToMarketParams(mid);
-        uint256 fee = LoanMath.originationFee(read.debtOf(loanId), TEN7, p.baseBps, p.minTenor);
+        uint256 fee = LoanMath.originationFee(read.debtOf(loanId), TEN7, p.lenderAprBps);
         usdc.mint(who, fee);
         vm.prank(who);
         usdc.approve(address(ace), fee);

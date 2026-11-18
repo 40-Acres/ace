@@ -234,7 +234,7 @@ contract AceLenderByCollateralEdgesTest is WarpClock, DeleverageCrank {
     // ============ E1-E2: what settlement puts into the units ============
 
     /// @notice A RECORDLESS forfeit lands the whole coverage line in the pot, and the units count all of it, spread included.
-    /// @dev Kills `unsoldUnits += give`: on a record-backed market the pot IS the give, so only this class tells them apart.
+    /// @dev Kills `unsoldUnits += give`: the forfeited spread lands in the pot above the claims' give, and the units must count all of it.
     function test_Settle_ARecordlessForfeitCountsTheSpreadInTheUnits() public {
         Mkt memory rx = _create(AceFixtures.marketParams(address(usdc), address(collX)), usdc, collX, lender, false);
         Mkt memory my = _market(usdc, collY, lender);

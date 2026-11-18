@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
-import {BufferBelowMin, NotBorrower} from "../../src/ace/hub/Borrower.sol";
+import {BufferBelowMin, ExtensionTooEarly} from "../../src/ace/hub/Borrower.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {Loan} from "../../src/ace/hub/Types.sol";
 import {ExtendRig} from "../utils/ExtendRig.sol";
@@ -25,41 +25,39 @@ contract AceExtendHardeningTest is ExtendRig {
 
     /* ============================== the draw counter (step-2 ruling 5) ============================== */
 
-    /// @notice Every landed extension bumps the market's draw counter exactly once: the holder's, and the granted lender's.
+    /// @notice Every landed extension bumps the market's draw counter exactly once: the holder's a day in, and the lender's in the last quarter.
     function test_EveryExtensionBumpsTheDrawCounterOnce() public {
         uint256 loanId = _open(P, TEN7, 5000);
-        vm.prank(borrower);
-        ace.setCreditOperator(alice, true);
         _warpBy(1 days);
         uint256 d0 = _draws();
         uint256 snap = vm.snapshotState();
         _extend(borrower, loanId);
         assertEq(_draws(), d0 + 1, "the holder's extension bumped the counter once");
         vm.revertToState(snap);
+        _warpTo(uint256(read.loan(loanId).expiry) - TEN7 / 4);
         _extend(alice, loanId);
-        assertEq(_draws(), d0 + 1, "the granted lender's extension bumped it once");
+        assertEq(_draws(), d0 + 1, "the lender's extension bumped it once");
     }
 
     /* ============================== the previews' callers (step-2 ruling 6) ============================== */
 
-    /// @notice `tryExtend` answers for the caller it NAMES, never its sender: a keeper asks for the holder and for the granted lender.
+    /// @notice `tryExtend` answers for the caller it NAMES, never its sender: a keeper asks for the holder, and later for the lender.
     function test_ThePreviewAnswersForTheNamedCallerNotItsSender() public {
         uint256 loanId = _open(P, TEN7, 5000);
-        vm.prank(borrower);
-        ace.setCreditOperator(alice, true);
         _warpBy(1 days);
         uint256 fee = _feeNow(loanId);
-        vm.startPrank(keeper);
+        vm.prank(keeper);
         (bool hOk, bytes4 hWhy, uint256 hFee) = ace.tryExtend(loanId, 0, "", borrower);
-        (bool lOk,, uint256 lFee) = ace.tryExtend(loanId, 0, "", alice);
-        vm.stopPrank();
         assertTrue(hOk && hWhy == bytes4(0), "a keeper asking for the holder hears the holder's yes");
         assertEq(hFee, fee, "at the extension's fee");
-        assertTrue(lOk, "and for the granted lender, the lender's yes");
         vm.prank(borrower);
         (bool sOk, bytes4 sWhy,) = ace.tryExtend(loanId, 0, "", stranger);
         assertFalse(sOk, "the holder asking for a stranger hears the stranger's no");
-        assertEq(sWhy, NotBorrower.selector, "named as the caller leg's");
+        assertEq(sWhy, ExtensionTooEarly.selector, "named as the non-holder rule's");
+        _warpTo(uint256(read.loan(loanId).expiry) - TEN7 / 4);
+        vm.prank(keeper);
+        (bool lOk,, uint256 lFee) = ace.tryExtend(loanId, 0, "", alice);
+        assertTrue(lOk, "in the last quarter, a keeper asking for the lender hears the lender's yes");
         assertEq(_extend(alice, loanId), lFee, "CONTROL: the lender's verb then charges the fee its preview named");
     }
 

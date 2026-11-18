@@ -2,8 +2,9 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault, Listing, Row} from "../../src/curator/CuratorVault.sol";
 import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
+import {Listing, Row} from "../../src/entities/curated/CuratorTerms.sol";
+import {CuratedVaults} from "../utils/CuratedVaults.sol";
 import {MarketState} from "../../src/ace/hub/Types.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
@@ -29,7 +30,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     /// @dev N door loans, all synced, with the LAST loan still live and one clean close from paying.
     /// @dev Value arrives at the REPAY, in the hub's own aggregate, atomically.
     /// @dev The crank does not carry it -- it is NAV-neutral -- so the rig hands back the unpulled trigger.
-    function _primedPremium(CuratorVault v) internal returns (uint256 loanId) {
+    function _primedPremium(AceVault v) internal returns (uint256 loanId) {
         _lpDeposit(v, alice, SEED);
         uint256[] memory loans = new uint256[](N);
         for (uint256 i; i < N; i++) {
@@ -43,7 +44,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
 
     /// @dev The primed rig with the trigger already pulled: value standing, and no sync since it landed.
     /// @dev A clean close is what earns the fee escrow over the served term; a partial repay earns nothing.
-    function _standingPremium(CuratorVault v) internal returns (uint256 loanId) {
+    function _standingPremium(AceVault v) internal returns (uint256 loanId) {
         loanId = _primedPremium(v);
         _repay(loanId, lens.loan(loanId).debt);
     }
@@ -51,7 +52,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     /// @dev ONE loan, fully repaid and swept: every cent is idle CASH and a lump is standing on the ladder.
     /// @dev The shape the zero-shares transition has to be judged in, because a vault still carrying
     /// @dev lent principal cannot pay its last holder out in the first place.
-    function _premiumThenAllCash(CuratorVault v) internal {
+    function _premiumThenAllCash(AceVault v) internal {
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(6_000e6);
         _crank(v, loanId, T2, 0);
@@ -72,7 +73,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     /// @dev Cash out PLUS what the remaining shares are worth still exceeds the stake if the ladder is
     /// @dev broken, however illiquid the vault is, so this measure bites on the deferral and only on it.
     function test_Vest_TheAtomicSandwichCapturesNothing() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _primedPremium(v);
 
         uint256 stake = 5_000e6;
@@ -106,7 +107,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     /// @dev A flash-sized deposit is the same attack with a bigger numerator, and it captures the same zero.
     /// @dev Measured as value, not as cash taken, for the reason spelled out on the keystone row above.
     function test_Vest_AFlashLoanedSandwichCapturesNothing() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _standingPremium(v);
 
         uint256 stake = 40 * SEED; // D >> NAV, since the old profit scaled as delta * D/(V+D)
@@ -128,7 +129,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
 
     /// @dev Vesting PRICES the hole, it does not close it: a one-block hold earns one block's share.
     function test_Vest_AOneBlockHoldCapturesOnlyItsShare() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _standingPremium(v);
 
         uint256 stake = 5_000e6;
@@ -154,7 +155,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
 
     /// @dev The honest claim: a holder who bears the window's risk receives their share in full.
     function test_Vest_AFullWindowHoldCapturesItAll() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _standingPremium(v);
 
         uint256 stake = 5_000e6;
@@ -182,7 +183,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
 
     /// @dev A pass may LOWER nav (the hub's own melt flooring) but may never raise it: that is the invariant.
     function test_Vest_ASweepNeverRaisesNav() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(6_000e6);
         _crank(v, loanId, T2, 0);
@@ -202,7 +203,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     /// @dev A LOSS IS NEVER DEFERRED. `_sync` stamps only a RISE; a fall passes straight through.
     /// @dev The settlement moves the hub's own aggregate, so this needs no crank at all to land.
     function test_Vest_ASettlementDefersNothingAndLandsAtOnce() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(6_000e6);
         _crank(v, loanId, T2, 0);
@@ -220,7 +221,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     /// @dev NAV must FALL by the settled loan's whole unrecovered position, with the ladder staying out.
     /// @dev Replaces `test_Vest_EntryBasisIsStillInvariantAcrossAWriteOff`.
     function test_Vest_ASettlementLowersNavAndTheLadderStaysOut() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(6_000e6);
         _crank(v, loanId, T2, 0);
@@ -239,7 +240,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
 
     /// @dev A recovery is ordinary quote arriving: an observed RISE, so ALL of it defers.
     function test_Vest_ARecoveryDefersTheWholeArrival() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(6_000e6);
         _crank(v, loanId, T2, 0);
@@ -264,7 +265,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     /// @dev ever minted units, the gate admits one lot owner, and the vault itself is forbidden to burn.
     /// @dev So `burned` is pinned at zero for every class the vault holds, forever, by construction.
     function test_Vest_NoClassOfThisVaultCanEverHaveBurnedUnits() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(8_000e6);
         _crank(v, loanId, T2, 0);
@@ -293,7 +294,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     /// @dev maturity is a weighted average of values all at or below `now + W`, so it cannot exceed it.
     /// @dev The old bound was the three-rung span, where a credit took the first rung at or after now + W.
     function test_Vest_TheSpanIsBoundedByOneWindow() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _primedPremium(v);
         _repay(loanId, lens.loan(loanId).debt);
         v.collectFee(); // the sync that defers the arrival
@@ -307,7 +308,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     /// @dev The read leg CEILS, so the deduction rounds against the entrant and never against the stayers.
     /// @dev The subject is now the OBSERVED RISE in gross, which is exactly what `_sync` hands the ladder.
     function test_Vest_TheDeductionRoundsUpNotDown() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _primedPremium(v);
         uint256 grossBefore = v.grossNav();
         uint256 deferredBefore = v.unvested();
@@ -347,17 +348,17 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
         _make(cfg, l, "Long");
 
         cfg.vestWindow = 1 hours;
-        CuratorVault low = _make(cfg, l, "Min");
+        AceVault low = _make(cfg, l, "Min");
         assertEq(low.VEST_WINDOW(), 1 hours, "the bottom of the rail is admitted, not refused");
 
         cfg.vestWindow = 7 days;
-        CuratorVault ok = _make(cfg, l, "Max");
+        AceVault ok = _make(cfg, l, "Max");
         assertEq(ok.VEST_WINDOW(), 7 days, "the top of the rail is admitted");
     }
 
-    /// @dev A vault from `cfg` listing `l`, at the rig's table inputs; the deploy is the one call, so an expectation binds it.
-    function _make(VaultConfig memory cfg, Listing[] memory l, string memory name) internal returns (CuratorVault) {
-        return new CuratorVault(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, name, name);
+    /// @dev A vault from `cfg` listing `l`, at the rig's table inputs; the deploy is one external call, so an expectation binds it.
+    function _make(VaultConfig memory cfg, Listing[] memory l, string memory name) internal returns (AceVault) {
+        return this.makeCurated(cfg, l, name, name);
     }
 
     /// @dev The floor's own EDGE: one second under, refused; the floor itself, admitted. The rail row
@@ -373,7 +374,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
         _make(cfg, l, "Under");
 
         cfg.vestWindow = 3600;
-        CuratorVault at = _make(cfg, l, "At");
+        AceVault at = _make(cfg, l, "At");
         assertEq(at.VEST_WINDOW(), 3600, "the floor is inclusive: the rail refuses BELOW it, never AT it");
         assertEq(at.MIN_VEST_WINDOW(), 3600, "LIVENESS: the floor this row brackets really is one hour");
     }
@@ -386,7 +387,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     /// @dev reads `EndOfLife`, and every exit prices to nothing while real cash sits in the vault.
     /// @dev MUTATION TARGET: delete the `_burnVest` call in `_sync` and this must fail, not merely drift.
     function test_Vest_ASettlementBiggerThanTheLadderClearsItRatherThanBricking() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _primedPremium(v);
         uint256 doomed = _open(PER_LOAN * 6); // the loss, sized to swamp whatever the repay defers
         _crankByLoan(v, doomed);
@@ -417,7 +418,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     /// @dev Exitable is all of idle.
     /// @dev MUTATION TARGET: make the claim's cash bound read `exitable - unvested()` and this must fail.
     function test_Vest_CashStaysAvailableForExitsWhileDeferred() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _standingPremium(v);
         _crank(v, loanId, T2, 0);
         uint256 lump = v.unvested();
@@ -440,7 +441,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     /// @dev Lending is bounded by lendable ALONE: unvested value is nobody's in particular and reserves nothing.
     /// @dev No request stands, so lendable is all of idle, and a borrow of all of it lands while a pile vests.
     function test_Vest_LendingDoesNotReserveTheLadder() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _standingPremium(v);
         _crank(v, loanId, T2, 0);
 
@@ -455,38 +456,40 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
 
     // ---- R1: the zero-shares transition ----
 
-    /// @dev R1, ported from the hub. With no shares outstanding there is no share price to defend.
+    /// @dev R1, ported from the hub. With no live shares outstanding there is no share price to defend.
     /// @dev Without it the residue is ownerless cash and the next dust depositor takes it: the hub
     /// @dev measured a 10 USDC deposit withdrawing 25.2 before the release was added.
     /// @dev MUTATION TARGET: drop the `_release(g)` call in `claimExit` and this must fail.
     function test_Vest_AFullExitReleasesTheLadder() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _premiumThenAllCash(v);
 
         uint256 book = v.grossNav(); // idle IS the book: the vault holds its own cash and nobody else's
         uint256 got = _redeemAll(v, alice); // a request, then the claim that releases the pile
 
-        assertEq(v.totalSupply(), 0, "the last holder really did leave");
+        assertEq(v.totalSupply(), v.SEED_SHARES(), "the last holder really did leave");
         assertEq(v.unvested(), 0, "the ladder released, because there is no price left to defend");
+        uint256 seedWorth = v.convertToAssets(v.SEED_SHARES()); // the genesis seed keeps its own slice, priced into its shares
+        assertLe(seedWorth, 2 * v.MIN_SEED(), "PREMISE: the seed kept about its own deposit, no lump");
         // the virtual offset always strands one wei; without R1 the residue would be the whole lump
-        assertApproxEqAbs(got, book, 1, "so the last redeemer took the book in full, not a deferred fraction");
-        assertLe(v.idle(), 1, "and nothing ownerless is left behind for a dust depositor to find");
+        assertApproxEqAbs(got + seedWorth, book, 1, "so the last redeemer took the book in full, not a deferred fraction");
+        assertLe(v.idle() - seedWorth, 1, "and nothing ownerless is left behind for a dust depositor to find");
     }
 
     /// @dev The BRICK branch of the same seam: a vault emptied that way must still take capital.
     function test_Vest_AFullExitDoesNotBrickEntry() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _premiumThenAllCash(v);
         _redeemAll(v, alice); // a request, then the claim that releases the pile
 
-        assertEq(v.totalSupply(), 0, "the emptied-vault state the release exists for");
+        assertEq(v.totalSupply(), v.SEED_SHARES(), "the emptied-vault state the release exists for");
         assertEq(v.maxDeposit(bob), type(uint256).max, "and entry is still open on an empty vault");
         assertGt(_lpDeposit(v, bob, 1_000e6), 0, "which a depositor can prove");
     }
 
     /// @dev The LOOT branch: a dust deposit after a full exit must find nothing ownerless to capture.
     function test_Vest_ADustDepositAfterAFullExitCapturesNothing() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _premiumThenAllCash(v);
         _redeemAll(v, alice); // a request, then the claim that releases the pile
 
@@ -501,7 +504,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
 
     /// @dev The curator is paid exactly as the LPs are, over the same schedule: unvested is not in the rate.
     function test_Fee_CuratorEarnsOnlyAsPremiumVests() public {
-        CuratorVault v = _newVault(2000);
+        AceVault v = _newVault(2000);
         uint256 loanId = _standingPremium(v);
         v.collectFee();
         uint256 held = v.balanceOf(curator);
@@ -523,7 +526,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     /// @dev gross holds, and a SETTLEMENT is the only step that may lower gross at all.
     /// @dev Replaces `..._APassThatMovedNothingIsNotAJudgement` and recovers `..._UnvestedNeverExceedsGross`.
     function testFuzz_Vest_OnlyASettlementShrinksGrossAndTheLadderStaysInside(uint256 seed) public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(6_000e6);
         _crank(v, loanId, T2, 0);
@@ -562,7 +565,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     /// @dev carrying a live ladder is ownerless cash, and the next dust depositor mints against it.
     /// @dev The shipped R1 tests drive `redeem` alone; `withdraw` reaches the release too.
     function testFuzz_Vest_NoExitEverLeavesAnOwnerlessLadder(uint256 seed) public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _premiumThenAllCash(v);
         uint256 banked = v.grossNav(); // idle IS the book: the vault holds its own cash and nobody else's
         uint256 took;
@@ -585,16 +588,18 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
                 took += amt;
             }
             exits++;
-            assertTrue(v.totalSupply() != 0 || v.unvested() == 0, "a partial exit emptied the vault mid-run");
+            assertTrue(v.totalSupply() != v.SEED_SHARES() || v.unvested() == 0, "a partial exit emptied the vault mid-run");
         }
 
         assertGt(exits, 0, "LIVENESS: nobody exited, so no seam was reached");
         took += _redeemAll(v, alice); // the forced last exit: every seed reaches the zero-supply seam
-        assertEq(v.totalSupply(), 0, "the last holder really did leave");
+        assertEq(v.totalSupply(), v.SEED_SHARES(), "the last holder really did leave");
         assertEq(v.unvested(), 0, "and the ladder released, because there is no share price left to defend");
+        uint256 seedWorth = v.convertToAssets(v.SEED_SHARES()); // the genesis seed keeps its own slice, priced into its shares
+        assertLe(seedWorth, 2 * v.MIN_SEED(), "PREMISE: the seed kept about its own deposit, no lump");
         // each exit strands under two wei, the price's floor and the burn's ceiling; a stranded LADDER would be orders past that
-        assertLe(banked - took, 2 * (exits + 1) + 2, "so the holders took the whole book, not a deferred fraction");
-        assertLe(v.idle(), 2 * (exits + 1) + 2, "and nothing ownerless is left for a dust depositor to find");
+        assertLe(banked - took - seedWorth, 2 * (exits + 1) + 2, "so the holders took the whole book, not a deferred fraction");
+        assertLe(v.idle() - seedWorth, 2 * (exits + 1) + 2, "and nothing ownerless is left for a dust depositor to find");
     }
 
     // ---- the 18-decimal leg: REQUIRED, because AceFixtures defaults to 6 and hides the class ----
@@ -608,7 +613,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     /// @dev THE 18-DECIMAL STAND. Same shape as the 6dp rig on an asset whose wei are 1e12 times smaller.
     /// @dev Its own record on the BIG pair, because a `MockPersistenceRecord` is bound to one (quote, collateral) frame.
     /// @dev The row lends at half the record's 2x-par minimum, as the rig's own row does, so the door market sits at par gridded down.
-    function _bigQuoteRig() internal returns (CuratorVault v) {
+    function _bigQuoteRig() internal returns (AceVault v) {
         big = new MockERC20("Big Quote", "BIG", 18);
         VaultConfig memory cfg = _cfg(0);
         cfg.asset = address(big);
@@ -622,19 +627,18 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
             row: Row({
                 record: address(bigRec),
                 bufferBps: RIG_BUFFER_BPS,
-                baseBps: uint16(PocDeployConfig.BASE_BPS),
+                lenderAprBps: uint16(PocDeployConfig.LENDER_APR_BPS),
                 minTenor: ProtocolPolicy.MIN_TENOR,
-                maxTenor: ProtocolPolicy.MAX_TENOR,
-                cap: type(uint192).max
+                maxTenor: ProtocolPolicy.MAX_TENOR
             })
         });
-        v = new CuratorVault(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, "Curator 18", "cV18");
+        v = CuratedVaults.make(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, "Curator 18", "cV18");
         bigMid = _doorMarket(v, address(collateral));
     }
 
     // DELETED with the second floor: `_meltStrand` predicted a residue, and credit reaches the pool unfloored
 
-    function _bigDeposit(CuratorVault v, address who, uint256 amt) internal {
+    function _bigDeposit(AceVault v, address who, uint256 amt) internal {
         big.mint(who, amt);
         vm.startPrank(who);
         big.approve(address(v), amt);
@@ -661,7 +665,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     /// @dev SECOND HALF, UNCHANGED: the same rig driven DOWN, where a bare `g - m` in `_sync` panics 0x11.
     /// @dev MUTATION TARGET: `if (g > m)` -> `if (true)` in `_sync` is that bare subtraction, and it panics.
     function test_Vest_AnEighteenDecimalQuoteStrandsNotOneWei() public {
-        CuratorVault v = _bigQuoteRig();
+        AceVault v = _bigQuoteRig();
         _bigDeposit(v, alice, BIG_SEED);
         uint256 id = _borrow(v, BIG_DRAW);
         assertEq(ace.loanMarket(id), bigMid, "guard: the door lent in the big rig's own market");
@@ -724,7 +728,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
 
     /// @dev Draw a small loan off what still rests at T2, book it and repay it whole.
     /// @dev The next crank then collects past its cost, which is the ONE thing that stamps the ladder.
-    function _closeAFreshLoan(CuratorVault v) internal {
+    function _closeAFreshLoan(AceVault v) internal {
         uint256 fresh = _open(500e6);
         _crank(v, fresh, T2, 0);
         _repay(fresh, lens.loan(fresh).debt);

@@ -16,7 +16,7 @@ import {AceReader} from "../utils/AceReader.sol";
 /// @notice Run 251533 Y-9 leg B: a home re-term that draws NO fresh cash is judged at `min(price, record)`, as the home roll is.
 /// @notice A fresh draw keeps the draw cap; a zero-fresh one reads the record for admissibility, so a distressed loan still refuses.
 /// @notice Ruling B1's bounded exposure: such a re-term is funded only by the old escrow refund, so the chain it buys decays.
-/// @dev Par price, `k = 1.4`, 40 bps per one-day `minTenor`, terms to 28 days; the loan's trigger sits at 0.7 of the price.
+/// @dev Par price, `k = 1.4`, 40 bps a year, terms from one day to 28 days; the loan's trigger sits at 0.7 of the price.
 contract AceZeroFreshRetermTest is WarpClock {
     Ace internal ace;
     AceReader internal read;
@@ -44,7 +44,7 @@ contract AceZeroFreshRetermTest is WarpClock {
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(coll));
         p.record = address(rec);
         p.lender = alice;
-        p.baseBps = BASE_BPS;
+        p.lenderAprBps = BASE_BPS;
         p.minTenor = DAY;
         p.maxTenor = TEN28;
         p.minCoverageWad = 1.4e18;
@@ -214,9 +214,9 @@ contract AceZeroFreshRetermTest is WarpClock {
 
     /// @notice RULING B1, one step: a zero-fresh re-term that lands buys at most ~5/11 of the remaining exposure, `P * tenor`.
     /// @dev Its fee is funded only by the escrow refund, half the lender's share of the old fee pro rata: `11 P' T' <= 5 P_old rem`.
-    /// @dev The slack is ONE fee atom's worth of exposure, `1e5 * minTenor / baseBps`: the fee's ceil and the escrow's floors each move under one.
+    /// @dev The slack allowed is `1e5 * 365 days / lenderAprBps`, the exposure one fee atom buys at the per-year rate.
     /// @dev Each run tries three re-terms in snapshots, the fuzzed pair, `(P, nt)` and `(P, DAY)`, and asserts the bound on every landing.
-    /// @dev With 3 days left the refund, ~300, covers `(P, DAY)`'s 220 fee, so such a run must land at least once or the row asserts nothing.
+    /// @dev With 3 days left the refund covers `(P, DAY)`'s fee, so such a run must land at least once or the row asserts nothing.
     function testFuzz_AZeroFreshRetermBuysAtMostFiveEleventhsOfTheRemainingExposure(uint256 elapsedSeed, uint256 principalSeed, uint256 tenorSeed) public {
         uint256 loanId = _bookUnder(0.9e18);
         _warpBy(bound(elapsedSeed, 0, TEN28 - 2 hours));
@@ -232,7 +232,7 @@ contract AceZeroFreshRetermTest is WarpClock {
         uint256 snap = vm.snapshotState();
         vm.prank(borrower);
         try ace.refinanceTo(_home(loanId, np, nt, OpenBounds(0, 0, 0))) {
-            assertLe(11 * np * nt, 5 * P * remaining + 1e5 * DAY / BASE_BPS, "a zero-fresh re-term bought more than its refund can fund");
+            assertLe(11 * np * nt, 5 * P * remaining + 1e5 * 365 days / BASE_BPS, "a zero-fresh re-term bought more than its refund can fund");
             landed = 1;
         } catch {}
         vm.revertToStateAndDelete(snap);

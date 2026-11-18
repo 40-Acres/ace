@@ -67,7 +67,7 @@ contract AceAskFeeCeilingCallerTest is WarpClock {
     function _params(uint256 price, uint256 feeBps) internal view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(quote), address(coin));
         p.record = address(0);
-        p.baseBps = 1;
+        p.lenderAprBps = 1;
         p.settleBountyBps = 0;
         p.fillFeeBps = feeBps;
         p.price = price;

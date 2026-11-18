@@ -62,7 +62,7 @@ contract AceGenesisRailGapsTest is WarpClock {
         p.collateral = address(coll);
         p.record = address(record);
         p.minCoverageWad = 1.4e18;
-        p.baseBps = 40;
+        p.lenderAprBps = 40;
         p.minTenor = 7 days;
         p.maxTenor = 7 days;
         p.minPrincipal = 1e6;
@@ -163,12 +163,12 @@ contract AceGenesisRailGapsTest is WarpClock {
     function test_Rail_AMinPrincipalTheFeeWouldEatIsRefused() public {
         MarketParams memory p = _base();
         p.minPrincipal = 1;
-        p.baseBps = Constants.MIN_BASE_BPS; // the cheapest legal rate, so nothing here is an extreme fee
+        p.lenderAprBps = Constants.MIN_LENDER_APR_BPS; // the cheapest legal rate, so nothing here is an extreme fee
         _reject(p, "debt floor zero");
 
         p = _base();
         p.minPrincipal = 1;
-        p.baseBps = _shareRailedBaseBps(p.minTenor, p.maxTenor); // the top of the band is the SHARE rail's now, not a band of its own
+        p.lenderAprBps = _shareRailedBaseBps(p.maxTenor); // the top of the band is the SHARE rail's now, not a band of its own
         _reject(p, "debt floor zero");
     }
 
@@ -180,7 +180,7 @@ contract AceGenesisRailGapsTest is WarpClock {
         MarketParams memory p = _base();
         p.minTenor = uint64(bound(a, 1 hours, 30 days));
         p.maxTenor = p.minTenor * uint64(bound(b, 1, 8));
-        p.baseBps = bound(c, Constants.MIN_BASE_BPS, _shareRailedBaseBps(p.minTenor, p.maxTenor));
+        p.lenderAprBps = bound(c, Constants.MIN_LENDER_APR_BPS, _shareRailedBaseBps(p.maxTenor));
 
         p.minPrincipal = 1;
         _reject(p, "debt floor zero");
@@ -189,12 +189,11 @@ contract AceGenesisRailGapsTest is WarpClock {
         assertTrue(ace.createMarket(p) != bytes32(0), "and two wei is admitted at the same rate, so the floor is exactly two");
     }
 
-    /// @dev The largest rate the SHARE rail admits at this term multiple, clamped to genesis's representational ceiling.
+    /// @dev The largest rate, in bps a year, the SHARE rail admits at `maxTenor`: `feeFundable`'s division form, `2500 * 1e4 * 365 days / (maxTenor * 11000)`.
     /// @dev Re-spelled from the rail's own inequality via `AllInFeeSpec`, never read off `LoanMath`.
-    /// @dev THE CLAMP NEVER BINDS: the share cap tops out at 2272 on a flat market, under the 2500 genesis names.
-    function _shareRailedBaseBps(uint64 minTenor, uint64 maxTenor) private pure returns (uint256) {
-        uint256 cap = (AllInFeeSpec.FEE_SHARE_BPS * 10000 * 10000 * uint256(minTenor)) / (10000 * uint256(maxTenor) * (10000 + PS));
-        return cap > Constants.MAX_FEE_SHARE_BPS ? Constants.MAX_FEE_SHARE_BPS : cap;
+    /// @dev No clamp: the share rail is genesis's only ceiling on the rate, so the rows reach its edge, 118,506 at the 7-day base.
+    function _shareRailedBaseBps(uint64 maxTenor) private pure returns (uint256) {
+        return (AllInFeeSpec.FEE_SHARE_BPS * 10000 * AllInFeeSpec.YEAR) / (uint256(maxTenor) * (10000 + PS));
     }
 
     /// @notice CONTROL: the smallest market the rail admits pays its smallest draw something, which is the point.
@@ -204,13 +203,35 @@ contract AceGenesisRailGapsTest is WarpClock {
     function test_Control_TheSmallestAdmittedMarketPaysItsSmallestDrawSomething() public {
         MarketParams memory p = _base();
         p.minPrincipal = 2;
-        p.baseBps = Constants.MIN_BASE_BPS;
+        p.lenderAprBps = Constants.MIN_LENDER_APR_BPS;
         bytes32 id = ace.createMarket(p);
         _deposit(id, 1_000e6);
 
         Borrower.Quote memory q = ace.previewOpen(id, 1e18, p.minPrincipal, p.minTenor, borrower, OpenBounds(0, 0, 0));
         assertEq(q.fee, 1, "the ceil still takes a whole wei as fee at the market minimum");
         assertGt(q.payout, 0, "but the draw the market admits now leaves the borrower something");
+    }
+
+    /// @notice AT THE STEEPEST PER-YEAR RATE THE SHARE RAIL ADMITS, one wei is still refused and two still pays its borrower a wei.
+    /// @notice At the 7-day base that rate is 118,506 bps a year, the edge `_shareRailedBaseBps` returns, spelled here as a literal.
+    /// @dev Two wei over seven days at 118,506 a year is `ceil(0.49999)`, one wei of fee and one of payout.
+    function test_Rail_TheOneWeiBoundaryHoldsAtTheSteepestPerYearRate() public {
+        MarketParams memory p = _base();
+        p.lenderAprBps = 118_506; // floor(2500 * 1e4 * 365 days / (7 days * 11000)), the share rail's own edge at the base term
+        p.minPrincipal = 1;
+        _reject(p, "debt floor zero");
+
+        p.minPrincipal = 2;
+        bytes32 id = ace.createMarket(p);
+        _deposit(id, 1_000e6);
+        Borrower.Quote memory q = ace.previewOpen(id, 1e18, 2, p.minTenor, borrower, OpenBounds(0, 0, 0));
+        assertEq(q.fee, 1, "the steepest admitted rate takes one wei of the two-wei floor");
+        assertEq(q.payout, 1, "and leaves the borrower the other");
+
+        MarketParams memory over = _base();
+        over.lenderAprBps = 118_507;
+        over.minPrincipal = 2;
+        _reject(over, "fee bps too high");
     }
 
     /* ============ GAP 3: the decimal gap UP, whose rail the constant price frame retired ============ */

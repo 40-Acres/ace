@@ -100,7 +100,7 @@ contract AceQuoteOpenTest is Test {
     uint256 internal constant PRINCIPAL = 4_500e6;
     uint64 internal constant TENOR = ProtocolPolicy.MIN_TENOR;
     uint64 internal constant SHORT = 7 days; // the grid market's minTenor rung, == the shipped one
-    uint64 internal constant LONG = 30 days; // its maxTenor rung; 40 bps * 30d * 11000 < 10000 * 10000 * 7d clears the fee ceiling
+    uint64 internal constant LONG = 30 days; // its maxTenor rung; 2086 * 30 days * 11000 <= 2500 * 1e4 * 365 days clears the fee ceiling
 
     /// @dev This suite's pair, so a tick reads as its distance from par rather than as a grid coordinate.
     /// @param offset Ticks above par.

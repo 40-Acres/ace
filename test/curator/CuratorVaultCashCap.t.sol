@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {IAceLenderOps} from "../../src/interfaces/IAceLenderOps.sol";
 
 /// @title CuratorVaultCashCap
@@ -15,7 +15,7 @@ contract CuratorVaultCashCapTest is CuratorVaultBase {
 
     /// @notice A BORROW WITH IDLE PAST THE CASH CAP LANDS: the rest is clamped to the market's room, and nothing rests after the door.
     function test_Borrow_IdlePastTheCashCapRestsTheClampAndLands() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, HALF);
         _lpDeposit(v, alice, HALF);
         uint256 idle = v.idle();

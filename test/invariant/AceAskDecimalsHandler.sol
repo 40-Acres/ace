@@ -114,7 +114,7 @@ contract AceAskDecimalsHandler is WarpClock {
         records[i].setMinPrice(type(uint256).max);
         p = AceFixtures.marketParams(address(usdc), address(colls[i]));
         p.record = address(records[i]);
-        p.baseBps = 1;
+        p.lenderAprBps = 1;
         p.settleBountyBps = 0; // no sliver, so every unit reaches the pot
         p.fillFeeBps = fees[i];
         p.price = prices[i];

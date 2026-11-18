@@ -87,7 +87,7 @@ contract AceMarketGateTest is WarpClock {
         p.deleverageBandBps = 3000; // the crank leg of the exit sweep below needs a live channel
         p.deleverageTargetBps = 4000;
         p.deleverageStopBps = 1;
-        p.baseBps = 40;
+        p.lenderAprBps = 40;
         p.minTenor = TEN7;
         p.maxTenor = TEN30;
     }
@@ -200,7 +200,7 @@ contract AceMarketGateTest is WarpClock {
         // a same-principal roll pays a fresh fee against a part refund, so it rides the composition
         MigrateArgs memory ok = MigrateArgs(loanId, openDst, P, TEN7, OpenBounds(0, 0, 0), 0, address(0));
         MarketParams memory dp = ace.idToMarketParams(openDst);
-        uint256 credit = P - LoanMath.originationFee(P, TEN7, dp.baseBps, dp.minTenor) + read.earlyExitRefund(loanId);
+        uint256 credit = P - LoanMath.originationFee(P, TEN7, dp.lenderAprBps) + read.earlyExitRefund(loanId);
         bytes[] memory calls = new bytes[](2);
         calls[0] = abi.encodeCall(Ace.repay, (loanId, credit >= P ? 0 : P - credit));
         calls[1] = abi.encodeCall(Ace.refinanceTo, (ok));

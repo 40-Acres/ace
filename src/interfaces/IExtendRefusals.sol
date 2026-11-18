@@ -3,8 +3,10 @@ pragma solidity 0.8.36;
 
 /// @title IExtendRefusals
 /// @notice The extension refusals the hub raises only as a bare selector, declared here so an ABI carries them and a caller can decode them.
-/// @notice `tryExtend` returns either as its reason, and `extend` reverts with it; the hub's own declarations sit in `Borrower.sol`.
+/// @notice `tryExtend` returns any of them as its reason, and `extend` reverts with it; the hub's own declarations sit in `Borrower.sol`.
 interface IExtendRefusals {
     error PolicyRefused(); // the market lender's roll policy did not consent: none set, a revert, or any answer but the selector
     error ExtensionAddsNoTime(); // the loan's own tenor from now ends no later than it already does
+    error UnderPrice(); // a non-holder's extension under the price: the record's windowed minimum sits below the market's price
+    error ExtensionTooEarly(); // a non-holder extends only with at most a quarter of the loan's tenor left
 }

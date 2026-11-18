@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {PriceGrid} from "../../src/curator/PriceGrid.sol";
 import {Storage} from "../../src/ace/hub/Types.sol";
 import {PriceFrame} from "../utils/PriceFrame.sol";
@@ -15,8 +15,9 @@ import {AceFixtures} from "../utils/AceFixtures.sol";
 /// @notice The vault's half of it -- the NAV legs, the write-off, the fee path, and a later top-up.
 /// @notice `CuratorVaultFee`'s recovery row is the FULL-cover twin; the contrast row here is the control.
 /// @dev WHY A PRICE CRASH CANNOT STAGE THIS, which is why the rig was owed rather than written.
-/// @dev `Settlement._convertClaim` converts at the tick's OWN pre-committed price, never at a market price.
-/// @dev So a crashed market price changes not one number on this path, and the pot still covers in full.
+/// @dev Settlement sizes the take off the market's OWN write-once price and the loan's own trigger, never off a market print.
+/// @dev So a crashed market price changes not one number on this path, and an intact escrow still covers in full.
+/// @dev Inside the term that pot is the claim at the trigger, more than the claim; from expiry it is the claim's need, which the control row settles at.
 /// @dev The pot is short only when the ESCROW holds fewer units than the claims need, in units.
 /// @dev NO IN-PROTOCOL ROUTE REACHES THAT: `AceCoverageGuarantee.t.sol` proves an admitted loan is covered.
 /// @dev The margin is `1 - 1/k` at every point, and `MAX_SETTLE_BOUNTY_BPS` is derived to sit inside it.
@@ -52,7 +53,7 @@ contract CuratorVaultPartialRecoveryTest is CuratorVaultBase {
     /// @dev One vault, one market, one doomed loan, and the pre-loss mark already stamped.
     /// @dev The ask floor is pinned TO book after the door priced its market, so the pot prices at the claim's own price and the legs stay exact.
     /// @dev The wait is load-bearing: the origination fee is a deferred rise, and the mark must see it.
-    function _rig(uint16 bps) internal returns (CuratorVault v, uint256 loanId) {
+    function _rig(uint16 bps) internal returns (AceVault v, uint256 loanId) {
         v = _newVault(bps);
         _derive(ace.idToMarketParams(mid).price);
         _lpDeposit(v, alice, SEED);
@@ -107,7 +108,7 @@ contract CuratorVaultPartialRecoveryTest is CuratorVaultBase {
     // ============ the pot, which is where a partial recovery becomes possible at all ============
 
     /// @notice THE SUBJECT: after a short settlement the pot is worth strictly less than the class was owed.
-    /// @notice With an intact escrow it is worth exactly the claim, which is why every ordinary recovery is full.
+    /// @notice With an intact escrow it is worth at least the claim, exactly the claim from expiry, which is why every ordinary recovery is full.
     function test_PartialRecovery_ThePotCannotCoverWhatTheClassIsOwed() public {
         (, uint256 loanId) = _rig(2000);
         _finalizeShort(loanId);
@@ -122,7 +123,8 @@ contract CuratorVaultPartialRecoveryTest is CuratorVaultBase {
     /// @notice THE CONTROL, and the reason the rig needs staging at all: an intact escrow recovers in FULL.
     /// @notice Same vault, same loan, same buyer -- only the escrow differs, and the pot covers the claim exactly.
     function test_FullRecovery_ThePotCoversTheWholeClaim() public {
-        (CuratorVault v, uint256 loanId) = _rig(2000);
+        (AceVault v, uint256 loanId) = _rig(2000);
+        _warpAtLeastTo(read.loan(loanId).expiry); // from expiry the take is the claim's need, so the pot prices back to the claim
         _finalize(loanId);
 
         uint256 invPot = lens.invPotOf(mid, loanId);
@@ -142,7 +144,7 @@ contract CuratorVaultPartialRecoveryTest is CuratorVaultBase {
     /// @notice The gap between the two is the shortfall, and it never comes back from anywhere.
     /// @dev The escrowed fee is EARNED IN FULL at settlement, so the drop is the claim net of that credit.
     function test_PartialRecovery_NavDropsByTheClaimAndReturnsOnlyTheProceeds() public {
-        (CuratorVault v, uint256 loanId) = _rig(2000);
+        (AceVault v, uint256 loanId) = _rig(2000);
         uint256 nav0 = v.grossNav();
         uint256 escrow = read.feeEscrowOf(loanId);
         assertGt(escrow, 0, "PREMISE: there is a withheld fee for settlement to earn");
@@ -162,7 +164,7 @@ contract CuratorVaultPartialRecoveryTest is CuratorVaultBase {
     /// @dev The vault reads no price anywhere, so an unsold pot is worth zero to it until someone buys.
     /// @dev The buyer pays the hub in the asset; the proceeds join the vault's owed pool at the sale, NAV up, and reach its balance at the crank.
     function test_PartialRecovery_ReachesTheVaultAsIdleCashOnTheNextCrank() public {
-        (CuratorVault v, uint256 loanId) = _rig(2000);
+        (AceVault v, uint256 loanId) = _rig(2000);
         _finalizeShort(loanId);
         _crankAll(v);
         uint256 idle0 = v.idle();
@@ -186,7 +188,7 @@ contract CuratorVaultPartialRecoveryTest is CuratorVaultBase {
     /// @dev The vault holds both the drawn position and the spare cash, so this is the one place the loss
     /// @dev model is visible from inside a vault: the spare cash is the vault's own balance, which nothing rests away.
     function test_PartialRecovery_TheWriteDownReachesNoUnlentCashTheVaultHolds() public {
-        (CuratorVault v, uint256 loanId) = _rig(2000);
+        (AceVault v, uint256 loanId) = _rig(2000);
         uint256 spare = v.idle();
         assertGt(spare, SEED - DOOMED - 1, "PREMISE: the cash the draw left behind is the vault's own balance");
         assertEq(ace.restingOf(mid), 0, "PREMISE: and none of it rests at the hub");
@@ -205,7 +207,7 @@ contract CuratorVaultPartialRecoveryTest is CuratorVaultBase {
     /// @notice `CuratorVaultFee`'s `test_Fee_ARecoveryUnderTheOldMarkPaysTheCuratorNothing` is the full-cover twin.
     /// @dev The premise is asserted rather than assumed: a recovery big enough to clear the mark would pay.
     function test_PartialRecovery_PaysTheCuratorNothingAndNeverLowersTheMark() public {
-        (CuratorVault v, uint256 loanId) = _rig(2000);
+        (AceVault v, uint256 loanId) = _rig(2000);
         uint256 mark = v.feeHighWater();
         assertGt(mark, 0, "the pre-loss mark stands");
         uint256 held = v.balanceOf(curator);
@@ -224,7 +226,7 @@ contract CuratorVaultPartialRecoveryTest is CuratorVaultBase {
 
     /// @notice A zero-fee vault is inert across the whole sequence, mark included.
     function test_PartialRecovery_ZeroBpsVaultStaysInert() public {
-        (CuratorVault v, uint256 loanId) = _rig(0);
+        (AceVault v, uint256 loanId) = _rig(0);
         uint256 supply = v.totalSupply();
 
         _finalizeShort(loanId);
@@ -243,7 +245,7 @@ contract CuratorVaultPartialRecoveryTest is CuratorVaultBase {
     /// @notice And the stayer is not lifted by the newcomer's money: her share count and her value both hold.
     /// @dev The entry is pro-rata against an already-written-down NAV, which is what makes both halves true.
     function test_PartialRecovery_ALaterTopUpEntersAtTheImpairedPriceAndIsWhole() public {
-        (CuratorVault v, uint256 loanId) = _rig(2000);
+        (AceVault v, uint256 loanId) = _rig(2000);
         _finalizeShort(loanId);
         _buyPot(keeper, loanId, BUDGET);
         _crankAndRecognize(v);
@@ -259,20 +261,24 @@ contract CuratorVaultPartialRecoveryTest is CuratorVaultBase {
         assertApproxEqAbs(v.convertToAssets(aliceShares), aliceValue, 2, "nor is she lifted by the newcomer's money");
     }
 
-    /// @notice The top-up keeps the fee-free gap in assets and pays the curator nothing: entry is pro-rata, so it is not growth.
-    /// @dev Recruiting cannot clear the mark: the entry adds its own cash to the high-water, and the curator must still earn the whole gap.
-    function test_PartialRecovery_ALaterTopUpKeepsTheGapAndPaysTheCuratorNothing() public {
-        (CuratorVault v, uint256 loanId) = _rig(2000);
+    /// @notice The top-up keeps the fee-free gap per share and pays the curator nothing: entry is pro-rata, so it is not growth.
+    /// @dev Recruiting cannot clear the mark: the entry raises the high-water at its own per-share price, so the curator must still earn the gap per share.
+    function test_PartialRecovery_ALaterTopUpKeepsTheGapPerShareAndPaysTheCuratorNothing() public {
+        (AceVault v, uint256 loanId) = _rig(2000);
         _finalizeShort(loanId);
         _buyPot(keeper, loanId, BUDGET);
         _crankAndRecognize(v);
         uint256 gap = v.feeHighWater() - v.totalAssets();
+        uint256 sv0 = v.totalSupply() + 1e6;
         uint256 held = v.balanceOf(curator);
 
         _lpDeposit(v, bob, TOPUP);
         v.collectFee();
+        uint256 sv1 = v.totalSupply() + 1e6;
         assertLt(v.totalAssets(), v.feeHighWater(), "the vault is still under water after the top-up, exactly as before it");
-        assertEq(v.feeHighWater() - v.totalAssets(), gap, "fresh capital moved the fee-free gap the curator must earn back");
+        assertApproxEqAbs(
+            v.feeHighWater() - v.totalAssets(), FullMath.mulDiv(gap, sv1, sv0), 2 + (sv1 - sv0) / sv0, "fresh capital moved the fee-free gap per virtual share"
+        );
         assertEq(v.balanceOf(curator), held, "and it pays the curator nothing");
     }
 
@@ -280,7 +286,7 @@ contract CuratorVaultPartialRecoveryTest is CuratorVaultBase {
     /// @notice What bounds the SIZE of that exit is exitable cash, never the write-off.
     /// @dev So the subject here is the PRICE he leaves at, with exitable cash asserted as the premise, not the bug.
     function test_PartialRecovery_ALaterTopUpLeavesAtItsEntryPrice() public {
-        (CuratorVault v, uint256 loanId) = _rig(2000);
+        (AceVault v, uint256 loanId) = _rig(2000);
         _finalizeShort(loanId);
         _buyPot(keeper, loanId, BUDGET);
         _crankAndRecognize(v);

@@ -99,17 +99,16 @@ contract AceGenesisParamFuzzTest is WarpClock {
         p.minTenor = uint64(_pick(seed, 2, 0, 30 days));
         p.maxTenor = uint64(_pick(seed, 3, p.minTenor, p.minTenor + 60 days));
         if (_rand(seed, 5) % 8 == 0 && p.minTenor != 0) p.maxTenor = p.minTenor - 1; // inverts the band, one draw in eight
-        p.baseBps = _pick(seed, 6, 0, _shareRailedBaseBps(p.minTenor, p.maxTenor) + 2);
+        p.lenderAprBps = _pick(seed, 6, 0, _shareRailedBaseBps(p.maxTenor) + 2);
     }
 
-    /// @dev The largest rate the SHARE rail admits at this term multiple, clamped to genesis's representational ceiling.
+    /// @dev The largest rate, in bps a year, the SHARE rail admits at `maxTenor`: `feeFundable`'s division form, `2500 * 1e4 * 365 days / (maxTenor * 11000)`.
     /// @dev Sampling to it keeps the accept rate high while leaving the whole admissible band reachable.
     /// @dev Re-spelled from the rail's own inequality via `AllInFeeSpec`, never read off `LoanMath`.
-    /// @dev THE CLAMP NEVER BINDS on a real shape -- the share cap tops out at 2272 -- and it is here for `maxTenor == 0`.
-    function _shareRailedBaseBps(uint64 minTenor, uint64 maxTenor) private pure returns (uint256) {
+    /// @dev A zero `maxTenor` returns 2500, any rate: the tenor floor refuses that draw first, and the division would panic.
+    function _shareRailedBaseBps(uint64 maxTenor) private pure returns (uint256) {
         if (maxTenor == 0) return Constants.MAX_FEE_SHARE_BPS;
-        uint256 cap = (AllInFeeSpec.FEE_SHARE_BPS * 10000 * 10000 * uint256(minTenor)) / (10000 * uint256(maxTenor) * (10000 + PS));
-        return cap > Constants.MAX_FEE_SHARE_BPS ? Constants.MAX_FEE_SHARE_BPS : cap;
+        return (AllInFeeSpec.FEE_SHARE_BPS * 10000 * AllInFeeSpec.YEAR) / (uint256(maxTenor) * (10000 + PS));
     }
 
     /// @dev The ladder floors and the coverage multiple; `minPrincipal` is sampled by EXPONENT, into the brick region.
@@ -179,7 +178,7 @@ contract AceGenesisParamFuzzTest is WarpClock {
             " k=",
             vm.toString(p.minCoverageWad),
             " base=",
-            vm.toString(p.baseBps),
+            vm.toString(p.lenderAprBps),
             " tenor=",
             vm.toString(uint256(p.minTenor)),
             "..",
@@ -210,6 +209,64 @@ contract AceGenesisParamFuzzTest is WarpClock {
         assertGt(accepted, 20, "the sampler must reach the ACCEPT arm, or assertions 1, 3 and 5 never run");
         assertGt(200 - accepted, 20, "and the REJECT arm, or assertion 2 never runs");
         assertGt(drivable, 10, "and enough of the accepts must be drivable to exercise the loan life");
+    }
+
+    /* ============ the same sweep with the rate AIMED at the share rail's edge ============ */
+
+    /// @dev `_draw`, its rate re-aimed at the rail's edge: one draw in eight one bp past the top, one at it, the rest under it.
+    /// @dev `_draw` itself is uniform up to two past the top, so it reaches the refusal arm rarely; this sampler reaches both arms on purpose.
+    function _drawPerYear(uint256 seed) internal view returns (MarketParams memory p) {
+        p = _draw(seed);
+        uint256 top = _shareRailedBaseBps(p.maxTenor);
+        uint256 arm = _rand(seed, 40) % 8;
+        p.lenderAprBps = arm == 0 ? top + 1 : arm == 1 ? top : _pick(seed, 41, 0, top);
+    }
+
+    /// @notice ASSERTION 2 OVER THE PER-YEAR BAND: every refusal is named, up to and one bp past the share rail's own edge.
+    function testFuzz_Genesis_EveryRefusalIsNamedAtThePerYearRail(uint256 seed) public {
+        MarketParams memory p = _drawPerYear(seed);
+        (bool ok, bytes memory ret) = address(ace).call(abi.encodeCall(Ace.createMarket, (p)));
+        if (ok) return;
+        assertGe(ret.length, 4, _why("a refusal with no returndata at all", p));
+        assertTrue(bytes4(ret) != bytes4(0x4e487b71), _why("an arithmetic panic instead of a named refusal", p));
+        assertEq(bytes4(ret), bytes4(0x08c379a0), _why("a refusal that is not Error(string)", p));
+        assertGt(bytes(abi.decode(_tail(ret), (string))).length, 0, _why("an empty reason string", p));
+    }
+
+    /// @notice ASSERTIONS 1, 3 AND 5 OVER THE PER-YEAR BAND: an accepted market is operable at every rate the rail admits, its steepest included.
+    function testFuzz_Genesis_AnAcceptedMarketIsOperableAtThePerYearRail(uint256 seed) public {
+        MarketParams memory p = _drawPerYear(seed);
+        (bool ok, bytes memory id) = address(ace).call(abi.encodeCall(Ace.createMarket, (p)));
+        if (!ok) return;
+        if (!_drivable(p)) return;
+        _operate(abi.decode(id, (bytes32)), p);
+    }
+
+    /// @notice ANTI-VACUITY FOR THE RATE: the per-year sampler reaches the fee rail's refusal, its steepest accept, and drives that accept.
+    /// @dev `_draw`'s own fee-rail hits are logged beside it, so the reach the aimed draw buys stays visible.
+    /// @dev ONE steep market is driven, the first: the solvency identity reads the hub's whole balance, so a second would count the first's cash.
+    function test_Sampler_ReachesThePerYearFeeRailFromBothSides() public {
+        (uint256 refusedByRail, uint256 steepAccepted, uint256 steepDriven, uint256 uniformRail) = (0, 0, 0, 0);
+        bytes32 rail = keccak256(abi.encodeWithSignature("Error(string)", "fee bps too high"));
+        for (uint256 s = 1; s <= 200; s++) {
+            (bool ok, bytes memory ret) = address(ace).call(abi.encodeCall(Ace.createMarket, (_draw(s))));
+            if (!ok && keccak256(ret) == rail) uniformRail++;
+            MarketParams memory p = _drawPerYear(s);
+            (ok, ret) = address(ace).call(abi.encodeCall(Ace.createMarket, (p)));
+            if (!ok && keccak256(ret) == rail) refusedByRail++;
+            if (!ok || p.lenderAprBps != _shareRailedBaseBps(p.maxTenor)) continue;
+            steepAccepted++;
+            if (steepDriven != 0 || !_drivable(p)) continue;
+            _operate(abi.decode(ret, (bytes32)), p);
+            steepDriven++;
+        }
+        emit log_named_uint("uniform sampler (_draw): refusals by the fee rail, of 200", uniformRail);
+        emit log_named_uint("aimed sampler: refusals by the fee rail, of 200", refusedByRail);
+        emit log_named_uint("aimed sampler: accepts at the rail's own edge", steepAccepted);
+        emit log_named_uint("of those, driven end to end", steepDriven);
+        assertGt(refusedByRail, 5, "the per-year sampler must reach the fee rail's refusal arm"); // 15 at the time of writing
+        assertGt(steepAccepted, 2, "and its steepest accept"); // 8 at the time of writing
+        assertGt(steepDriven, 0, "and drive one such market through its whole loan life");
     }
 
     /// @notice THE OFF-CHANNEL LIE-GUARD AS AN ORACLE: a band-off draw is admitted only with stop, cut, target and eps all zero.
@@ -376,7 +433,7 @@ contract AceGenesisParamFuzzTest is WarpClock {
         loanId = ace.open(id, units, principal, p.minTenor, borrower, OpenBounds(0, 0, 0));
         vm.stopPrank();
         assertLe(read.triggerPrice(loanId), read.fundingFloor(id, loanId), _why("a loan opened liquidatable at birth", p));
-        uint256 fee = AllInFeeSpec.feeAllIn(principal, p.minTenor, p.baseBps, p.minTenor, PS);
+        uint256 fee = AllInFeeSpec.feeAllIn(principal, p.minTenor, p.lenderAprBps, PS);
         assertGt(principal, fee, _why("the smallest admitted draw pays out nothing", p));
     }
 
@@ -418,7 +475,7 @@ contract AceGenesisParamFuzzTest is WarpClock {
         p.price = AceFixtures.priceAt(address(usdc), address(vault), 0);
         p.lender = lender;
         p.minCoverageWad = 1.4e18;
-        p.baseBps = 40;
+        p.lenderAprBps = 40;
         p.minTenor = 7 days;
         p.maxTenor = 7 days;
         p.minPrincipal = 1e6;

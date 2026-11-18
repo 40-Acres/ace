@@ -2,18 +2,18 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {AceVault} from "../../src/curator/AceVault.sol";
 import {MarketParams} from "../../src/ace/hub/Types.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 
 /// @title CuratorVaultSplitOverGross
 /// @notice The Certora `VaultSplit` counterexamples (#790, run emv-8), replayed on a deployed vault as the property they broke.
-/// @notice Their start was a vest pile past gross at zero supply: both vest roundings ceil, so a stamp inside a window reads a wei above its rise.
-/// @notice `totalAssets` floored that at zero, so the first deposit's cash covered the overshoot and a second entrant bought at that discount.
-/// @dev THE LAW: a sync never leaves the pile above the gross it observed, so a split entry never beats the whole, at any supply.
-/// @dev At zero supply, counted payouts a second apart, each cranked, build the state; nothing but the vault's own rounding is needed.
-/// @dev With shares out, a trough exit first takes the whole gross; two rows then pin each half of the cap, the sync's and the view's.
+/// @notice Their start was a vest pile past gross with no live supply: a stamp inside a window once read a wei above its rise.
+/// @notice A stamp's basis now floors, so it reads back exactly the pile plus the rise, and the replay pins that it never reads past it.
+/// @dev THE LAW: a sync never leaves the pile above the rises it observed, so a split entry never beats the whole, at any supply.
+/// @dev On a seed-only vault, counted payouts a second apart, each cranked, build the state; nothing but the vault's own rounding is needed.
+/// @dev With shares out, a trough exit first takes all but the seed's part; two rows then pin the view's quote and the sync's stamp there.
 /// @dev The start-state pin is `CuratorVaultForeignPayout.test_TwoDustDonationsBeforeTheFirstDepositCannotBrickEntry`.
 contract CuratorVaultSplitOverGrossTest is CuratorVaultBase {
     uint256 internal constant GIFT = 1_000e6; // what the donor rests in its own market in the vault's asset
@@ -24,7 +24,7 @@ contract CuratorVaultSplitOverGrossTest is CuratorVaultBase {
 
     address internal donor = address(0xD0D0);
 
-    CuratorVault internal w;
+    AceVault internal w;
     bytes32 internal gift; // the donor's market in the vault's asset, naming the donor its one lender
 
     function setUp() public override {
@@ -36,14 +36,14 @@ contract CuratorVaultSplitOverGrossTest is CuratorVaultBase {
         _lendDirectIn(donor, gift, GIFT);
     }
 
-    /// @notice THE PILE IS CAPPED AT THE GROSS: two dust payouts a second apart leave it reading exactly the gross, not a wei past it.
+    /// @notice THE PILE READS BACK EXACTLY: two dust payouts a second apart leave it reading exactly the two payouts, not a wei past them.
     function test_ThePileNeverReadsPastTheGrossAtZeroSupply() public {
         _overGross(1);
-        assertEq(w.totalSupply(), 0, "PREMISE: no share was ever minted");
-        assertEq(w.grossNav(), 2 * DUST, "PREMISE: gross is the two payouts");
-        assertEq(w.unvested(), w.grossNav(), "the second stamp read back past the gross: both vest roundings ceil");
-        assertEq(w.totalAssets(), 0, "and NAV is the gross less a pile that is all of it");
-        assertEq(w.maxDeposit(alice), type(uint256).max, "an empty vault admits, with no pile gate at zero supply");
+        assertEq(w.totalSupply(), w.SEED_SHARES(), "PREMISE: no live share was ever minted");
+        assertEq(w.grossNav(), 2 * DUST + w.MIN_SEED(), "PREMISE: gross is the two payouts and the seed");
+        assertEq(w.unvested(), 2 * DUST, "the second stamp read back past the payouts");
+        assertEq(w.totalAssets(), w.MIN_SEED(), "and NAV is the gross less a pile that is exactly the payouts");
+        assertEq(w.maxDeposit(alice), type(uint256).max, "a seed-only vault admits, with no pile gate at no live supply");
     }
 
     /// @notice THE PROVER'S DEPOSIT COUNTEREXAMPLE ON THE SHIPPED VAULT: 2 then 2 mint no more than 4 at once.
@@ -85,8 +85,8 @@ contract CuratorVaultSplitOverGrossTest is CuratorVaultBase {
     function test_ManySameSecondStampsNeverOvershoot() public {
         uint256 snap = vm.snapshotState();
         _overGross(40);
-        assertEq(w.totalSupply(), 0, "PREMISE: still no share");
-        assertEq(w.unvested(), w.grossNav(), "the overshoot grew a wei per stamp");
+        assertEq(w.totalSupply(), w.SEED_SHARES(), "PREMISE: still no live share");
+        assertEq(w.unvested(), w.grossNav() - w.MIN_SEED(), "the overshoot grew a wei per stamp");
         (uint256 sx, uint256 sy, uint256 sxy) = _splitDeposit(X, Y);
         assertLe(sx + sy, sxy, "the split minted past the whole");
         vm.revertToState(snap);
@@ -98,8 +98,8 @@ contract CuratorVaultSplitOverGrossTest is CuratorVaultBase {
     /// @notice WITH SHARES OUT ENTRY STAYS OPEN: a one-wei first deposit buys a wei of NAV, so the next entrant is not refused.
     function test_AOneWeiFirstDepositLeavesEntryOpen() public {
         _overGross(1);
-        _lpDeposit(w, alice, 1); // gross 2,001 against a pile capped at 2,000
-        assertEq(w.totalAssets(), 1, "the wei deposited is NAV, not swallowed by an overstated pile");
+        _lpDeposit(w, alice, 1); // gross 2,001 over the seed against a pile of exactly 2,000
+        assertEq(w.totalAssets(), 1 + w.MIN_SEED(), "the wei deposited is NAV, not swallowed by an overstated pile");
         assertGt(w.maxDeposit(bob), 0, "so the view admits");
         assertGt(_lpDeposit(w, bob, Y), 0, "and the next entrant mints");
     }
@@ -112,15 +112,15 @@ contract CuratorVaultSplitOverGrossTest is CuratorVaultBase {
         _payAndStamp(DUST);
         uint256 used = g0 - gasleft();
         emit log_named_uint("gas per stamp", used);
-        assertEq(w.unvested(), w.grossNav(), "the stamp left the pile past the gross");
+        assertEq(w.unvested(), w.grossNav() - w.MIN_SEED(), "the stamp left the pile past the payouts");
         assertGt(used, 10_000, "a stamp is two hub-touching calls");
         assertLt(used, 1_000_000, "and stays under this bound");
     }
 
-    // ---- with shares out: the cap binds only at NAV zero at the mark, so a trough builds that state ----
+    // ---- with shares out: a trough leaves only the seed's part of gross, and dust stamps land on it ----
 
-    /// @notice THE VIEW'S CAP: the last requester's quote prices at the gross his claim releases, never a wei above it.
-    /// @notice His 400,000 shares are worth under a wei at a two-wei gross, so the quote is zero and the claim refuses in step.
+    /// @notice THE VIEW'S QUOTE: the last requester's quote prices at the gross his claim releases, never a wei above it.
+    /// @notice His 400,000 shares are worth under a wei at the gross the seed leaves, so the quote is zero and the claim refuses in step.
     function test_TheLastRequestersQuoteAgreesWithTheClaimOverAnUnsyncedRise() public {
         _spentWithSharesOut();
         assertEq(w.maxClaim(bob), 0, "the quote replayed the release a wei past gross, offering a claim the verb refuses");
@@ -129,23 +129,26 @@ contract CuratorVaultSplitOverGrossTest is CuratorVaultBase {
         w.claimExit(KEPT, bob, 0);
     }
 
-    /// @notice THE SYNC'S CAP: a stamp onto a pile that is the whole mark leaves it at the gross, so NAV recovers on the gross's own schedule.
-    /// @notice An uncut pile reads a wei past gross, and four tenths of a window from maturity it still swallows all of a two-wei gross.
+    /// @notice THE SYNC'S STAMP: a stamp onto a dust pile with shares out reads back exactly the two rises, so NAV recovers as the pile vests.
     function test_WithSharesOutAStampLeavesThePileAtTheGross() public {
-        _spentWithSharesOut();
+        uint256 g = _spentWithSharesOut();
         w.crank();
-        assertEq(w.totalSupply(), KEPT, "PREMISE: shares are out");
-        assertEq(w.grossNav(), 2, "PREMISE: the crank moved no gross");
-        assertEq(w.unvested(), w.grossNav(), "the stamp left the pile a wei past the gross it observed");
+        assertEq(w.totalSupply(), KEPT + w.SEED_SHARES(), "PREMISE: shares are out");
+        assertEq(w.grossNav(), g, "PREMISE: the crank moved no gross");
+        assertEq(w.unvested(), 2, "the stamp left the pile past the two rises it observed");
+        uint256 a0 = w.totalAssets();
         _waivePots(w); // the settled pot never sells here, so the guardian takes it out of the entry gate
-        _warpBy(VEST_W * 3 / 5 - 1); // four tenths of the window left: a cut basis of 2 reads 1, an uncut one of 3 reads 2
-        assertEq(w.totalAssets(), 1, "the pile still swallowed the whole gross");
+        _warpBy(VEST_W * 3 / 5 - 1); // four tenths of the window left: the floored basis of 2 reads ceil(0.8), one wei
+        assertEq(w.grossNav(), g, "PREMISE: nothing moved gross over the warp");
+        assertEq(w.unvested(), 1, "PREMISE: four tenths of the window from maturity, the two-wei pile reads one wei");
+        assertEq(w.totalAssets(), a0 + 1, "NAV did not recover by exactly the one wei of the pile that vested");
         assertEq(w.maxDeposit(alice), type(uint256).max, "so the view kept a recovering vault spent");
         assertGt(_lpDeposit(w, alice, X), 0, "and the entry did not mint");
     }
 
-    /// @dev NAV zero at the mark with shares out: bob's trough exit takes the whole gross, a one-wei stamp, his whole request, a one-wei rise unsynced.
-    function _spentWithSharesOut() internal {
+    /// @dev With shares out: bob's trough exit takes all but the seed's part, a one-wei stamp, his whole request, a one-wei rise unsynced.
+    /// @return g The gross after the unsynced rise.
+    function _spentWithSharesOut() internal returns (uint256 g) {
         uint256 shares = _lpDeposit(w, bob, X);
         uint256 loanId = _open(850e6);
         w.crank();
@@ -153,18 +156,20 @@ contract CuratorVaultSplitOverGrossTest is CuratorVaultBase {
         _finalize(loanId);
         w.crank();
         vm.prank(bob);
-        w.redeem(shares - KEPT, bob, bob); // below par his floor takes the whole NAV, and he keeps KEPT shares
-        assertEq(w.grossNav(), 0, "PREMISE: the trough exit took the whole gross");
-        assertEq(w.totalSupply(), KEPT, "PREMISE: bob kept his shares");
-        _payAndStamp(1); // an exact first stamp: the pile is the whole gross and the whole mark
+        w.redeem(shares - KEPT, bob, bob); // below par his floor takes all of NAV but the seed's part, and he keeps KEPT shares
+        assertLe(w.grossNav(), 2 * w.MIN_SEED(), "PREMISE: the trough exit took all of gross but the seed's part");
+        assertEq(w.totalSupply(), KEPT + w.SEED_SHARES(), "PREMISE: bob kept his shares");
+        _payAndStamp(1); // an exact stamp: the pile is the one wei
         assertEq(w.unvested(), 1, "PREMISE: the pile is the one wei");
+        uint256 g0 = w.grossNav();
         vm.prank(bob);
         w.requestExit(KEPT);
         _warpBy(1);
         vm.prank(donor);
         ace.withdraw(gift, 1, address(w), 0); // a counted rise a second later, NOT synced
-        assertEq(w.grossNav(), 2, "PREMISE: the rise is counted");
-        assertEq(w.unvested(), 1, "PREMISE: a second on, the pile still reads the whole mark");
+        g = w.grossNav();
+        assertEq(g, g0 + 1, "PREMISE: the rise is counted");
+        assertEq(w.unvested(), 1, "PREMISE: a second on, the pile still reads its one wei");
     }
 
     /// @dev One counted payout of `amount` from the donor's market to the vault, stamped by a crank.
@@ -174,12 +179,12 @@ contract CuratorVaultSplitOverGrossTest is CuratorVaultBase {
         w.crank();
     }
 
-    /// @dev The counterexample's start: supply zero and a dust gross, `k` same-second stamps after an exact one.
+    /// @dev The counterexample's start: no live supply and a dust gross, `k` same-second stamps after a first one.
     function _overGross(uint256 k) internal {
-        _payAndStamp(DUST); // the first stamp is exact: the pile IS the whole gross
+        _payAndStamp(DUST); // the first stamp: the pile is exactly the payout
         _warpBy(1);
         for (uint256 i; i < k; i++) {
-            _payAndStamp(DUST); // a stamp inside a running window rounds up past its rise
+            _payAndStamp(DUST); // a stamp inside a running window, where the old ceil basis read a wei past its rise
         }
     }
 
@@ -214,11 +219,11 @@ contract CuratorVaultSplitOverGrossTest is CuratorVaultBase {
     function _leak(uint256 k) internal returns (uint256 aliceLoss, uint256 bobGain) {
         uint256 snap = vm.snapshotState();
         _overGross(k);
-        uint256 g = w.grossNav();
+        uint256 g = w.grossNav() - w.MIN_SEED();
         (uint256 alice1, uint256 bob1) = _twoEntrantsAfterTheVest();
         vm.revertToState(snap);
-        _payAndStamp(g); // the same gross, one exact stamp: the pile is the gross and not a wei past it
-        assertEq(w.unvested(), w.grossNav(), "PREMISE: the counterfactual pile is exact");
+        _payAndStamp(g); // the same rises, one stamp: the pile is the payouts and not a wei past them
+        assertEq(w.unvested(), w.grossNav() - w.MIN_SEED(), "PREMISE: the counterfactual pile is exact");
         (uint256 alice0, uint256 bob0) = _twoEntrantsAfterTheVest();
         assertLe(alice1, alice0, "the rounding never helps the first depositor");
         assertGe(bob1, bob0, "nor hurts the second");

@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {Loan, MarketParams} from "../../src/ace/hub/Types.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
@@ -27,7 +27,7 @@ contract CuratorVaultFoldSettleTest is CuratorVaultBase {
     }
 
     /// @dev The big loan, opened through the door.
-    function _openBig(CuratorVault v) internal returns (uint256 loanId) {
+    function _openBig(AceVault v) internal returns (uint256 loanId) {
         collateral.mint(borrower, BIG);
         vm.startPrank(borrower);
         collateral.approve(address(v), BIG);
@@ -36,13 +36,13 @@ contract CuratorVaultFoldSettleTest is CuratorVaultBase {
     }
 
     /// @dev Both branches are read at the SAME clock: one vest window on, then a fee collection.
-    function _settleClock(CuratorVault v) internal {
+    function _settleClock(AceVault v) internal {
         _warpBy(VEST_W + 1);
         v.collectFee();
     }
 
     /// @dev The vault with an LP, the loan, the open's gain vested and collected, and the clock an hour before expiry.
-    function _loanInTheWindow() internal returns (CuratorVault v, uint256 loanId) {
+    function _loanInTheWindow() internal returns (AceVault v, uint256 loanId) {
         v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         loanId = _openBig(v);
@@ -53,11 +53,11 @@ contract CuratorVaultFoldSettleTest is CuratorVaultBase {
     }
 
     /// @dev The continuing branch, in the term's last second: the borrower extends in place in cash, then the credit is cranked home and the clock settled.
-    function _extendBranch(CuratorVault v, uint256 loanId) internal returns (uint256 nav) {
+    function _extendBranch(AceVault v, uint256 loanId) internal returns (uint256 nav) {
         _warpAtLeastTo(uint256(read.loan(loanId).expiry) - 1);
         Loan memory l = read.loan(loanId);
         MarketParams memory mp = ace.idToMarketParams(l.market);
-        uint256 fee = LoanMath.originationFee(l.debt, uint64(_now()) + l.tenor - l.expiry, mp.baseBps, mp.minTenor);
+        uint256 fee = LoanMath.originationFee(l.debt, uint64(_now()) + l.tenor - l.expiry, mp.lenderAprBps);
         usdc.mint(borrower, fee);
         vm.startPrank(borrower);
         usdc.approve(address(ace), fee);
@@ -71,7 +71,7 @@ contract CuratorVaultFoldSettleTest is CuratorVaultBase {
     /// @notice A LOAN NOBODY EXTENDED settles at the hub's `forceClose` at expiry, open to anyone, and the vault does better than continuing it.
     /// @notice The vault's own consent to an extension moves nothing: the expiry close only settles.
     function test_AHubForceCloseAtExpirySettlesTheVaultsLoan() public {
-        (CuratorVault v, uint256 loanId) = _loanInTheWindow();
+        (AceVault v, uint256 loanId) = _loanInTheWindow();
         uint256 root = vm.snapshotState();
         uint256 continued = _extendBranch(v, loanId);
         vm.revertToState(root);

@@ -129,7 +129,7 @@ contract AceOpenBoundsTest is WarpClock {
 
     function _fee(uint256 principal) internal pure returns (uint256) {
         uint64 t = ProtocolPolicy.MIN_TENOR;
-        return LoanMath.originationFee(principal, t, PocDeployConfig.BASE_BPS, t);
+        return LoanMath.originationFee(principal, t, PocDeployConfig.LENDER_APR_BPS);
     }
 
     /// @dev The health buffer a draw landing at `tick` would leave, by `_fundAndCheck`'s arithmetic.
@@ -190,36 +190,36 @@ contract AceOpenBoundsTest is WarpClock {
     // ============ minPayout: the over-fee half of the guard ============
 
     /// @dev The all-in fee at a staged rate, priced at the market's own shortest term.
-    function _feeAt(uint256 principal, uint256 baseBps) internal pure returns (uint256) {
+    function _feeAt(uint256 principal, uint256 lenderAprBps) internal pure returns (uint256) {
         uint64 t = ProtocolPolicy.MIN_TENOR;
-        return LoanMath.originationFee(principal, t, baseBps, t);
+        return LoanMath.originationFee(principal, t, lenderAprBps);
     }
 
-    /// @dev Writes `bps` into the market's `baseBps`, past the genesis rails that forbid it at creation.
+    /// @dev Writes `bps` into the market's `lenderAprBps`, past the genesis rails that forbid it at creation.
     /// @dev The slot is FOUND, never hardcoded: only the true one moves what the hub's own getter reports.
     /// @dev So a MarketParams layout shift fails HERE, in the fixture, rather than vacuously downstream.
-    /// @dev It writes only into a word whose whole value is today's `baseBps`, so no packed field is disturbed.
+    /// @dev It writes only into a word whose whole value is today's `lenderAprBps`, so no packed field is disturbed.
     function _forceBaseBps(uint256 bps) internal {
-        uint256 was0 = ace.idToMarketParams(id).baseBps;
+        uint256 was0 = ace.idToMarketParams(id).lenderAprBps;
         for (uint256 i; i < 23; i++) {
             bytes32 slot = bytes32(read.marketSlot(id, i));
             bytes32 was = vm.load(address(ace), slot);
             if (uint256(was) != was0) continue;
             vm.store(address(ace), slot, bytes32(bps));
-            if (ace.idToMarketParams(id).baseBps == bps) return;
+            if (ace.idToMarketParams(id).lenderAprBps == bps) return;
             vm.store(address(ace), slot, was);
         }
-        revert("baseBps slot not found: the MarketParams layout moved");
+        revert("lenderAprBps slot not found: the MarketParams layout moved");
     }
 
     /// @notice THE OVER-FEE HALF of the payout guard, at the DEFAULT bound of `minPayout == 0`.
     /// @notice The guard must refuse by NAME there, never panic 0x11 on the payout subtraction.
-    /// @dev The input is unreachable at genesis, so `baseBps` is staged past the rails that make it so.
+    /// @dev The input is unreachable at genesis, so `lenderAprBps` is staged past the rails that make it so.
     /// @dev The staging IS the finding: the helper's safety rests on a precondition its signature never states.
     /// @dev Fails if the over-fee leg ever stops binding at a zero bound, because a panic is not `PayoutBelowMin`.
     function test_Open_MinPayout_ZeroBoundStillBindsTheOverFeeCase() public {
-        _forceBaseBps(20_000); // 2.2x the draw per minTenor: the fee overshoots the whole principal
-        assertGt(_feeAt(PRINCIPAL, 20_000), PRINCIPAL, "the fixture must put the fee OVER the principal");
+        _forceBaseBps(1_043_000); // 2.2x the draw over the 7-day term: the fee overshoots the whole principal
+        assertGt(_feeAt(PRINCIPAL, 1_043_000), PRINCIPAL, "the fixture must put the fee OVER the principal");
 
         _fundBorrower(bob);
         vm.prank(bob);
@@ -231,8 +231,8 @@ contract AceOpenBoundsTest is WarpClock {
     /// @notice Together the two rows show `minPayout` no longer decides whether the over-fee leg binds.
     /// @dev The armed half was never the defect, so this row passed before the fix and after it.
     function test_control_MinPayout_ArmedBoundAlreadyBindsTheOverFeeCase() public {
-        _forceBaseBps(20_000);
-        assertGt(_feeAt(PRINCIPAL, 20_000), PRINCIPAL, "same staged input as the zero-bound case");
+        _forceBaseBps(1_043_000);
+        assertGt(_feeAt(PRINCIPAL, 1_043_000), PRINCIPAL, "same staged input as the zero-bound case");
 
         _fundBorrower(bob);
         vm.prank(bob);
@@ -935,26 +935,23 @@ contract AceOpenBoundsTest is WarpClock {
 
     // ============ the envelope's fee ceiling ============
 
-    /// @dev A market with a real tenor GRID, so the ALL-IN fee ceiling is reachable at a legal baseBps.
-    /// @dev `baseBps * maxTenor * 11000 < 10000 * 10000 * minTenor`: a single-rung market never reaches it.
-    function _gridParams(uint256 baseBps) internal view returns (MarketParams memory p) {
+    /// @dev A market with a real tenor GRID, an hour to 22 hours; the share rail reads its 22-hour `maxTenor` alone.
+    function _gridParams(uint256 lenderAprBps) internal view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(record);
         p.minTenor = 1 hours;
         p.maxTenor = 22 hours;
-        p.baseBps = baseBps;
+        p.lenderAprBps = lenderAprBps;
     }
 
     /// @notice The fee can never exceed its SHARE ceiling at the LONGEST term the market issues.
-    /// @dev 22x the shortest term puts the ALL-IN ceiling at 1e8/(4*22*11000) = 103.3 bps.
-    /// @dev It was 413 bps against the old whole-principal bound; the share ceiling moved it.
-    /// @dev Still under the envelope's own 500 bps cap, so this rail is binding here and is reachable.
+    /// @dev A 22-hour maxTenor puts the ceiling at `2500 * 1e4 * 365 days / (79200 * 11000)` = 904,958.7 bps a year.
     function test_FeeCeiling_RejectsOneOverAndAdmitsAtTheCeiling() public {
-        ace.createMarket(_gridParams(103)); // at the ceiling: admitted
+        ace.createMarket(_gridParams(904_958)); // at the ceiling: admitted
 
         /// @dev built BEFORE the cheatcode: `_gridParams` reads the reference seam off the hub
         /// @dev an external call in the ARGUMENT list would eat the expectRevert, not createMarket
-        MarketParams memory oneOver = _gridParams(104);
+        MarketParams memory oneOver = _gridParams(904_959);
         vm.expectRevert(bytes("fee bps too high"));
         ace.createMarket(oneOver);
     }
@@ -984,12 +981,12 @@ contract AceOpenBoundsTest is WarpClock {
         /// @dev The fee is monotone in the tenor, so the ends bound the interior and the midpoint is a witness.
         uint64[3] memory terms = [p.minTenor, (p.minTenor + p.maxTenor) / 2, p.maxTenor];
         for (uint256 i; i < terms.length; i++) {
-            uint256 termFee = LoanMath.originationFee(p.minPrincipal, terms[i], p.baseBps, p.minTenor);
+            uint256 termFee = LoanMath.originationFee(p.minPrincipal, terms[i], p.lenderAprBps);
             assertLt(termFee, p.minPrincipal, "the fee is under the smallest principal, at every admissible term");
         }
 
         _seedGrid(gid, p.maxTenor, 5_000e6);
-        uint256 fee = LoanMath.originationFee(p.minPrincipal, p.maxTenor, p.baseBps, p.minTenor);
+        uint256 fee = LoanMath.originationFee(p.minPrincipal, p.maxTenor, p.lenderAprBps);
 
         _fundBorrower(bob);
         uint256 bal = usdc.balanceOf(bob);
@@ -1017,7 +1014,7 @@ contract AceOpenBoundsTest is WarpClock {
 
         for (uint256 i; i < principals.length; i++) {
             for (uint256 j; j < tenors.length; j++) {
-                uint256 fee = LoanMath.originationFee(principals[i], tenors[j], p.baseBps, p.minTenor);
+                uint256 fee = LoanMath.originationFee(principals[i], tenors[j], p.lenderAprBps);
                 assertLt(fee, principals[i], "the added clause is INERT: the fee never reaches the principal");
                 for (uint256 k; k < 2; k++) {
                     uint256 floor = k == 0 ? 0 : principals[i] - fee; // the changed branch, then the untouched one
@@ -1039,6 +1036,6 @@ contract AceOpenBoundsTest is WarpClock {
         MarketParams memory p = ace.idToMarketParams(id);
         principal = bound(principal, p.minPrincipal, type(uint128).max);
         tenor = uint64(bound(uint256(tenor), p.minTenor, p.maxTenor));
-        assertLt(LoanMath.originationFee(principal, tenor, p.baseBps, p.minTenor), principal, "fee strictly under principal");
+        assertLt(LoanMath.originationFee(principal, tenor, p.lenderAprBps), principal, "fee strictly under principal");
     }
 }

@@ -3,8 +3,9 @@ pragma solidity 0.8.36;
 
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault, Listing} from "../../src/curator/CuratorVault.sol";
 import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
+import {Listing} from "../../src/entities/curated/CuratorTerms.sol";
+import {CuratedVaults} from "../utils/CuratedVaults.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {PocDeployConfig} from "../../src/config/Defaults.sol";
 
@@ -12,15 +13,6 @@ import {PocDeployConfig} from "../../src/config/Defaults.sol";
 contract HostileReceiver {
     fallback() external payable {
         revert("REENTERED");
-    }
-}
-
-/// @notice A vault pinned at zero NAV, for the end-of-life guards the counters make unreachable.
-contract ZeroNavVault is CuratorVault {
-    constructor(VaultConfig memory cfg, Listing[] memory l) CuratorVault(cfg, 10e6, 1.4e18, 1 days, l, "Zero", "cZERO") {}
-
-    function totalAssets() public pure override returns (uint256) {
-        return 0;
     }
 }
 
@@ -90,7 +82,7 @@ contract CuratorVaultExitTest is CuratorVaultBase {
     }
 
     /// @dev One settled, written-off class, with idle cash left over to redeem against.
-    function _impaired(CuratorVault v, uint256 seedA, uint256 seedB) internal returns (uint256 loanId) {
+    function _impaired(AceVault v, uint256 seedA, uint256 seedB) internal returns (uint256 loanId) {
         _lpDeposit(v, alice, seedA);
         _lpDeposit(v, bob, seedB);
         loanId = _open(DRAW);
@@ -100,7 +92,7 @@ contract CuratorVaultExitTest is CuratorVaultBase {
     }
 
     /// @dev A door borrow pledging `BIG_COLL`, so the trigger stays far under the floor.
-    function _openBig(CuratorVault v, uint256 principal) internal returns (uint256 loanId) {
+    function _openBig(AceVault v, uint256 principal) internal returns (uint256 loanId) {
         collateral.mint(borrower, BIG_COLL);
         vm.startPrank(borrower);
         collateral.approve(address(v), BIG_COLL);
@@ -110,7 +102,7 @@ contract CuratorVaultExitTest is CuratorVaultBase {
 
     /// @dev T13: the worked example. Cash at book, and NOTHING else: the exit moves no title.
     function test_Exit_CashOnly_TheWorkedExample() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _impaired(v, 9_000e6, 1_000e6);
 
         uint256 nav = v.totalAssets();
@@ -130,7 +122,7 @@ contract CuratorVaultExitTest is CuratorVaultBase {
 
     /// @dev T15: the exit performs no valuation. Every price source is armed to revert during it.
     function test_Exit_NoValuationIsPerformed() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _impaired(v, 9_000e6, 1_000e6);
 
         vm.mockCallRevert(address(record), bytes(""), bytes("RECORD_READ"));
@@ -144,7 +136,7 @@ contract CuratorVaultExitTest is CuratorVaultBase {
     /// @dev T29: EVERY exit always succeeds. With no gate left, `redeem` IS the escape the forfeiting verb was.
     /// @dev Twelve positions and a long gap: nothing about time or count may stand between an LP and cash.
     function test_Exit_RedeemAlwaysSucceeds() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, 12 * 500e6);
         _lpDeposit(v, bob, 2_000e6);
         /// @dev WAS twelve LOTS and ONE loan drawing across all of them: a class was a (loan, tick) pair, so
@@ -170,7 +162,7 @@ contract CuratorVaultExitTest is CuratorVaultBase {
     /// @dev T35: maxRedeem reports the liquidity truth and nothing else.
     /// @dev The open's own gain vests first: a sole holder's whole free supply is refused, and offered nothing, while a gain vests.
     function test_Exit_MaxRedeemIsLiquidityBounded() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(DRAW);
         _crank(v, loanId, T2, 0);
@@ -200,22 +192,30 @@ contract CuratorVaultExitTest is CuratorVaultBase {
 
     /// @dev T34, EXIT HALF ONLY: a burn worth nothing reverts rather than giving the shares away.
     /// @dev The ENTRY half is parked -- `EndOfLife` is deleted, so the door does not shut any more.
-    /// @dev The state is unreachable through the hub: the virtual offset always leaves a wei behind.
-    /// @dev The double overrides the NAV expression rather than faking it in storage.
+    /// @dev A NAV of exactly zero is unreachable through the hub, the open's lender fee always staying behind, so the state is a reachable near-total loss.
+    /// @dev The burn is the most shares that still price to nothing at that NAV.
     function test_EndOfLife_ZeroNavBurnRevertsRatherThanGivingSharesAway() public {
-        ZeroNavVault z = new ZeroNavVault(_cfg(0), _listing());
-        _lpDeposit(CuratorVault(address(z)), alice, 1_000e6);
-        assertEq(z.totalAssets(), 0, "NAV is zero while shares are live");
-        assertGt(z.totalSupply(), 0, "the spent-vault state");
+        AceVault z = _newVault(0);
+        _lpDeposit(z, alice, DRAW);
+        uint256 loanId = _open(DRAW);
+        _crank(z, loanId, T2, 0);
+        _finalize(loanId);
+        _crankAll(z);
+        _warpBy(VEST_W);
+        uint256 a = z.totalAssets();
+        assertGt(z.totalSupply(), 0, "the spent-vault state: shares are live");
+        assertLt(a, DRAW / 100, "PREMISE: the loss took all but the open's fee");
+        uint256 dust = (z.totalSupply() + 1e6) / (a + 1) - 1;
+        assertGt(dust, 0, "PREMISE: some burn prices to nothing at this NAV");
+        assertEq(z.previewRedeem(dust), 0, "PREMISE: and that burn is worth nothing");
 
         /// @dev BOTH EXIT DOORS PRICE, and both refuse a burn that prices to nothing.
-        uint256 held = z.balanceOf(alice);
         vm.startPrank(alice);
         vm.expectRevert(AceVault.ZeroAssets.selector);
-        z.redeem(held, alice, alice);
-        z.requestExit(held); // a request prices nothing, so it stands
+        z.redeem(dust, alice, alice);
+        z.requestExit(dust); // a request prices nothing, so it stands
         vm.expectRevert(AceVault.ZeroAssets.selector);
-        z.claimExit(held, alice, 0);
+        z.claimExit(dust, alice, 0);
         vm.stopPrank();
     }
 
@@ -223,7 +223,7 @@ contract CuratorVaultExitTest is CuratorVaultBase {
     /// @dev The reachable half of the same state: a write-off that nearly empties NAV shuts entry until its settled pot sells.
     /// @dev The trough gate is deleted; what shuts this door is the unsold pot, `InventoryUnsold`, with no share minted.
     function test_Entry_AWriteOffThatEmptiesNavWaitsForTheSale() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, DRAW);
         uint256 loanId = _open(DRAW);
         _crank(v, loanId, T2, 0);
@@ -238,7 +238,7 @@ contract CuratorVaultExitTest is CuratorVaultBase {
 
     /// @dev T41: the exit hands a hostile receiver nothing but an ERC20 transfer, which has no hook either.
     function test_Exit_AHostileReceiverCannotReenter() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _impaired(v, 9_000e6, 1_000e6);
         HostileReceiver hostile = new HostileReceiver();
 
@@ -261,7 +261,7 @@ contract CuratorVaultExitTest is CuratorVaultBase {
         ReadEveryMoveAsset hook = new ReadEveryMoveAsset();
         VaultConfig memory cfg = _cfg(0);
         cfg.asset = address(hook);
-        CuratorVault v = new CuratorVault(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, new Listing[](0), "Curator", "cVLT");
+        AceVault v = CuratedVaults.make(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, new Listing[](0), "Curator", "cVLT");
         address[2] memory lps = [alice, bob];
         for (uint256 i; i < 2; i++) {
             hook.mint(lps[i], SEED);
@@ -281,14 +281,14 @@ contract CuratorVaultExitTest is CuratorVaultBase {
         assertEq(hook.reads(), 1, "PREMISE: the claim moved cash once, so the armed read fired once");
         assertEq(hook.refusals(), 0, "a NAV read during the claim's payout was refused");
         assertEq(abi.decode(hook.lastAnswer(), (uint256)), v.totalAssets(), "the read during the payout tore: it is not the NAV the claim left");
-        assertEq(v.totalSupply(), v.balanceOf(alice), "and the claim itself completed: bob's escrow burned");
+        assertEq(v.totalSupply(), v.balanceOf(alice) + v.SEED_SHARES(), "and the claim itself completed: bob's escrow burned");
     }
 
     /// @dev A SEPARATE DEFECT ON THE SAME PATH: `withdraw` once fed a ceiled share count to a release test doing `totalSupply() - shares`.
     /// @dev Past NAV that UNDERFLOWED into `Panic(0x11)`; this pins a named refusal for an ask past NAV instead.
     /// @dev The cash bound is checked before the burn, so the name is OZ's over-withdraw, carrying the bound the max view reports.
     function test_Exit_AWithdrawPastNavRefusesByNameRatherThanByPanic() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, 9_000e6);
         _lpDeposit(v, bob, 1_000e6);
         _open(9_000e6);
@@ -320,7 +320,7 @@ contract CuratorVaultExitTest is CuratorVaultBase {
     /// @dev Build `k` written-off positions, one door borrow each, then time one instant redemption.
     /// @dev Nothing rests between calls, so there is no unconsumed depth to stand beside them.
     function _measureExit(uint256 k) internal returns (uint256 used) {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, k * 100e6 + 5_000e6);
         _lpDeposit(v, bob, 1_000e6);
         for (uint256 i; i < k; i++) {

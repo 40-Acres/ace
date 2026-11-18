@@ -2,13 +2,13 @@
 pragma solidity 0.8.36;
 
 import {AceVault} from "../../src/curator/AceVault.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {UnsoldPotRig} from "./CuratorVaultUnsoldPotRig.sol";
 
 /// @title CuratorVaultUnsoldPotGate
 /// @notice Entry waits while the hub shows this vault a settled pot that has not sold, at any supply, after the price gates.
 /// @notice The pot's sale reopens it; the views read zero while it is shut; the trough raid (E4) is refused at its deposit.
-/// @dev Every default here is SHALLOW, so no price gate stands, the price gates admit the entrant, and only the new gate refuses.
+/// @dev Every default here is SHALLOW and on its coverage line, so no price gate stands, the price gates admit the entrant, and only the new gate refuses.
 contract CuratorVaultUnsoldPotGateTest is UnsoldPotRig {
     uint256 internal constant RAID = 90_000e6; // nine times the stayer's stake: the raider's deposit at the trough
 
@@ -19,7 +19,7 @@ contract CuratorVaultUnsoldPotGateTest is UnsoldPotRig {
 
     /// @notice WITH SHARES OUTSTANDING, AN UNSOLD POT SHUTS ENTRY: both views read zero, and both verbs refuse `InventoryUnsold`.
     function test_Gate_AnUnsoldPotShutsEntryWithSharesOutstanding() public {
-        CuratorVault v = _gateVault();
+        AceVault v = _gateVault();
         _lpDeposit(v, alice, SEED);
         _shallowDefault(v);
         (uint256 u, uint256 s) = _counts(v);
@@ -29,28 +29,28 @@ contract CuratorVaultUnsoldPotGateTest is UnsoldPotRig {
         _assertShut(v, bob);
     }
 
-    /// @notice AT SUPPLY ZERO TOO: the empty vault skips the price gates, and the unsold pot still refuses the entrant.
+    /// @notice AT ZERO LIVE SUPPLY TOO: a vault holding only its seed skips the price gates, and the unsold pot still refuses the entrant.
     /// @dev Without it the entrant would own the whole recovery as the pot sells, bought at whatever the residue prices.
     function test_Gate_AnUnsoldPotShutsEntryAtSupplyZero() public {
-        CuratorVault v = _gateVault();
+        AceVault v = _gateVault();
         _lpDeposit(v, alice, SEED);
         _shallowDefault(v);
         uint256 all = v.balanceOf(alice);
-        (uint256 exitable,) = v.holds();
+        (uint256 exitable,) = vlens.holds(address(v));
         /// @dev The payout, not `maxRedeem`: at an all-cash NAV under par the share bound floors one atom's sliver short of the balance.
         assertLe(v.previewRedeem(all), exitable, "PREMISE: exitable cash covers the stayer's whole exit");
         vm.prank(alice);
         v.redeem(all, alice, alice);
-        assertEq(v.totalSupply(), 0, "PREMISE: the vault is empty");
+        assertEq(v.totalSupply(), v.SEED_SHARES(), "PREMISE: the vault is empty of live shares");
         (uint256 u,) = _counts(v);
         assertEq(u, 1, "PREMISE: the pot is still unsold");
         _assertShut(v, bob);
     }
 
     /// @notice THE SALE REOPENS ENTRY: the buy that empties the pot takes it off the count, and the next deposit lands.
-    /// @dev The ask is set at book first, so the sale's rise sits under the pile gate and the reopening is the count's alone.
+    /// @dev The ask is set at book first, so the sale's rise sits under the pile gate; entry reopens once the trough hold the sale started has run.
     function test_Gate_ThePotSellsAndEntryReopens() public {
-        CuratorVault v = _gateVault();
+        AceVault v = _gateVault();
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _shallowDefault(v);
         _assertShut(v, bob);
@@ -59,12 +59,14 @@ contract CuratorVaultUnsoldPotGateTest is UnsoldPotRig {
         (uint256 u, uint256 s) = _counts(v);
         assertEq(u, 0, "PREMISE: the emptying buy took the pot off the count");
         assertEq(s, 1, "PREMISE: and the settled count never falls");
+        v.crank(); // the sale's sync stores the trough hold at the recovery's maturity
+        _warpBy(VEST_W);
         _assertOpen(v, bob);
     }
 
     /// @notice A PARTIAL BUY LEAVES ENTRY SHUT: only the buy that empties the pot reopens it.
     function test_Gate_APartialBuyLeavesEntryShut() public {
-        CuratorVault v = _gateVault();
+        AceVault v = _gateVault();
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _shallowDefault(v);
         _askAtBook();
@@ -76,7 +78,7 @@ contract CuratorVaultUnsoldPotGateTest is UnsoldPotRig {
 
     /// @notice A LOAN REPAID IN FULL LEAVES NO POT AND SHUTS NOTHING: only a settlement moves the count.
     function test_Gate_ARepaidLoanLeavesEntryOpen() public {
-        CuratorVault v = _gateVault();
+        AceVault v = _gateVault();
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(SHALLOW);
         _repay(loanId, read.debtOf(loanId));
@@ -90,7 +92,7 @@ contract CuratorVaultUnsoldPotGateTest is UnsoldPotRig {
     /// @notice Refused at the deposit; so the stayer keeps the whole recovery once the pot sells, and the raider holds no share.
     /// @dev Were the deposit admitted, this row runs the raid out and fails with the raider's capture in the log.
     function test_E4_TheTroughRaidIsRefusedAtItsDeposit() public {
-        CuratorVault v = _gateVault();
+        AceVault v = _gateVault();
         _lpDeposit(v, alice, SEED);
         uint256 aliceShares = v.balanceOf(alice);
         uint256 loanId = _shallowDefault(v);
@@ -116,13 +118,13 @@ contract CuratorVaultUnsoldPotGateTest is UnsoldPotRig {
         _warpBy(VEST_W + 1);
         uint256 back = v.convertToAssets(aliceShares);
         assertGt(back, trough, "the recovery came back to the stayer");
-        assertApproxEqAbs(back, v.totalAssets(), 2, "and all of it: no entrant shares it");
+        assertApproxEqAbs(back + v.convertToAssets(v.SEED_SHARES()), v.totalAssets(), 2, "and all of it: no entrant shares it, the seed's slice aside");
     }
 
     /// @notice THE PRICE GATES ANSWER FIRST: a vesting gain over the band and an unsold pot together refuse by the pile.
     /// @notice Once the gain vests the pot still stands, and entry still waits for it.
     function test_Gate_RunsAfterThePileGate() public {
-        CuratorVault v = _gateVault();
+        AceVault v = _gateVault();
         _lpDeposit(v, alice, SEED);
         _shallowDefault(v);
         _gift(v, SEED / 5);
@@ -141,7 +143,7 @@ contract CuratorVaultUnsoldPotGateTest is UnsoldPotRig {
 
     /// @notice THE DOOR'S MARKET CARRIES THE ASK, with no curator input, so its pot sells and entry reopens.
     function test_AskOn_TheDoorsMarketCarriesTheAskSoThePotSells() public {
-        CuratorVault v = _gateVault();
+        AceVault v = _gateVault();
         assertTrue(ace.idToMarketParams(mid).inventoryAsk, "the door's market sells its pots");
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _shallowDefault(v);
@@ -149,6 +151,8 @@ contract CuratorVaultUnsoldPotGateTest is UnsoldPotRig {
         _assertShut(v, bob);
         _askAtBook();
         _sellPot(mid, loanId);
+        v.crank(); // the sale's sync stores the trough hold at the recovery's maturity
+        _warpBy(VEST_W);
         _assertOpen(v, bob);
     }
 }

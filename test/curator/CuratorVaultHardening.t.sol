@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {GateRefused} from "../../src/ace/hub/Lender.sol";
 
@@ -24,7 +24,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
     // ---- shared rigs ----
 
     /// @dev One vault, one door loan, booked and ready; the lot is always zero.
-    function _funded(CuratorVault v) internal returns (uint256 loanId, uint256 lot) {
+    function _funded(AceVault v) internal returns (uint256 loanId, uint256 lot) {
         _lpDeposit(v, alice, SEED);
         loanId = _open(DRAW);
         _crank(v, loanId, T2, lot);
@@ -39,7 +39,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
     /// @dev The old tests defended the cost book against a gift; sole tenancy removes the gift instead.
     /// @dev IT IS NOW READ OFF THE CLAIM LEDGER, since the receipt tokens a donation needed are deleted too.
     function test_LrA_NoStrangerCanEverHoldAClaimOnThisVaultsMarket() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(DRAW);
 
@@ -67,7 +67,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
     /// @dev AN LP EXIT IS A CASH EVENT AND NOTHING MORE: the pot is what the exiter cannot reach, and that is what this reads.
     /// @dev Entry is shut while the sale's recovery vests, the price net of it still deep or the pile large, and reopens once it has.
     function test_Loss_SocializesButTheTitleAndItsRecoverySurvive() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         (uint256 loanId,) = _funded(v);
         _finalize(loanId);
         _crankAll(v);
@@ -95,7 +95,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
 
     /// @dev Repay almost everything, then settle: the refund covers the sliver, so the loss is ~nothing.
     /// @dev That reaches the zero-loss settlement with real title over a real pot, not a spent class.
-    function _sliverThenSettle(CuratorVault v) internal returns (uint256 loanId, uint256 pot, uint256 lost) {
+    function _sliverThenSettle(AceVault v) internal returns (uint256 loanId, uint256 pot, uint256 lost) {
         (loanId,) = _funded(v);
         _repay(loanId, DRAW - DUST);
         _crankAll(v);
@@ -117,7 +117,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
     /// @dev The settlement cost the vault almost nothing, but the class still holds a pot it can claim.
     /// @dev What must survive is the TITLE and the route back to the pot, which is the crank.
     function test_WriteOff_AZeroWriteOffDoesNotRetireALivePot() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         (uint256 loanId, uint256 pot, uint256 lost) = _sliverThenSettle(v);
 
         assertLe(lost, DUST, "the cash beat all but the sliver, so almost nothing socialized");
@@ -133,7 +133,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
     /// @dev credit lands in the lender's pool directly -- so the second floor has nothing to round. A 1 here
     /// @dev would mean the strand came back through some other divisor, and should say so.
     function test_WriteOff_APotSoldAfterAZeroWriteOffStillReachesNav() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         (uint256 loanId,,) = _sliverThenSettle(v);
         assertGt(_buyPot(keeper, loanId, 20_000e6), 0, "a keeper buys the pot at the hub's own ask");
 
@@ -154,7 +154,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
     /// @dev The sibling fixture with the vest pile LEFT LIVE: it rests past the ask hold and no further.
     /// @dev An hour of hold inside a one-day window is reachable in production, so this state is too.
     /// @dev SEPARATE HELPER on purpose: two green tests depend on `_sliverThenSettle` maturing the pile.
-    function _sliverThenSettleLivePile(CuratorVault v) internal returns (uint256 loanId) {
+    function _sliverThenSettleLivePile(AceVault v) internal returns (uint256 loanId) {
         (loanId,) = _funded(v);
         _repay(loanId, DRAW - DUST);
         _crankAll(v);
@@ -178,7 +178,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
     /// @dev It is asserted as the DERIVED CEILING and not as that 1: which of 0 or 1 a given round trip lands on
     /// @dev falls out of the specific numbers, so an equality here would be a measured constant wearing a proof.
     function test_WriteOff_APotSoldIntoALiveVestPileStrandsTheHubWeiAndAtMostOneMore() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _sliverThenSettleLivePile(v);
         assertGt(v.unvested(), 0, "PREMISE: the pile is still LIVE, or this is just the matured sibling again");
 
@@ -211,7 +211,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
     /// @dev The door reads the row's record by design, so the loan opens BEFORE the record is armed; the hub reads it too.
     function test_Vault_ReadsNoPriceOnTheEntryAndRegistrationPath() public {
         vm.mockCallRevert(address(lens), abi.encodeWithSelector(AceLens.inventoryMark.selector), bytes("MARK_READ"));
-        CuratorVault v = _newVault(2000);
+        AceVault v = _newVault(2000);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(DRAW);
 
@@ -231,7 +231,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
     /// @dev The cash exit is bounded by exitable cash, and asking past it is OZ's named error, not a panic.
     /// @dev One share is left behind, so the refusal is the cash bound's and never the last-out rule's.
     function testRevert_Redeem_PastTheFreePotIsRefused() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _funded(v);
         assertLt(v.idle(), v.totalAssets(), "the draw is out at cost, so idle cannot clear the whole holding");
 
@@ -245,12 +245,12 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
     /// @dev Same bound on the assets-denominated verb, one wei past what maxWithdraw quotes.
     /// @dev The open's own gain vests first, so the last-out rule leaves the sole holder's view at exitable cash.
     function testRevert_Withdraw_OneWeiPastTheFreePotIsRefused() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _funded(v);
         _warpBy(VEST_W);
         v.crank();
         uint256 cap = v.maxWithdraw(alice);
-        (uint256 exitable, uint256 held) = v.holds();
+        (uint256 exitable, uint256 held) = vlens.holds(address(v));
         assertEq(cap, exitable - held, "the quote is exitable cash less the requests' hold, which binds a sole holder of a lent vault");
 
         vm.prank(alice);
@@ -260,7 +260,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
 
     /// @dev The withdraw verb pays the assets asked to the wei, and moves no title doing it.
     function test_Withdraw_PaysTheAssetsAskedExactly() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         (uint256 loanId,) = _funded(v);
         _lpDeposit(v, bob, 2_000e6);
         _finalize(loanId);
@@ -282,7 +282,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
 
     /// @dev A delegated exit spends the ERC-20 allowance; the receiver may differ from the owner throughout.
     function test_Exit_DelegatedRedeemSpendsTheAllowance() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         (uint256 loanId,) = _funded(v);
         _lpDeposit(v, bob, 2_000e6);
         _finalize(loanId);
@@ -304,7 +304,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
 
     /// @dev Without an allowance the delegate is refused; the exit is not a public drain on anyone's shares.
     function testRevert_Exit_DelegatedRedeemWithoutAllowance() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _funded(v);
         _lpDeposit(v, bob, 2_000e6);
 
@@ -320,7 +320,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
     /// @dev Was `..._ValuesTheNamedPositionLikeALap`; there is no valuation left for a lap to do.
     /// @dev The borrower repays the hub; the credit waits in the vault's pool until the crank brings it home as cash.
     function test_Crank_MovesQuoteIntoIdleAndIsNavNeutral() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         (uint256 loanId, uint256 lot) = _funded(v);
         _repay(loanId, 2_000e6);
 
@@ -340,12 +340,12 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
     // ---- conservation over a whole impairment ----
 
     /// @dev One deep vault, so the interleavings below all draw from the same shape without exhausting its cash mid-fuzz.
-    function _feeRig(uint16 bps) internal returns (CuratorVault v) {
+    function _feeRig(uint16 bps) internal returns (AceVault v) {
         v = _newVault(bps);
         _lpDeposit(v, alice, 32_020e6);
     }
 
-    function _impair(CuratorVault v) internal returns (uint256 loanId) {
+    function _impair(AceVault v) internal returns (uint256 loanId) {
         loanId = _open(10e6);
         _crankAllTicks(v, loanId, 0);
         _finalize(loanId);
@@ -353,7 +353,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
     }
 
     /// @dev The wait is load-bearing: the ladder defers recognition, and this driver is about the AMOUNT.
-    function _growth(CuratorVault v) internal {
+    function _growth(AceVault v) internal {
         uint256 loanId = _open(6_000e6);
         _crankAllTicks(v, loanId, 0);
         _repay(loanId, 6_000e6 * 2);
@@ -370,7 +370,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
     /// @dev every other interleaving of growth, recovery and cranking can only raise it or leave it.
     /// @dev Replaces `testFuzz_BadDebt_ConservationAcrossInterleavings`, which summed the deleted events.
     function testFuzz_Loss_OnlyASettlementEverLowersGrossNav(uint96 buyAmt, uint8 order) public {
-        CuratorVault v = _feeRig(5000);
+        AceVault v = _feeRig(5000);
         uint256 loanId = _impair(v);
 
         uint256 prev = v.grossNav();
@@ -392,7 +392,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
     /// @dev A recovery pass raises NAV and a collection carries the high-water up with it; no burn runs here, so it never sinks.
     /// @dev Replaces `test_Fee_ADebtMovedPassRestampsWhenRecoveryDiffersFromTheLoss`.
     function test_Fee_ARecoveryCarriesTheMarkUpButNeverDown() public {
-        CuratorVault v = _feeRig(2000);
+        AceVault v = _feeRig(2000);
         uint256 loanId = _impair(v);
         uint256 highWaterBefore = v.feeHighWater();
         assertGt(highWaterBefore, 0, "the pre-loss mark stands and the write-off did not sink it");
@@ -415,7 +415,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
     /// @dev Asserted behaviourally: a verb that walked would BOOK, and not one of these books anything.
     /// @dev MORE load-bearing after the teardown, not less: the hub's mint is the only double-book guard.
     function test_NoGatedPathEverMovesTheClaimTheOpenWrote() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(DRAW / 2); // most stays idle, so the exit has cash to pay from
 

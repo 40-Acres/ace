@@ -15,6 +15,7 @@ import {AceReader} from "../utils/AceReader.sol";
 /// @title AceP3DrawBackstops
 /// @notice Audit run 2026-09-13-670568 phase 3, register note on #387: which guard, if any, refuses each kind of re-used id.
 /// @notice `AlreadyFunded` reads `M.claim`, which a full repay zeroes. The title mint is never undone: the collection has no burn.
+/// @notice It guards an OPEN's draw alone: a top-up adds to a live claim through its own path, `drawMore`, which never reaches it.
 /// @dev GREEN on purpose. `B.count` is rolled back with a cheat code, which is the only way to reach a re-used id at all.
 /// @dev The one RAIL row forges a live claim instead: no rollback reaches `AlreadyFunded`, since the mint refuses first.
 contract AceP3DrawBackstopsTest is WarpClock {

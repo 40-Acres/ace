@@ -349,7 +349,7 @@ contract AceFillPredicateOpenLegsTest is AceFillPredicateBase {
     }
 
     /// @notice One unit under the coverage line, with a band high end no fill can reach, so leg 5 cannot answer first.
-    /// @dev The line sits `maxClaimTicks` above the trigger requirement, so this take is under the line and over the trigger.
+    /// @dev The line sits one atom above the trigger requirement, so this take is under the line and over the trigger.
     function test_tryFillOrder_OneUnitUnderTheCoverageLine_NamesBelowCoverageLine() public {
         uint256 orderId = _post(P, LIQ, NO_HIGH, P, TEN, _far());
         Order memory o = ace.orderOf(orderId);

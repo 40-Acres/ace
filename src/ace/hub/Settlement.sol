@@ -41,6 +41,7 @@ library Settlement {
     /* ====== 1. SETTLE: the terminal crank ====== */
 
     /// @notice Settle a loan whose distress has persisted for the full settle window. Final.
+    /// @notice Inside the term the market takes the claim at the trigger, `lot / k`, capped at the coverage line; from expiry the need, as `forceClose` does.
     /// @dev The ONLY precondition is the derived one: a recovery print makes this revert, no verb.
     /// @dev POLICY-BLIND, deliberately: persistent distress is what the lenders' settlement right is for.
     function finalize(LoanBook storage B, Market storage M, Cfg memory c, uint256 id) public {
@@ -103,10 +104,9 @@ library Settlement {
         if (units > 0) IPositionManager(c.positionManager).retireCustody(id, units);
         uint256 sliver = LoanAccounting.sliverUnits(B, M, c, id, units);
         if (sliver > 0) LoanAccounting.creditUnits(B, id, msg.sender, sliver);
-        units -= sliver;
-
         uint256 need = LoanAccounting.collateralNeeded(M, c, id);
-        uint256 toMarket = _marketBound(B, M, c, id, need, units);
+        uint256 toMarket = Math.min(_marketBound(B, M, c, id, need, units), units - sliver); // the bound reads the whole lot, as the trigger did
+        units -= sliver;
         uint256 toClaims = Math.min(toMarket, need);
         LoanAccounting.creditUnits(B, id, borrower, units - toMarket);
         /// @dev BEFORE `_finalizeLoanFor`, which zeroes the claim this spread is conditioned on.
@@ -178,23 +178,28 @@ library Settlement {
         }
     }
 
-    /// @dev How much of the lot the market side takes: the claims' need, or the whole coverage where there is no record.
-    /// @dev CLASS, NEVER LIVENESS: this turns on whether a record was ever WIRED, which genesis fixes and no party can flip.
+    /// @dev The market side's take, before the caller caps it at the post-sliver lot: recordless, the coverage line; recorded from expiry, the need.
+    /// @dev Recorded inside the term, `ceil(lot / k)` capped at that line: the claim at the trigger while `triggerPrice` stays `k * debt / lot`.
+    /// @dev `lot` is the pledge BEFORE the sliver, the units the trigger was priced on.
+    /// @dev Keyed on the clock, never the door: from expiry `finalize` and `forceClose` are both open and must give one take.
+    /// @dev CLASS, NEVER LIVENESS: this turns on whether a record was ever WIRED and on the loan's own expiry, never on what the record says.
     /// @dev A RECORDLESS LENDER HAS NO EARLY SEIZURE AT ALL and prices that when they rest; the coverage is what pays for it.
     /// @dev A recordless loan reaches this bound only by its tenor running out: `finalize` refuses `NoRecord` there.
     /// @dev A wired record that stops answering closes every judgment-spending door -- draw, extension, withdrawal, deleverage -- and moves no value.
     /// @dev Some classes keep answering the below-question through silence, so title can still move; that is theirs to rule, not this bound's.
     /// @dev Reading liveness HERE would price a loan off a transient answer whose moment the settling caller picks.
     /// @dev Priced BEFORE `_finalizeLoanFor`, which deletes the funding floor this reads.
-    /// @dev A loan with no live claim keeps the narrow bound: there is nothing a coverage could be spread over.
-    /// @dev The floor guard is belt-and-braces on an ordering the admission gate already holds, and it errs toward today's rule.
-    function _marketBound(LoanBook storage B, Market storage M, Cfg memory c, uint256 id, uint256 need, uint256 units) private view returns (uint256) {
-        uint256 bound = need;
-        if (need > 0 && c.p.record == address(0)) {
-            bound = Borrower.coverageLine(c, B.loans[id].debt, LoanAccounting.fundingFloor(M, c, id));
-            bound = Math.max(bound, need);
+    /// @dev A loan with no live claim takes nothing: there is nothing a forfeit could be spread over.
+    /// @dev The need floor is belt-and-braces: admission and every later verb hold the line at or above the need, and the trigger at or under the price.
+    function _marketBound(LoanBook storage B, Market storage M, Cfg memory c, uint256 id, uint256 need, uint256 lot) private view returns (uint256) {
+        if (need == 0) return 0;
+        Loan storage L = B.loans[id];
+        uint256 bound;
+        if (c.p.record == address(0) || block.timestamp < L.expiry) {
+            bound = Borrower.coverageLine(c, L.debt, LoanAccounting.fundingFloor(M, c, id));
+            if (c.p.record != address(0)) bound = Math.min(bound, FullMath.mulDivRoundingUp(lot, 1e18, c.p.minCoverageWad));
         }
-        return Math.min(bound, units);
+        return Math.max(bound, need);
     }
 
     /// @dev The forfeited coverage: what the market's bound takes above the claim's need, WHOLE, into the pot.

@@ -112,7 +112,7 @@ contract AceRefinanceNetOutTest is WarpClock {
     /// @dev The net out restated from its terms: the new principal less its fee, plus the unearned refund, less the old debt.
     function _netOutOf(bytes32 m, uint256 loanId, uint256 newPrincipal, uint64 tenor) internal view returns (uint256) {
         MarketParams memory p = ace.idToMarketParams(m);
-        uint256 fee = LoanMath.originationFee(newPrincipal, tenor, p.baseBps, p.minTenor);
+        uint256 fee = LoanMath.originationFee(newPrincipal, tenor, p.lenderAprBps);
         return newPrincipal - fee + read.earlyExitRefund(loanId) - read.debtOf(loanId);
     }
 
@@ -178,7 +178,7 @@ contract AceRefinanceNetOutTest is WarpClock {
         Loan memory l = read.loan(loanId);
         _warpTo(uint256(l.expiry) - 1);
         MarketParams memory p = ace.idToMarketParams(l.market);
-        uint256 fee = LoanMath.originationFee(l.debt, l.tenor - 1, p.baseBps, p.minTenor); // the term's last second buys tenor - 1
+        uint256 fee = LoanMath.originationFee(l.debt, l.tenor - 1, p.lenderAprBps); // the term's last second buys tenor - 1
         usdc.mint(borrower, fee);
         vm.prank(borrower);
         usdc.approve(address(ace), fee);

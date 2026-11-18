@@ -2,9 +2,11 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault, Listing, Row} from "../../src/curator/CuratorVault.sol";
+import {Listing} from "../../src/entities/curated/CuratorTerms.sol";
+import {CuratedVaults} from "../utils/CuratedVaults.sol";
 import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
 import {BorrowRequest} from "../../src/curator/AceVaultFlows.sol";
+import {IAceVaultDoor} from "../../src/interfaces/IAceVaultDoor.sol";
 import {PocDeployConfig} from "../../src/config/Defaults.sol";
 import {MockSendHookERC20} from "../mocks/MockSendHookERC20.sol";
 import {ITokenReceiveHook} from "../mocks/MockHookERC20.sol";
@@ -12,15 +14,17 @@ import {GuardProbeList} from "../utils/GuardProbeList.sol";
 
 /// @title CuratorVaultGuardProbe
 /// @notice Every guarded vault verb refuses a call made from inside another guarded vault body.
-/// @notice The enumeration behind `test_Reentrancy_TheCrankAndRequestVerbsAreBehindTheMutex`, which probes four of seventeen.
+/// @notice The enumeration behind `test_Reentrancy_TheCrankAndRequestVerbsAreBehindTheMutex`, which probes four of twenty-six.
 /// @dev The seam is the asset's SENDER hook: this contract deposits, and the pull out of it calls it back mid-`deposit`.
-/// @dev Probes are kept rather than bubbled, so one deposit runs all seventeen and a failure names the verb that answered.
-/// @dev Deleting any ONE of the seventeen probed modifiers turns this red, the outer `deposit`'s included, since every probe then reaches a body.
+/// @dev Probes are kept rather than bubbled, so one deposit runs all twenty-six and a failure names the verb that answered.
+/// @dev Deleting any ONE of the twenty-six probed guards turns this red, the outer `deposit`'s included, since every probe then reaches a body.
+/// @dev The forwarded verbs take the lock before anything else, so even the in-kind and door-mode ones refuse as the guard on this hub-ask vault.
+/// @dev The row verbs live on the vault's terms, a separate contract with no lock of its own; the share transfers are guarded here.
 contract CuratorVaultGuardProbeTest is CuratorVaultBase, GuardProbeList, ITokenReceiveHook {
     MockSendHookERC20 internal tok;
-    CuratorVault internal v;
+    AceVault internal v;
 
-    uint256 internal constant GUARDED_VAULT_VERBS = 17; // the 17 verbs probed below; the drain's guardian path is pinned in CuratorVaultDrainGuard
+    uint256 internal constant GUARDED_VAULT_VERBS = 26; // the 26 verbs probed below; the drain's guardian path is pinned in CuratorVaultDrainGuard
     uint256 internal constant FUND = 10_000e6;
 
     /// @dev The vault lists nothing: the guard answers before any body, so no row or market need exist.
@@ -29,7 +33,7 @@ contract CuratorVaultGuardProbeTest is CuratorVaultBase, GuardProbeList, ITokenR
         tok = new MockSendHookERC20("Hooked", "HOOK", 6);
         VaultConfig memory cfg = _cfg(0);
         cfg.asset = address(tok);
-        v = new CuratorVault(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, new Listing[](0), "Hooked", "cHOOK");
+        v = CuratedVaults.make(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, new Listing[](0), "Hooked", "cHOOK");
         tok.mint(address(this), FUND);
         tok.approve(address(v), type(uint256).max);
         tok.setHookTarget(address(this));
@@ -40,13 +44,12 @@ contract CuratorVaultGuardProbeTest is CuratorVaultBase, GuardProbeList, ITokenR
         _runProbes();
     }
 
-    /// @notice The seventeen guarded vault verbs listed here, called mid-`deposit`, refuse as the guard and move nothing.
+    /// @notice The twenty-six guarded vault verbs listed here, called mid-`deposit`, refuse as the guard and move nothing.
     /// @dev A zeroed argument set throughout: the guard runs before the body, so no market or share need exist.
     /// @dev The control is the deposit before arming, which proves the seam fires without refusing a plain entry.
     function test_EveryGuardedVaultVerbRefusesReentryMidDeposit() public {
         address me = address(this);
         BorrowRequest memory r;
-        Row memory row;
         uint256 control = v.deposit(1_000e6, me);
         assertGt(control, 0, "the control: an unarmed hooked deposit mints normally");
 
@@ -63,10 +66,19 @@ contract CuratorVaultGuardProbeTest is CuratorVaultBase, GuardProbeList, ITokenR
         _probe("crank", address(v), abi.encodeWithSignature("crank()"));
         _probe("collectFee", address(v), abi.encodeCall(AceVault.collectFee, ()));
         _probe("borrow", address(v), abi.encodeCall(AceVault.borrow, (r, "", "")));
-        _probe("submitCollateral", address(v), abi.encodeCall(CuratorVault.submitCollateral, (address(0), row)));
-        _probe("submitCap", address(v), abi.encodeCall(CuratorVault.submitCap, (address(0), 0)));
-        _probe("accept", address(v), abi.encodeCall(CuratorVault.accept, (address(0))));
-        _probe("revokePending", address(v), abi.encodeCall(CuratorVault.revokePending, (address(0))));
+        _probe("submitCap", address(v), abi.encodeCall(AceVault.submitCap, (address(0), 0)));
+        _probe("submitDelist", address(v), abi.encodeCall(AceVault.submitDelist, (address(0))));
+        _probe("acceptCap", address(v), abi.encodeCall(AceVault.acceptCap, (address(0))));
+        _probe("revokePendingCap", address(v), abi.encodeCall(AceVault.revokePendingCap, (address(0))));
+        _probe("transfer", address(v), abi.encodeCall(AceVault.transfer, (me, 0)));
+        _probe("transferFrom", address(v), abi.encodeCall(AceVault.transferFrom, (me, me, 0)));
+        _probe("collectForfeited", address(v), abi.encodeWithSignature("collectForfeited(uint256[])", new uint256[](0)));
+        _probe("claim", address(v), abi.encodeWithSignature("claim(address[],address)", new address[](0), me));
+        _probe("returnProceeds", address(v), abi.encodeCall(IAceVaultDoor.returnProceeds, (address(0), 0, false)));
+        _probe("submitWriteOff", address(v), abi.encodeCall(IAceVaultDoor.submitWriteOff, (address(0))));
+        _probe("acceptWriteOff", address(v), abi.encodeCall(IAceVaultDoor.acceptWriteOff, (address(0))));
+        _probe("revokeWriteOff", address(v), abi.encodeCall(IAceVaultDoor.revokeWriteOff, (address(0))));
+        _probe("extendFor", address(v), abi.encodeCall(IAceVaultDoor.extendFor, (0, 0, 0, "", "")));
 
         probesArmed = true;
         uint256 minted = v.deposit(1_000e6, me);

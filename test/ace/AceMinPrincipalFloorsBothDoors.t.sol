@@ -52,7 +52,7 @@ contract AceMinPrincipalFloorsBothDoorsTest is Test {
         p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(record);
         p.minPrincipal = minPrincipal;
-        p.baseBps = 1;
+        p.lenderAprBps = 1;
         p.settleBountyBps = 0;
     }
 

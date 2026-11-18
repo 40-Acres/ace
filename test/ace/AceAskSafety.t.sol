@@ -90,7 +90,7 @@ contract AceAskSafetyTest is WarpClock {
 
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(record);
-        p.baseBps = 1;
+        p.lenderAprBps = 1;
         p.settleBountyBps = 0;
         AceFixtures.Deployment memory d = AceFixtures.deploy(p);
         (ace, positionManager, read, id) = (d.ace, d.positionManager, d.read, d.id);
@@ -121,7 +121,7 @@ contract AceAskSafetyTest is WarpClock {
         if (p_ != ace.idToMarketParams(id).price) {
             MarketParams memory mp = AceFixtures.marketParams(address(usdc), address(vault));
             mp.record = address(record);
-            mp.baseBps = 1;
+            mp.lenderAprBps = 1;
             mp.settleBountyBps = 0;
             mp.price = p_;
             id = ace.createMarket(mp);

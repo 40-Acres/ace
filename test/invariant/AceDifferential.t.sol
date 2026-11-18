@@ -48,13 +48,14 @@ contract AceDifferentialTest is StdInvariant, Test {
         claimants = [handler.lenders(0), handler.borrowers(0), handler.borrowers(1), handler.keeper(), address(handler)];
 
         /// @dev The verbs `AceInvariants` drives, minus `transferTitle`, `migrate`, `setRate`, `createMarket`, `exitTo` and `postOrder`.
+        /// @dev Minus `openSmall` and `addCollateral` too: neither has a preview to straddle.
         /// @dev `extend` and `setRollPolicy` run in BOTH suites, so neither owns them exclusively.
         /// @dev Here they drive the `tryExtend`-vs-`extend` straddle, the policy kinds feeding its refusals; next door, the in-place laws.
         /// @dev `collect` REPLACES the three receipt verbs this suite used to drive, and is the only credit door.
         /// @dev `materialize`, `claimUnits` and `transferUnits` went with the ERC-6909 ledger and have no successor.
         /// @dev `setRearm` and `compound` drove beside it until the rearm policy was deleted; they have none either.
         /// @dev `setAutoExtend` and `foldAtExpiry` went with manual renewal: no loan arms, and expiry only settles.
-        bytes4[] memory sel = new bytes4[](22);
+        bytes4[] memory sel = new bytes4[](23);
         sel[0] = AceHandler.deposit.selector;
         sel[1] = AceHandler.withdraw.selector;
         sel[2] = AceHandler.collect.selector;
@@ -77,8 +78,10 @@ contract AceDifferentialTest is StdInvariant, Test {
         /// @dev Draws on and around the coverage line: the one place `previewOpen`, `open` and the extension predicate can split.
         sel[19] = AceHandler.openNearLine.selector;
         sel[20] = AceHandler.setRollPolicy.selector;
-        /// @dev The market lender's cash extension: the operator's view against its verb.
-        sel[21] = AceHandler.lenderExtend.selector;
+        /// @dev A stranger's cash extension under the non-holder rule: its view against its verb.
+        sel[21] = AceHandler.strangerExtend.selector;
+        /// @dev The top-up: `tryDrawMore` against `drawMore`, for the holder and for a stranger.
+        sel[22] = AceHandler.drawMore.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: sel}));
         targetContract(address(handler));
     }
@@ -89,6 +92,7 @@ contract AceDifferentialTest is StdInvariant, Test {
     function invariant_all() public {
         _invariant_previewOpenAgreesWithOpen();
         _invariant_tryExtendAgreesWithTheVerb();
+        _invariant_tryDrawMoreAgreesWithTheVerb();
         _invariant_claimableIsWhatTheCollectPays();
         _invariant_settleableAgreesWithFinalize();
         _invariant_lensLoanViewsMirrorTheHub();
@@ -122,7 +126,7 @@ contract AceDifferentialTest is StdInvariant, Test {
     }
 
     /// @notice `Ace.tryExtend`, asked for the caller it names, must answer for the `extend` that caller then sends: the same yes, fee and no.
-    /// @notice The callers are the holder, and the market lender holding the holder's grant, both in cash.
+    /// @notice The callers are the holder and a stranger holding no title or approval, each in cash it pays itself.
     /// @dev Both run one predicate, so this pins what the view can still get wrong apart from it: the caller it names and the fee it reports.
     /// @dev A policy may answer a preview and a verb apart; none this campaign names does, so any split here is the hub's.
     function _invariant_tryExtendAgreesWithTheVerb() public {
@@ -135,6 +139,16 @@ contract AceDifferentialTest is StdInvariant, Test {
             emit log_named_uint("verb fee     ", handler.extendVerbFee());
         }
         assertEq(handler.extendCode(), 0, "FILTER: tryExtend and extend disagreed about the same extension");
+    }
+
+    /// @notice `tryDrawMore` and `drawMore`, asked for the same caller at the same block, must answer the same, at the same fee.
+    /// @dev Latched in the handler, with the top-up's own laws beside it: the debt and claim by the amount, the term and lot unmoved, the payout.
+    function _invariant_tryDrawMoreAgreesWithTheVerb() public {
+        if (handler.drawMoreCode() != 0) {
+            emit log_named_uint("code         ", handler.drawMoreCode());
+            emit log_named_uint("loan         ", handler.drawMoreLoanId());
+        }
+        assertEq(handler.drawMoreCode(), 0, "TOP-UP: tryDrawMore and drawMore disagreed, or a top-up broke its own laws");
     }
 
     /// @dev DELETED with manual renewal: `_invariant_theFoldPreviewAgreesWithTheFold`; the fold extends nothing, so it has no preview.
@@ -350,7 +364,7 @@ contract AceDifferentialTest is StdInvariant, Test {
     /// @dev DELETED with manual renewal: `test_Coverage_FoldPreviewStraddleReachesBothBranches`; the fold it straddled extends nothing now.
 
     /// @notice O33 PER POLICY KIND: each policy the campaign installs answers a preview and its verb alike, for both callers.
-    /// @notice The callers are the holder in cash and the market lender in cash on the grant.
+    /// @notice The callers are the holder in cash and a stranger in cash in the term's last quarter, at a healthy record.
     /// @notice The yes runs first and is the control: the same loan and asks land, so each refusal after it is the policy's answer.
     /// @dev The no answers zero, the gas burner fails out of gas inside the cap, and none asks nothing; all read no context, so none can split.
     function test_Coverage_EveryInstalledPolicyAnswersAPreviewAndItsVerbAlike() public {
@@ -364,7 +378,7 @@ contract AceDifferentialTest is StdInvariant, Test {
             uint256[2] memory admit = [handler.modeBothAdmit(0), handler.modeBothAdmit(1)];
             uint256[2] memory refuse = [handler.modeBothRefuse(0), handler.modeBothRefuse(1)];
             handler.extend(n, 0);
-            handler.lenderExtend(n, 1);
+            handler.strangerExtend(n, 4);
             for (uint256 m; m < 2; m++) {
                 if (k == 0) assertEq(handler.modeBothAdmit(m), admit[m] + 1, "the yes: the view and the verb both admitted, for this caller");
                 else assertGt(handler.modeBothRefuse(m), refuse[m], "a refusing kind: the view and the verb both refused, for this caller");
@@ -485,8 +499,10 @@ contract AceDifferentialTest is StdInvariant, Test {
         console2.log("extend straddles      ", handler.extendTries());
         console2.log("  both admitted       ", handler.extendBothAdmit());
         console2.log("  both refused        ", handler.extendBothRefuse());
-        console2.log("  admit holder/lender ", handler.modeBothAdmit(0), handler.modeBothAdmit(1));
-        console2.log("  refuse holder/lender", handler.modeBothRefuse(0), handler.modeBothRefuse(1));
+        console2.log("  admit holder/stranger ", handler.modeBothAdmit(0), handler.modeBothAdmit(1));
+        console2.log("  refuse holder/stranger", handler.modeBothRefuse(0), handler.modeBothRefuse(1));
+        console2.log("top-up straddles      ", handler.drawMoreTries());
+        console2.log("  landed / both refused", handler.drawMoreLanded(), handler.drawMoreBothRefuse());
         console2.log("finalize straddles    ", handler.settleableChecks());
         console2.log("  settleable admits   ", handler.settleableAdmits());
         console2.log("  agreed refusals     ", handler.settleableRefusals());

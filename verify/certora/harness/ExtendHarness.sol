@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Ace} from "../../../src/ace/hub/Ace.sol";
 import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
 import {IRollPolicy} from "../../../src/interfaces/IRollPolicy.sol";
@@ -8,7 +9,7 @@ import {Loan, Market, MarketParams, MigrateArgs, Storage} from "../../../src/ace
 
 /// @title ExtendHarness
 /// @notice The hub plus read-only views, so a spec reads an extension's every write through code rather than a raw slot.
-/// @notice The verbs under proof are the hub's own: `extend`, `refinanceTo` and `forceClose`.
+/// @notice The verbs under proof are the hub's own: `extend`, `drawMore`, `addCollateral`, `refinanceTo` and `forceClose`.
 /// @notice MUNGED ONLY: there the libraries are internal and inline; unmunged each verb is a linked library call the prover cannot follow.
 /// @dev A separate contract from AceHarness, so these views leave every other hub conf's scene as it was.
 /// @dev Each body is a single read or one library call: nothing here computes anything the hub does not.
@@ -48,10 +49,9 @@ contract ExtendHarness is Ace {
     }
 
     /// @notice The origination fee market `m` charges on `debt` for `added` seconds, as the hub prices an extension.
-    /// @dev `LoanMath.originationFee` on the market's stored rate and shortest term, unsummarized past the spec's mulDiv.
+    /// @dev `LoanMath.originationFee` on the market's stored rate a year, unsummarized past the spec's mulDiv.
     function originationFeeOf(bytes32 m, uint256 debt, uint64 added) external view returns (uint256) {
-        MarketParams storage p = Storage.markets()[m].p;
-        return LoanMath.originationFee(debt, added, p.baseBps, p.minTenor);
+        return LoanMath.originationFee(debt, added, Storage.markets()[m].p.lenderAprBps);
     }
 
     /// @notice The origination fee a loan's own open charged, as `_record` stored it.
@@ -92,7 +92,21 @@ contract ExtendHarness is Ace {
         return (p.minTenor, p.maxTenor, p.minPrincipal);
     }
 
-    /// @notice How many draws and extensions a market has ever made.
+    /// @notice One market's one price, the funding floor of every live claim it holds.
+    function priceOf(bytes32 m) external view returns (uint256) {
+        return Storage.markets()[m].p.price;
+    }
+
+    /// @notice The record level under which the deleverage band admits a loan, as the hub's non-holder rule reads it.
+    /// @dev The hub's own spelling on the loan's stored debt and lot, which an extension does not move.
+    function bandLevelOf(uint256 id) external view returns (uint256) {
+        Loan storage L = Storage.book().loans[id];
+        MarketParams storage p = Storage.markets()[L.market].p;
+        uint256 trig = LoanMath.triggerPrice(L.debt, L.collateralUnits, p.minCoverageWad, Storage.markets()[L.market].s.unitScale);
+        return FullMath.mulDivRoundingUp(trig, 1e18, 1e18 - p.deleverageBandBps * 1e14);
+    }
+
+    /// @notice How many draws, top-ups and extensions a market has ever made.
     function drawCountOf(bytes32 m) external view returns (uint64) {
         return Storage.markets()[m].s.drawCount;
     }

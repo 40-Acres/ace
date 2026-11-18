@@ -28,7 +28,7 @@ contract AceMinTenorFloorWindowsTest is WarpClock {
     MockStakeVault internal vault;
     MockPersistenceRecord internal record;
 
-    bytes32 internal home; // the loan's own market, alice's, baseBps 40
+    bytes32 internal home; // the loan's own market, alice's, lenderAprBps 40
     bytes32 internal rival; // a cheaper stranger at the same floor, downside identical
 
     address internal alice = address(0xA11CE);
@@ -63,10 +63,10 @@ contract AceMinTenorFloorWindowsTest is WarpClock {
     // ---- fixture ----
 
     /// @dev Shared record and downside dials, so the two markets differ only in rate and lender.
-    function _params(uint256 baseBps, address lender_) internal view returns (MarketParams memory p) {
+    function _params(uint256 lenderAprBps, address lender_) internal view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(record);
-        p.baseBps = baseBps;
+        p.lenderAprBps = lenderAprBps;
         p.lender = lender_;
         (p.minTenor, p.maxTenor) = (FLOOR, FLOOR);
         p.settleBountyBps = 50;

@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {AceVaultFlows} from "../../src/curator/AceVaultFlows.sol";
 
 /// @notice Audit V-Q1: a requesting holder MANUFACTURES the repayment their hold waits for.
@@ -13,7 +13,7 @@ contract CuratorVaultV11ManufacturedReserveTest is CuratorVaultBase {
     uint256 internal constant EACH = 10_000e6;
     uint256 internal constant DRAWN = 14_000e6;
 
-    CuratorVault internal v;
+    AceVault internal v;
     uint256 internal loanId;
 
     function setUp() public override {
@@ -63,11 +63,11 @@ contract CuratorVaultV11ManufacturedReserveTest is CuratorVaultBase {
         assertGt(v.idle(), idle0, "PREMISE: the repayment came home into idle");
         assertEq(v.lendable(), 0, "a real repayment is held for the request, as designed");
 
-        (uint256 escrowed,) = v.requestOf(alice);
+        (uint256 escrowed,) = vlens.requestOf(address(v), alice);
         vm.prank(alice);
         v.cancelExit(escrowed); // back to no request
         _ask(alice, 1, 4); // now worth under idle
-        (uint256 exitable, uint256 held) = v.holds();
+        (uint256 exitable, uint256 held) = vlens.holds(address(v));
         assertEq(exitable, v.idle(), "PREMISE: no roll hold, so all of idle is exitable");
         assertLt(held, exitable, "PREMISE: the request is worth less than idle");
         assertEq(v.lendable(), exitable - held, "lendable is idle less the request's worth");
@@ -76,7 +76,7 @@ contract CuratorVaultV11ManufacturedReserveTest is CuratorVaultBase {
         _expectBorrowPastLendable(v, room + 1);
         uint256 id = _borrow(v, room);
         assertFalse(ace.isClosed(id), "and a borrow of exactly lendable lands");
-        (, uint256 heldAfter) = v.holds();
+        (, uint256 heldAfter) = vlens.holds(address(v));
         assertEq(heldAfter, v.idle(), "leaving idle exactly the request's hold");
     }
 

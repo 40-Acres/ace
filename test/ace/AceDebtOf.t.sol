@@ -570,10 +570,10 @@ contract AceDebtOfTest is WarpClock, DeleverageCrank {
 
     // ---- the continuation paths ----
 
-    /// @dev A market on every home term but `baseBps`, so a keeper may route between the two; alice lends it.
-    function _sibling(uint256 baseBps) internal returns (bytes32 mid) {
+    /// @dev A market on every home term but `lenderAprBps`, so a keeper may route between the two; alice lends it.
+    function _sibling(uint256 lenderAprBps) internal returns (bytes32 mid) {
         MarketParams memory q = ace.idToMarketParams(id);
-        q.baseBps = baseBps;
+        q.lenderAprBps = lenderAprBps;
         mid = ace.createMarket(q);
         _deposit(mid, 60_000e6);
     }

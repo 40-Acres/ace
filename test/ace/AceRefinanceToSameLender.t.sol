@@ -44,7 +44,7 @@ contract AceRefinanceToSameLenderTest is ExtendRig {
         bytes32 sib = _siblingOf(alice, 2 * P);
         uint256 loanId = _open(P, TEN7, 5000);
         uint256 principal = P + P / 2;
-        uint256 fee = LoanMath.originationFee(principal, TEN7, BASE + 10, TEN7);
+        uint256 fee = LoanMath.originationFee(principal, TEN7, BASE + 10);
         Before memory b;
         (b.claim, b.escrow) = (read.claimOf(id, loanId), read.feeEscrowOf(loanId));
         (b.cashSrc, b.cashDst) = (ace.restingOf(id), ace.restingOf(sib));

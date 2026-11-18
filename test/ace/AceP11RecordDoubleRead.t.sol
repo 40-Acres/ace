@@ -74,7 +74,7 @@ contract SelfBlindingRecord is IPersistenceRecord {
 /// @notice A cash extension consults the price RECORD before any write and closes nothing; `forceClose` asks the record nothing.
 /// @notice A record that answers differently mid-call therefore cannot put the loan beyond every verb.
 /// @notice The sibling of the same property through the GATE; a guarantee scoped to one dependency covers neither.
-/// @dev Findings: docs/ai/audit/runs/2026-08-31-fab1e1/phase11-variants.md
+/// @dev Findings: the internal record
 contract AceP11RecordDoubleReadTest is WarpClock {
     Ace internal ace;
     AceReader internal read;

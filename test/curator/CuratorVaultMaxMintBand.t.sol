@@ -2,8 +2,9 @@
 pragma solidity 0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVaultCapHarness} from "./harness/CuratorVaultCapHarness.sol";
+import {MockTerms} from "./vault/MockTerms.sol";
 
 /// @title CuratorVaultMaxMintBand
 /// @notice Pins the ACCEPTED over-report band of `maxMint`: it saturates whenever `cap * quoteSupply` overflows, even where the answer fits.
@@ -12,19 +13,19 @@ import {CuratorVaultCapHarness} from "./harness/CuratorVaultCapHarness.sol";
 contract CuratorVaultMaxMintBandTest is CuratorVaultBase {
     uint256 internal constant SEED = 10_000e6;
 
-    CuratorVaultCapHarness internal v;
+    AceVault internal v;
+    MockTerms internal mt;
 
     function setUp() public override {
         super.setUp();
-        v = new CuratorVaultCapHarness(_cfg(0), _listing());
-        mid = _doorMarket(v, address(collateral));
+        (v, mt) = _onMockTerms(0); // the product's entry cap is a settable number
         _lpDeposit(v, alice, SEED);
     }
 
     /// @notice Inside the band the exact answer fits, yet `maxMint` reports `type(uint256).max` and a mint of it refuses.
     function test_MaxMint_InTheAcceptedBandSaturatesThoughTheAnswerFits() public {
         uint256 cap = uint256(1) << 210;
-        v.setCap(cap);
+        mt.setEntryCap(MockTerms.Mode.Answer, cap);
         uint256 q = v.totalSupply() + v.pendingFeeShares() + 1e6;
         uint256 a = v.totalAssets();
         (bool ok,) = Math.tryMul(cap, q);

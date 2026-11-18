@@ -76,7 +76,7 @@ library LoanAccounting {
     }
 
     /// @dev Collateral units the live claim needs at the market's price. ONE CEIL.
-    /// @dev The ceiling excess it leaves is ONE ATOM, which is the coverage line's epsilon over `requiredAt`.
+    /// @dev The ceiling excess it leaves is under one atom, which `requiredAt` already absorbs within the coverage margin.
     /// @dev Read by settlement and the sale's reserve; `Settlement._finalizeLoanFor` and `AceLens.collateralNeeded` repeat this ceil and must match.
     function collateralNeeded(Market storage M, Cfg memory c, uint256 loanId) internal view returns (uint256) {
         uint256 amt = M.claim[loanId];
@@ -115,8 +115,8 @@ library LoanAccounting {
     /// @dev The units a disposal may size against: the debt-securing portion, less what settlement must keep.
     /// @dev The CAP stays bare `requiredAt` -- the line's slack secures no debt, and capping on it would sell MORE.
     /// @dev The KEEP is the live claims plus the keeper sliver, which settlement takes off the top before them.
-    /// @dev That keep is the RECORD-BACKED shape's: a recordless settlement takes the coverage line, which this would under-reserve.
-    /// @dev Genesis refuses a deleverage band with no record, and this function is the decline channel's alone, so the two never meet.
+    /// @dev The keep is what settlement must DELIVER, not its take: an in-term recorded take floors at the need on whatever lot is left.
+    /// @dev A recordless take, the line whatever the lot, would under-reserve; only deleverage reads this, and genesis refuses it a recordless band.
     /// @dev Both keep terms fall with the debt, so today's value bounds every post-sale value and no re-check is owed.
     /// @dev Without it a sequence of cranks walks the position under its own funding floor and settlement comes up short.
     /// @dev A zero floor saturates `req` AND zeroes the keep, since no floor means no live claim: the whole position is then sellable.
@@ -139,28 +139,37 @@ library LoanAccounting {
         _earn(M, id, e - refund);
     }
 
-    /// @notice The share of `e` this loan's term has not yet earned: THE one spelling of the pro-rata refund.
-    /// @dev Floored against the borrower, and never more than `e`, so a re-anchored term cannot out-refund the pot.
-    /// @dev The fee escrow refunds by it at a close, a refinance and an extension's re-spread alike.
+    /// @notice The share of `e` this loan's fee schedule has not yet earned: THE one spelling of the pro-rata refund.
+    /// @notice The schedule runs from `openTime` to `expiry`: from the open, the last extension or the last top-up, to the one end.
+    /// @dev Floored against the borrower, and never more than `e`, so a re-anchored schedule cannot out-refund the pot.
+    /// @dev The fee escrow refunds by it at a close, a refinance, an extension's re-spread and a top-up's re-anchor alike.
+    /// @dev A zero span refunds nothing; a live loan never has one, since every re-anchor lands strictly before expiry.
     function unearned(Loan storage L, uint256 e) internal view returns (uint256) {
-        uint256 tenor = L.tenor;
-        if (tenor == 0) return 0;
-        return Math.min(FullMath.mulDiv(e, Math.saturatingSub(L.expiry, block.timestamp), tenor), e);
+        uint256 span = Math.saturatingSub(L.expiry, L.openTime);
+        if (span == 0) return 0;
+        return Math.min(FullMath.mulDiv(e, Math.saturatingSub(L.expiry, block.timestamp), span), e);
     }
 
-    /// @notice An extension's escrow step: earn the fee escrow on the OLD schedule, then re-anchor the term at now over the loan's own tenor.
-    /// @notice The new term runs from now to now plus the tenor, which never moves, so `openTime + tenor == expiry` still holds.
+    /// @notice A draw's escrow step: earn the fee escrow to now on its schedule, then re-anchor the schedule at now, the expiry unchanged.
+    /// @notice Each tranche then earns from its own draw to the one expiry, so the re-anchor moves no value; `expiry - tenor <= openTime <= expiry`.
+    /// @dev BEFORE the fee is booked, so the new escrow cut earns over the term left alone.
+    function reanchor(LoanBook storage B, Market storage M, uint256 id) internal {
+        earnFeeEscrowProRata(B, M, id);
+        B.loans[id].openTime = uint64(block.timestamp);
+    }
+
+    /// @notice An extension's escrow step: re-anchor at now, then run the loan's own tenor from now, which never moves.
+    /// @notice So an extended schedule is one whole tenor again, `openTime + tenor == expiry`; a top-up leaves a shorter one.
     /// @dev BEFORE the fee is booked, so what stays in escrow and the new escrow cut both earn over the new term alone.
     function respread(LoanBook storage B, Market storage M, uint256 id) internal {
-        earnFeeEscrowProRata(B, M, id);
+        reanchor(B, M, id);
         Loan storage L = B.loans[id];
-        uint64 t = uint64(block.timestamp);
-        (L.openTime, L.expiry) = (t, t + L.tenor);
+        L.expiry = uint64(block.timestamp) + L.tenor;
     }
 
-    /// @notice Book an extension's cash fee: the protocol cut to revenue, the tick cut to `owed` and the escrow cut to the escrow.
-    /// @dev Storage only: the caller pulls the fee after this. The debt is never written: an extension changes the term alone.
-    function bookExtensionFee(LoanBook storage B, Market storage M, uint256 id, uint256 fee) internal {
+    /// @notice Book a draw's or an extension's fee: the protocol cut to revenue, the tick cut to `owed` and the escrow cut to the escrow.
+    /// @dev Storage only: the caller moves the cash after this. The debt is never written here: a fee never enters it.
+    function bookFee(LoanBook storage B, Market storage M, uint256 id, uint256 fee) internal {
         accrueProtocolFee(M, LoanMath.protocolCut(fee));
         creditLenderShare(M, id, LoanMath.tickCut(fee));
         B.feeEscrowOf[id] += LoanMath.escrowCut(fee);

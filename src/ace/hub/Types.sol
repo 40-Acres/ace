@@ -21,7 +21,7 @@ struct MarketParams {
     /// @dev NEW CREDIT ONLY: a settlement never asks, so no borrower rule can strand a matured loan.
     /// @dev AN ADDRESS, NEVER A CONTRACT TO INTERVIEW: a comparison cannot revert, run out of gas or answer a different width.
     /// @dev THE COST: a market open to SEVERAL named borrowers is not expressible.
-    /// @dev The rule reads the title's CURRENT holder, so here a loan whose title moved to anyone else cannot be extended.
+    /// @dev The rule reads the title's CURRENT holder, so here a loan whose title moved to anyone else cannot be extended or topped up.
     address borrower;
     /// @notice THE market's one price: quote atoms per collateral atom, raw Q96, write-once.
     /// @notice A curator's whole offer is this much, at this price, take it or leave it.
@@ -36,13 +36,13 @@ struct MarketParams {
     uint256 fillFeeBps;
     // loan terms
     uint256 minCoverageWad; // WAD; scales debt into the trigger, so it also caps a draw at 1/k of its funding floor
-    uint256 baseBps; // the LENDER's rate per minTenor; the borrower's all-in adds ACE's share on top
+    uint256 lenderAprBps; // the LENDER's rate, bps a year; the borrower's all-in adds ACE's share on top
     uint64 minTenor;
     /// @notice The longest term this market writes; an extension runs a loan's own tenor from now, so never past it.
     /// @dev NO SEPARATE per-deposit horizon: on a write-once struct a second field could only advertise unfunded terms or never bind.
     /// @dev The draw checks the term against this, and an extension keeps the term drawn; nothing checks it at a deposit.
     uint64 maxTenor;
-    /// @notice The smallest loan this market opens, and the smallest lot either lender door rests or leaves.
+    /// @notice The smallest loan this market opens, the smallest top-up it draws, and the smallest lot either lender door rests or leaves.
     /// @notice A live loan never carries less than HALF of it (`LoanMath.debtFloor`): a repay pays it off or leaves that much.
     /// @notice A crank whose restore would leave less closes the loan; an extension never moves the debt.
     /// @dev A DRAW subtracts its principal with no remainder test, so resting cash under it can remain; a withdraw always empties it.
@@ -79,7 +79,7 @@ struct MarketState {
     /// @dev PER MARKET, unlike the lender's pooled `resting`, which spans their markets in this quote.
     /// @dev The two move together on every deposit, draw and withdraw and must never be netted.
     uint256 cash;
-    uint64 drawCount; // draws and extensions made here, a lender's change detector; an extension can bump it once a second a loan, for an atom's fee
+    uint64 drawCount; // draws, top-ups and extensions made here, a lender's change detector; an extension may bump it for an atom's fee
     uint256 cumulativeBackedBurns;
     uint256 netSyntheticOutflow;
     uint256 protocolRevenue; // the ONE protocol pot: the origination and deleverage cuts
@@ -138,11 +138,11 @@ struct Loan {
     address borrower; // the position's CURRENT holder; moves on an PositionTitleNFT transfer (retitle)
     uint256 collateralUnits;
     uint256 debt; // quote units; FIXED PREMIUM per admitted draw, nothing accrues, so a loan never drifts underwater by existing
-    uint64 openTime;
+    uint64 openTime; // the fee schedule's start: the open, the last extension or the last top-up; `expiry - tenor <= openTime <= expiry`
     uint64 tenor;
     uint64 expiry;
     uint64 closedAt; // 0 IS live; packed beside expiry so the liveness guard warms its own write; also the inventory hold's origin
-    uint256 lastFee;
+    uint256 lastFee; // the open's origination fee, kept as born: a top-up or an extension charges its own and leaves this as it was
 }
 
 /// @notice A resting credit order: a maker's escrowed, expiring pre-commitment to borrow.
@@ -163,7 +163,7 @@ struct Order {
 
 /// @notice Optional borrower open-time bounds; all-zero == off.
 struct OpenBounds {
-    uint256 minPayout; // floor on an open's payout, and on the NET out of a refinance
+    uint256 minPayout; // floor on an open's or a top-up's payout, and on the NET out of a refinance
     uint256 minBufferWad;
     uint64 deadline;
 }
@@ -281,12 +281,12 @@ struct Shortfall {
 struct LoanBook {
     uint256 count; // ids for loans and orders alike, only ever pre-incremented: the sole freshness guard for an order id; a loan id also has its title mint
     mapping(uint256 => Loan) loans;
-    mapping(uint256 => uint256) principalOf;
+    mapping(uint256 => uint256) principalOf; // each loan's principal at its open, kept as born: a top-up raises the debt, never this
     /// @dev CREDIT delegation, not the title's ERC-721 operator: the right to open loans in a borrower's name.
     /// @dev Unrelated grants; they must never share a mapping or a setter.
     mapping(address => mapping(address => bool)) creditOperator;
     mapping(address => uint256) creditOperatorNonce;
-    /// @dev The refundable half of the lender fee, withheld at open or paid in by an extension, and settled at close.
+    /// @dev The refundable half of the lender fee, withheld at open or a top-up or paid in by an extension, and settled at close.
     /// @dev Never enters the lender's pools, so a share price never prices revenue the term has not earned.
     mapping(uint256 => uint256) feeEscrowOf;
     mapping(uint256 => mapping(address => uint256)) unitsOwed; // index 6: collateral a claimant may pull

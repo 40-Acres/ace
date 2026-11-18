@@ -159,7 +159,7 @@ contract AceQuoteDestinationsTest is WarpClock, DeleverageCrank {
         _warpTo(t0 + HOLD);
         MarketParams memory p = ace.idToMarketParams(d.id);
         uint256 owedOld = read.debtOf(loanId) - read.earlyExitRefund(loanId);
-        uint256 principal = RefinanceMath.principalForOwed(owedOld, p.minTenor, p.baseBps, p.minTenor);
+        uint256 principal = RefinanceMath.principalForOwed(owedOld, p.minTenor, p.lenderAprBps);
         uint256 wallet = quote.balanceOf(borrower);
         vm.prank(borrower);
         uint256 newId = ace.refinanceTo(MigrateArgs(loanId, d.id, principal, p.minTenor, OpenBounds(0, 0, 0), 0, address(0)));

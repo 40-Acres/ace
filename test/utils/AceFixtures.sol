@@ -6,7 +6,7 @@ import {Ace} from "../../src/ace/hub/Ace.sol";
 import {MarketParams} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {Vm} from "forge-std/Vm.sol";
-import {PocDeployConfig, ProtocolPolicy} from "../../src/config/Defaults.sol";
+import {HUB_POLICY_GAS, PocDeployConfig, ProtocolPolicy} from "../../src/config/Defaults.sol";
 import {PersistenceRecord} from "./PersistenceRecord.sol";
 import {AceReader} from "./AceReader.sol";
 import {PriceFrame} from "./PriceFrame.sol";
@@ -24,7 +24,7 @@ library AceFixtures {
     /// @dev THE MAINNET VALUE, read from the one config constant, so every suite measures the budget Ethereum ships.
     /// @dev `deploy/chains/mainnet.json` `pushGas` is a second copy that no suite reads: keep the two equal by hand.
     uint256 internal constant PUSH_GAS = PocDeployConfig.PUSH_GAS;
-    uint256 internal constant POLICY_GAS = 200_000; // the roll-policy budget every fixture hub carries: the deploy scripts' value
+    uint256 internal constant POLICY_GAS = HUB_POLICY_GAS; // the roll-policy budget every fixture hub carries: the config constant the deploy scripts read
 
     /// @dev The venue record's fixture shape. The ring is sized to REACH the settle window, which the
     /// @dev record's own constructor now requires: `(REC_OBS_CAP - 1) * REC_OBS_INTERVAL >= P + pending`.
@@ -126,7 +126,7 @@ library AceFixtures {
         /// @dev funding floor in any row that compares the two.
         p.price = PriceFrame.priceAt(quote, collateral, 0);
         p.minCoverageWad = PocDeployConfig.MIN_COVERAGE_WAD;
-        p.baseBps = PocDeployConfig.BASE_BPS;
+        p.lenderAprBps = PocDeployConfig.LENDER_APR_BPS;
         p.minTenor = ProtocolPolicy.MIN_TENOR; // one 7-day term, not the shipped 7-30 day launch range
         p.maxTenor = ProtocolPolicy.MAX_TENOR;
         p.minPrincipal = 10e6; // KEEP-DIVERGENT: test baseline smallest loan, debt floor 5e6 (shipped MIN_PRINCIPAL is 10000e6)

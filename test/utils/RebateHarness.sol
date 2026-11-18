@@ -75,14 +75,6 @@ library RebateMath {
     /// @notice The shipped rebate share of the lender cut; the binding constraint is phi < 1.
     uint256 internal constant REBATE_PHI_BPS = 5000;
 
-    /// @notice The borrower's ALL-IN one-shot fee, rounded UP: the payer never rounds in their own favour.
-    /// @dev `baseBps` prices the LENDER; the protocol's share rides on top, under a single ceil.
-    function fee(uint256 principal, uint64 tenor, uint256 baseBps, uint64 minTenor, uint256 protocolShareBps) internal pure returns (uint256) {
-        uint256 num = principal * baseBps * uint256(tenor) * (10000 + protocolShareBps);
-        uint256 den = 10000 * 10000 * uint256(minTenor);
-        return (num + den - 1) / den;
-    }
-
     /// @notice ACE's cut, recovered from the ALL-IN fee by the INVERSE ratio; never rebated (C14).
     /// @dev Floors, so the residue lands on the lender and the protocol can never out-take its share.
     function protocolCut(uint256 f, uint256 protocolShareBps) internal pure returns (uint256) {

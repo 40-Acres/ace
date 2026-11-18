@@ -28,6 +28,7 @@ interface IAceLockOps {
 /// @dev WHY EXPIRY IS ENOUGH, IRREVOCABLY: on a recordless market title moves at or after expiry only, so a pledge leaves no earlier than V(E).
 /// @dev WHY NOW, REVOCABLY: a pledge of units not yet vested would sit in the hub's custody, out of any revocation's reach.
 /// @dev THE PROOF NEEDS THIS SURFACE: no borrower argument, multicall, refinance, extension, credit operator, order, Permit2, ERC-721 move, fallback, ERC-1271.
+/// @dev Nor a top-up: one needs the holder or an operator of its title, and the account neither calls `drawMore` nor approves its titles.
 /// @dev Every payout goes to the account itself or to the beneficiary; the one recipient argument is `revoke`'s, the lock's own sibling account.
 /// @dev THE BENEFICIARY AND THE SCHEDULE ARE THIS CLONE'S IMMUTABLE ARGS: the account cannot be transferred, and a revocation only freezes its curve.
 /// @dev UNSUPPORTED: a token whose balance falls other than by this account's own transfers; a fall would shrink `total` and V with it.

@@ -3,8 +3,9 @@ pragma solidity 0.8.36;
 
 import {Test, console2} from "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {CuratorVaultHandler} from "./CuratorVaultHandler.sol";
+import {IAceVaultLens, VaultLens} from "../utils/VaultLens.sol";
 
 /// @title CuratorVaultInvariants
 /// @notice THE STATEFUL CAMPAIGN OVER THE CURATOR VAULT'S EXIT REQUEST AND DRAIN, beside its instant exit.
@@ -15,7 +16,7 @@ import {CuratorVaultHandler} from "./CuratorVaultHandler.sol";
 /// @notice R4. An instant exit while lending never pays into what the requests hold.
 /// @notice R5. A claim never pays past exitable or under its minimum; under the drain nothing is lendable.
 /// @notice R6. The drain answers its keys, and a lapse lands past the lease and nowhere else.
-/// @notice And: the last holders leave nothing behind, the pile gate holds, the fee-free gap moves only by loss, and no verb panics.
+/// @notice And: the last holders leave nothing behind, the pile gate holds, the fee-free gap per share moves only by loss, and no verb panics.
 /// @dev Config (foundry.toml [invariant]): runs = 256, depth = 32, fail_on_revert = false.
 /// @dev THE QUOTE PROPERTY IS ITS OWN CAMPAIGN: folded into the walk, a revert there would abort every other verdict.
 /// @dev Properties that cannot be views latch into HANDLER ghosts: forge reverts the state an `invariant_` function writes.
@@ -24,14 +25,16 @@ contract CuratorVaultInvariantsTest is StdInvariant, Test {
     uint256 internal constant MARK_SLOT = VAULT_ROOT + 1; // `navMark`, the namespace's second word after `feeHighWater`
 
     CuratorVaultHandler internal handler;
-    CuratorVault internal vault;
+    AceVault internal vault;
+    IAceVaultLens internal vlens; // the vault's stored figures: requests, holds and caps
 
     function setUp() public {
         handler = new CuratorVaultHandler();
         handler.baselineExits(); // pre-snapshot, and it needs the handler's own code deployed to prank from
         vault = handler.vault();
+        vlens = VaultLens.deploy();
         /// @dev DUPLICATES ARE WEIGHTS: forge draws uniformly from this array, and the request verbs are the subject.
-        bytes4[] memory sel = new bytes4[](45);
+        bytes4[] memory sel = new bytes4[](47);
         sel[0] = CuratorVaultHandler.depositLp.selector;
         sel[1] = CuratorVaultHandler.mintLp.selector;
         sel[2] = CuratorVaultHandler.request.selector;
@@ -81,6 +84,9 @@ contract CuratorVaultInvariantsTest is StdInvariant, Test {
         sel[43] = CuratorVaultHandler.drainOff.selector;
         /// @dev THE WHOLE RECOVERY, the one path on which entry reopens after a settlement.
         sel[44] = CuratorVaultHandler.sellOutAndEnter.selector;
+        /// @dev THE ENTRY UNDER A STANDING GAP, the one path the per-share gap bound is judged on with an entrant in it.
+        sel[45] = CuratorVaultHandler.exemptAndEnter.selector;
+        sel[46] = CuratorVaultHandler.exemptAndEnter.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: sel}));
         targetContract(address(handler));
     }
@@ -95,6 +101,16 @@ contract CuratorVaultInvariantsTest is StdInvariant, Test {
         _invariant_theLastHoldersLeaveNothingBehind();
         _invariant_latches();
         _invariant_theEntryAndFeeLatches();
+        _invariant_theTotalBoundsLentAndTheDrawdown();
+    }
+
+    /// @notice THE TOTAL: lent plus the drawdown sits under the vault's total, and no action but a placement raised it.
+    /// @dev The cap at the vault's own address is the total; this vault never changes it, so the deploy's figure is every raise there was.
+    function _invariant_theTotalBoundsLentAndTheDrawdown() internal view {
+        (uint192 total,) = vlens.capOf(address(vault), address(vault));
+        assertLe(handler.used(), total, "total: lent plus the drawdown passed the total");
+        if (handler.usedRose()) console2.log("USED rose / in", handler.usedRise(), handler.usedTag());
+        assertFalse(handler.usedRose(), "total: an action that opened no loan raised lent plus the drawdown");
     }
 
     /// @notice R1: a request moves only by its own verbs, so the book is the handler's ghost and the aggregate is its sum.
@@ -104,19 +120,22 @@ contract CuratorVaultInvariantsTest is StdInvariant, Test {
         uint256 sum;
         for (uint256 i; i < n; i++) {
             address p = handler.participantAt(i);
-            (uint256 s,) = vault.requestOf(p);
+            (uint256 s,) = vlens.requestOf(address(vault), p);
             assertEq(s, handler.ghostEscrow(p), "R1: a request moved other than by its own verbs");
             sum += s;
         }
-        (uint256 own,) = vault.requestOf(address(vault));
+        (uint256 own,) = vlens.requestOf(address(vault), address(vault));
         assertEq(own, 0, "R1: a request stands for the vault itself");
-        assertEq(vault.requestedShares(), sum, "R1: the aggregate is not the sum of the requests");
+        assertEq(vlens.requestedShares(address(vault)), sum, "R1: the aggregate is not the sum of the requests");
     }
 
     /// @notice R2: a request moves in exactly what it adds, a cancel or lapse moves it out, and a claim burns exactly its escrow.
+    /// @dev The genesis seed's shares sit on the vault from its construction, so they count beside the escrow and the donations.
     function _invariant_R2_theEscrowIsHeldExactly() internal view {
         assertEq(
-            vault.balanceOf(address(vault)), vault.requestedShares() + handler.donatedShares(), "R2: the vault holds other than the escrow and the donations"
+            vault.balanceOf(address(vault)),
+            vlens.requestedShares(address(vault)) + handler.donatedShares() + vault.SEED_SHARES(),
+            "R2: the vault holds other than the escrow, the donations and the seed"
         );
     }
 
@@ -127,10 +146,10 @@ contract CuratorVaultInvariantsTest is StdInvariant, Test {
 
     /// @notice L4: the holds nest at the walk's end, and no action left them unnested on the way (latched per action).
     function _invariant_L4_theHoldsNest() internal view {
-        (uint256 exitable, uint256 held) = vault.holds();
+        (uint256 exitable, uint256 held) = vlens.holds(address(vault));
         assertLe(held, exitable, "L4: the requests hold past exitable cash");
         assertLe(exitable, vault.idle(), "L4: exitable cash past idle");
-        assertLe(held, vault.convertToAssets(vault.requestedShares()) + 1, "L4: the requests hold past their worth");
+        assertLe(held, vault.convertToAssets(vlens.requestedShares(address(vault))) + 1, "L4: the requests hold past their worth");
         assertEq(vault.lendable(), vault.draining() ? 0 : exitable - held, "L4: lendable is not exitable less the requests' hold");
         if (handler.holdsBroke()) console2.log("HOLDS broke in", handler.holdsTag());
         assertFalse(handler.holdsBroke(), "L4: an action left the holds unnested");
@@ -163,8 +182,8 @@ contract CuratorVaultInvariantsTest is StdInvariant, Test {
         if (handler.entryUnderAPile()) console2.log("ENTRY pile / nav", handler.entryPile(), handler.entryNav());
         assertFalse(handler.entryUnderAPile(), "entry: a deposit or mint landed while a pile over the entry line vested");
         assertFalse(handler.entrySeamSplit(), "entry: maxDeposit or maxMint disagreed with the verb");
-        if (handler.gapGrew()) console2.log("GAP rose / allowed / in", handler.gapRise(), handler.gapAllowed(), handler.gapTag());
-        assertFalse(handler.gapGrew(), "fee: the fee-free gap in assets rose past the action's real loss and its rounding");
+        if (handler.gapGrew()) console2.log("GAP after / bound / in", handler.gapRise(), handler.gapAllowed(), handler.gapTag());
+        assertFalse(handler.gapGrew(), "fee: the fee-free gap per virtual share rose past the action's real loss per share and its rounding");
     }
 
     /// @notice NO VAULT VERB PANICS, whatever the walk: a refusal is a custom error, and an arithmetic panic is a defect.
@@ -208,7 +227,7 @@ contract CuratorVaultInvariantsTest is StdInvariant, Test {
     /// @dev It asserts rather than tallies, so "not chosen" and "cannot run" stay distinguishable.
     function test_windDownReachesTheLastHolderOut() public {
         handler.windDown();
-        assertEq(vault.requestedShares(), 0, "wind-down: a request was left standing");
+        assertEq(vlens.requestedShares(address(vault)), 0, "wind-down: a request was left standing");
         assertGt(handler.lastOuts(), 0, "wind-down: the vault never paid its last exit-capable share");
         assertFalse(handler.strandBroken(), "wind-down: the last holders out left value behind");
         invariant_vaultAll();
@@ -218,7 +237,7 @@ contract CuratorVaultInvariantsTest is StdInvariant, Test {
     function test_theHandlerReachesAHeldClaim() public {
         handler.request(1, type(uint256).max);
         handler.request(2, type(uint256).max);
-        (uint256 exitable, uint256 held) = vault.holds();
+        (uint256 exitable, uint256 held) = vlens.holds(address(vault));
         assertGt(held, 0, "the requests held none of the exitable cash they found");
         assertEq(vault.lendable(), exitable - held, "lending reaches the cash the requests hold");
         handler.repayAndClaim(0, type(uint256).max, 1);
@@ -244,6 +263,15 @@ contract CuratorVaultInvariantsTest is StdInvariant, Test {
         assertEq(handler.recoveryEntriesJudged(), 1, "no entry was judged at the whole sale's own second");
         assertEq(handler.cleanRecoveries(), 1, "the whole sale did not leave the run clean");
         assertEq(handler.cleanRecoveriesEntered(), 1, "no judged entry landed a vest window after the whole recovery");
+        invariant_vaultAll();
+    }
+
+    /// @notice An entry under a standing gap on a fixed path: a settlement, the guardian's exemption, and an entry at the trough, judged per share.
+    function test_theHandlerReachesAnEntryUnderAStandingGap() public {
+        handler.exemptAndEnter(0, 1, 300e6);
+        assertGt(handler.loanSettles(), 0, "PREMISE: the loan settled");
+        assertGt(handler.gapEntries(), 0, "no entry landed under the standing gap");
+        assertGt(vault.feeHighWater(), vault.totalAssets(), "PREMISE: the gap still stands after the entry");
         invariant_vaultAll();
     }
 
@@ -359,6 +387,7 @@ contract CuratorVaultInvariantsTest is StdInvariant, Test {
         console2.log("whole recoveries      ", handler.callCount("sellOutAndEnter"));
         console2.log("  judged at the sale  ", handler.recoveryEntriesJudged());
         console2.log("  clean / entered     ", handler.cleanRecoveries(), handler.cleanRecoveriesEntered());
+        console2.log("exempt-and-enter / under a gap", handler.callCount("exemptAndEnter"), handler.gapEntries());
         console2.log("quotes served         ", handler.quotesServed());
         console2.log("last holders out      ", handler.lastOuts());
         console2.log("  strand / ceiling    ", handler.lastOutStrand(), handler.lastOutCeiling());

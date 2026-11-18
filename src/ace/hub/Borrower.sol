@@ -26,38 +26,43 @@ error CollateralOutOfRange(); // wider than the trigger's own denominator carrie
 error WithdrawalExceedsCollateral(); // the requested withdrawal exceeds the loan's remaining collateral
 error ZeroPrincipal(); // a loan securing nothing takes no claim, so it never gets a funding floor
 error InsufficientCash(); // the market's resting cash is less than this draw asks, or its price is over the cap on a fresh draw
-error BelowMinPrincipal(); // principal under the market's minPrincipal: an open, a fill or a refinance successor
+error BelowMinPrincipal(); // principal under the market's minPrincipal: an open, a fill, a refinance successor or a top-up
 error BelowDebtFloor(); // a repay leaving a live loan under its market's debt floor, half its minPrincipal
-error TenorOutOfRange(); // tenor outside the market's min/max
+error TenorOutOfRange(); // tenor outside the market's min/max, or a top-up with under minTenor of its term left
 error GateRefused(); // the borrower is not the market's one named borrower, so the new credit is refused; it can never block a settlement
 error PayoutBelowMin(); // fees left the borrower less cash than their floor
-error TriggerAboveFloor(); // a trigger at or above the funding floor would be liquidatable at birth
+error TriggerAboveFloor(); // a trigger strictly above the funding floor would be liquidatable at birth
 error BufferBelowMin(); // the gap between funding floor and trigger is thinner than the borrower asked
-error BelowWithdrawLine(); // a withdrawal leg falling under the coverage line: the settlement slack refuses it, not the trigger
-error BelowCoverageLine(); // a draw opening under that same line: settlement's own ceiling refuses it at admission
-error AlreadyFunded(); // a second draw on a live claim would overwrite it while `lent` adds both; it disarms at the close and is not what keeps ids fresh
-error NotBorrower(); // only the loan's own borrower may refinance or extend it; its market lender holding a grant also extends it
+error BelowWithdrawLine(); // a withdrawal leg falling under the coverage line: the coverage margin refuses it, not the trigger
+error BelowCoverageLine(); // a draw opening under that same line, refused at admission
+error AlreadyFunded(); // a second open's draw on a live claim would overwrite it as `lent` adds both; it disarms at the close and keeps no id fresh
+error NotBorrower(); // only the loan's holder refinances it, and only the holder or an operator of its title draws more
 error MarketPairMismatch(); // migration destination secures a different collateral: refuse before state moves
 error QuoteMismatch(); // migration destination quotes in a different token: one migration, one quote
 error DrawBelowDebt(); // the fresh draw plus the old fee refund cannot retire the old debt; repay the gap first
 error NoRecordPrice(); // the record cannot produce a windowed minimum: judgment-spending verbs refuse rather than guess
 error RecordUnreadable(); // the record gave no usable answer: reverted, returned short, has no code, or a persisted-below word outside {0, 1}
 error PolicyRefused(); // the market lender's roll policy did not consent: none set, a revert, or any answer but the selector
-error ExtensionAddsNoTime(); // the loan's own tenor from now ends no later than it already does: its open second, or a second extension in one second
-error LoanMatured(); // the tenor has run out: the loan repays or settles, and no withdrawal, sale, extension or refinance lands
+error ExtensionAddsNoTime(); // the loan's own tenor from now ends no later than it already does: the second its term began, `expiry - tenor`
+error LoanMatured(); // the tenor has run out: the loan repays or settles, and no withdrawal, sale, extension, refinance, top-up or add lands
+error UnderPrice(); // a non-holder's extension under the price: the record's windowed minimum sits below the market's price
+error ExtensionTooEarly(); // a non-holder extends only with at most a quarter of the loan's tenor left
+error NothingAdded(); // a zero-unit add: nothing to put under the loan
 
 /* ========================================================================= */
 /*  TABLE OF CONTENTS                                                        */
 /*  1. OPEN        the draw path, and the funding floor it stamps            */
 /*  2. REPAY       paying a loan down, and the clean close at zero           */
 /*  3. EXTEND      lengthen a live loan in place, on its lender's policy     */
+/*  3b. TOP UP     more principal or more collateral on a live loan          */
 /*  4. REFINANCE   close a loan and open its successor, atomically           */
 /*  5. HEALTH      trigger, rate and the price record                        */
 /* ========================================================================= */
 
 /// @title Borrower
-/// @notice Every verb whose judgment is the BORROWER's: open, repay, extend, refinance, and the health they turn on.
-/// @notice A loan draws exactly once; `extend` lengthens it in place, and any other continuation is a fresh loan, in section 4.
+/// @notice Every verb whose judgment is the BORROWER's: open, repay, extend, top up, refinance, and the health they turn on.
+/// @notice A loan draws at its open and at each top-up, from its own market at its one price; `extend` lengthens it in place.
+/// @notice Any other continuation is a fresh loan, in section 4.
 /// @dev Every `msg.sender` here is the EXTERNAL caller, never the hub: the borrower-only gate rests on it.
 library Borrower {
     using SafeERC20 for IERC20;
@@ -100,8 +105,9 @@ library Borrower {
 
     /// @dev `market` is indexed because loan ids are GLOBAL: without it no log filter is market-scoped.
     event Opened(uint256 indexed id, bytes32 indexed market, address indexed borrower, uint256 collateralUnits, uint256 principal, uint256 fee, uint64 expiry);
-    /// @notice A new loan drew `amount` of principal from its market's resting cash.
-    /// @dev `to` is ALWAYS the payee, who took the draw less its fee; on a refinance that is the hub, which nets it.
+    /// @notice A loan drew `amount` of principal from its market's resting cash: at its open, and at every top-up.
+    /// @dev Count loans by `Opened`, never by this: a top-up fires it again for the same loan.
+    /// @dev `to` is ALWAYS the payee, who took the draw less its fee; on a refinance that is the hub, which nets it; on a top-up, the holder.
     /// @dev It equals the executor only on the doors that pay their caller; a keeper or a filler is logged by its own verb's event.
     /// @dev No price field: every draw funds at its market's one price, `idToMarketParams(loanMarket(loanId)).price`.
     event Funded(uint256 indexed loanId, uint256 amount, address indexed to);
@@ -146,7 +152,7 @@ library Borrower {
     {
         _preChecks(c, a);
         _gateCheck(c, a);
-        uint256 fee = LoanMath.originationFee(a.principal, a.tenor, c.p.baseBps, c.p.minTenor);
+        uint256 fee = LoanMath.originationFee(a.principal, a.tenor, c.p.lenderAprBps);
         _payoutCheck(c, a, fee);
         id = _record(B, c, a, fee);
 
@@ -188,8 +194,8 @@ library Borrower {
     function _preChecks(Cfg memory c, OpenArgs memory a) private view {
         if (a.bnd.deadline != 0 && block.timestamp > a.bnd.deadline) revert OpenExpired();
         if (a.collateralUnits == 0) revert ZeroCollateral();
-        /// @dev EVERY loan's stored units enter through here, so this one bound holds for all of them.
-        /// @dev Only `Deleverage`'s refund ever raises a stored figure, and never past the decrement it reverses.
+        /// @dev EVERY loan's opening units enter through here, so with the re-check below this one bound holds for every stored figure.
+        /// @dev Two writes raise a stored figure: `addCollateral`, which re-checks this bound on the sum, and `Deleverage`'s refund of its own decrement.
         if (a.collateralUnits > type(uint256).max / 1e18) revert CollateralOutOfRange();
         if (a.principal == 0) revert ZeroPrincipal();
         if (a.principal < c.p.minPrincipal) revert BelowMinPrincipal();
@@ -206,6 +212,7 @@ library Borrower {
     /// @dev The payout bound, shared. Returns the payout it validated, so a quote never recomputes it.
     /// @dev ONE branch, so the over-fee refusal binds at every bound, `minPayout == 0` included.
     /// @dev The genesis rails ESTABLISH `fee < principal`; this guard only DEFENDS it, and names the refusal.
+    /// @dev `_drawLegs` spells this bound again, total, for a top-up: a change here is owed there.
     function _payoutCheck(Cfg memory c, OpenArgs memory a, uint256 fee) private pure returns (uint256 payout) {
         c; // threaded for symmetry with the other helpers
         bool ok;
@@ -242,7 +249,7 @@ library Borrower {
     function previewOpen(Market storage M, Cfg memory c, OpenArgs memory a) public view returns (Quote memory q) {
         _preChecks(c, a);
         _gateCheck(c, a); // the same position `open` runs it in: after every local refusal, before the draw
-        q.fee = LoanMath.originationFee(a.principal, a.tenor, c.p.baseBps, c.p.minTenor);
+        q.fee = LoanMath.originationFee(a.principal, a.tenor, c.p.lenderAprBps);
         q.protocolFee = LoanMath.protocolCut(q.fee);
         q.payout = _payoutCheck(c, a, q.fee);
 
@@ -257,6 +264,7 @@ library Borrower {
     /// @dev A cap BELOW the market's price refuses a FRESH draw -- resting cash the market will not lend from is a stale bid.
     /// @dev A zero-fresh draw, a re-term the old claim recycles whole, is judged at that cap instead, as an extension is.
     /// @dev The cash leg is resting cash against the fresh draw and nothing else, so at zero fresh it cannot refuse.
+    /// @dev `_drawLegs` spells this draw cap and cash leg again, total, for a top-up: a change here is owed there.
     function _previewFloor(Market storage M, Cfg memory c, uint256 fresh) private view returns (uint256 floor) {
         (RecordState s, uint256 cap) = recordState(c);
         if (s == RecordState.NoPrice) revert NoRecordPrice();
@@ -295,18 +303,23 @@ library Borrower {
         private
         returns (uint256 floorPrice)
     {
-        if (M.claim[loanId] != 0) revert AlreadyFunded(); // a live claim refuses a second draw; ids stay fresh by the counter
+        if (M.claim[loanId] != 0) revert AlreadyFunded(); // a live claim refuses a second open's draw; a top-up adds to it through its own path
         uint256 fresh = principal - recycle; // `_retire` caps the recycle at the principal
         floorPrice = _previewFloor(M, c, fresh);
-        /// @dev The SECOND write site for the cash and pooled-resting pair, beside `Lender.debitCash`: inlined, as `Lender` imports this library.
-        /// @dev The two must move together: a bound or an assertion added to one belongs at both.
-        M.s.cash -= fresh;
+        _takeCash(M, fresh);
         M.claim[loanId] = principal;
-        Storage.poolOf(M.p).resting -= fresh;
         LoanAccounting.addLent(M, principal);
         if (tickFee != 0) LoanAccounting.creditLenderShare(M, loanId, tickFee);
         LoanAccounting.accrueProtocolFee(M, protocolFee);
         M.s.drawCount++;
+    }
+
+    /// @dev Debits a draw from the market's cash and its lender's pooled resting together: an open's and a top-up's one cash leg.
+    /// @dev The SECOND write site of the pair, beside `Lender.debitCash`: inlined here, as `Lender` imports this library.
+    /// @dev The two must move together: a bound or an assertion added to one belongs at both.
+    function _takeCash(Market storage M, uint256 amount) private {
+        M.s.cash -= amount;
+        Storage.poolOf(M.p).resting -= amount;
     }
 
     /* ============================== 2. REPAY ============================== */
@@ -346,8 +359,9 @@ library Borrower {
     /* ====== 3. EXTEND: lengthen a live loan in place, on its lender's roll policy ====== */
 
     /// @notice Re-anchor a live loan in place at its own tenor from now: same id, title, funding floor and debt, the fee on the time added.
-    /// @notice It lands only strictly inside the term: its open second adds nothing, and from expiry nothing extends.
-    /// @notice The caller pays the fee in cash, pulled after every write; resting cash never funds it.
+    /// @notice It lands only strictly inside the term: the second it began, `expiry - tenor`, adds nothing, and from expiry nothing extends.
+    /// @notice Anyone may call it and pays the fee in cash, pulled after every write; resting cash never funds it.
+    /// @notice A caller who is neither the holder nor an operator of its title also meets the non-holder rule, in `_recordLeg`.
     /// @notice Refuses through `tryExtend`'s predicate, re-raising its selector bare, so the preview and the verb cannot answer differently.
     /// @dev The policy is asked inside the predicate, before every write and before the fee pull.
     /// @dev `permit2` empty pulls on the caller's ERC20 allowance; non-empty spends a Permit2 signature.
@@ -358,19 +372,23 @@ library Borrower {
     {
         bytes4 reason;
         (reason, fee) = _extendable(B, c, id, minBufferWad, data, msg.sender);
-        if (reason != bytes4(0)) {
-            assembly ("memory-safe") {
-                mstore(0, reason)
-                revert(0, 4)
-            }
-        }
+        _raise(reason);
         _applyExtension(B, M, id, fee);
         Transfers.pullQuotePermit(c, msg.sender, fee, permit2); // balance-checked; after every write, as `repay` pulls
     }
 
+    /// @dev Re-raise a predicate's first failing leg as its bare selector; zero raises nothing.
+    function _raise(bytes4 reason) private pure {
+        if (reason == bytes4(0)) return;
+        assembly ("memory-safe") {
+            mstore(0, reason)
+            revert(0, 4)
+        }
+    }
+
     /// @notice Whether `extend` would land for `caller` now, and its fee: the verb's own predicate, asked of a named caller.
     /// @notice Blind to token-side failure, as `previewOpen` is; `PolicyGasShort` is a revert here too, never a reason.
-    /// @param caller The address that would call `extend`: the holder, or its market lender holding the holder's grant.
+    /// @param caller The address that would call `extend`: anyone; one who is neither the holder nor its title operator meets the non-holder rule.
     /// @return ok Whether the extension would land.
     /// @return reason The first failing leg's selector; zero when `ok`.
     /// @return fee The extension's fee; zero when refused.
@@ -384,7 +402,7 @@ library Borrower {
     }
 
     /// @dev THE PREDICATE, TOTAL: the first failing leg as a zero-arg selector, so `extend` can re-raise it with `revert(0, 4)`.
-    /// @dev Legs in order: closed, the caller, matured, no time added, the lot, the borrower rule, the record, admission, the policy.
+    /// @dev Legs in order: closed, matured, no time added, the lot, the borrower rule, the record, the non-holder rule, admission, the policy.
     /// @dev `caller` is a parameter so the preview names whom it asks for; the verb passes its own `msg.sender`, so both run this one body.
     /// @dev No `minPrincipal` floor and no cash leg: an extension draws nothing, so resting cash is never read.
     /// @dev The fee is on `newExpiry - expiry`, the time actually added, which the no-time leg has already proved positive.
@@ -396,40 +414,64 @@ library Borrower {
         if (B.loans[id].closedAt != 0) return (LoanClosed.selector, 0);
         Extension memory e = _extensionOf(B, c, c, id, caller);
         e.newExpiry = uint64(block.timestamp) + B.loans[id].tenor;
-        bad = _extendLegs(B, c, e);
+        bad = _extendLegs(c, e);
         if (bad != bytes4(0)) return (bad, 0);
-        fee = LoanMath.originationFee(e.debt, e.newExpiry - e.expiry, c.p.baseBps, c.p.minTenor);
+        fee = LoanMath.originationFee(e.debt, e.newExpiry - e.expiry, c.p.lenderAprBps);
         bad = _recordLeg(c, e, minBufferWad);
         if (bad != bytes4(0)) return (bad, 0);
         if (!_askPolicy(c, e, data)) return (PolicyRefused.selector, 0);
     }
 
-    /// @dev The caller, matured, no time added, the lot and the borrower rule, read off the extension as the loan stands, in their own frame.
-    /// @dev The caller is the holder, or the market lender holding the holder's credit grant; either pays the fee, so neither raises the debt.
+    /// @dev Matured, no time added, the lot and the borrower rule, read off the extension as the loan stands, in their own frame.
+    /// @dev No caller leg: whoever calls pays the fee, so no caller raises the debt; a non-holder meets its own rule after the record.
     /// @dev The no-time leg compares the two expiries, never the open time, so a broken term word fails closed by name.
-    function _extendLegs(LoanBook storage B, Cfg memory c, Extension memory e) private view returns (bytes4) {
-        address holder = e.borrower;
-        if (e.caller != holder && (e.caller != c.p.lender || !B.creditOperator[holder][e.caller])) return NotBorrower.selector;
+    function _extendLegs(Cfg memory c, Extension memory e) private view returns (bytes4) {
         if (block.timestamp >= e.expiry) return LoanMatured.selector;
         if (e.newExpiry <= e.expiry) return ExtensionAddsNoTime.selector;
         if (e.units == 0) return ZeroCollateral.selector; // backstop: nothing zeroes a live loan's lot
-        return gateAdmits(c.p.borrower, holder) ? bytes4(0) : GateRefused.selector;
+        return gateAdmits(c.p.borrower, e.borrower) ? bytes4(0) : GateRefused.selector;
     }
 
-    /// @dev The record and admission legs of `_extendable`, in their own frame: the extended loan as a new one at `min(price, record)`.
+    /// @dev The record, the non-holder rule and admission, in their own frame: the extended loan as a new one at `min(price, record)`.
     function _recordLeg(Cfg memory c, Extension memory e, uint256 minBufferWad) private view returns (bytes4) {
         (bool read, RecordState s, uint256 cap) = tryRecordState(c);
         if (!read) return RecordUnreadable.selector;
         if (s == RecordState.NoPrice) return NoRecordPrice.selector;
+        if (!actsForHolder(c, e.loanId, e.borrower, e.caller)) {
+            bytes4 bad = _strangerLeg(c, e, cap);
+            if (bad != bytes4(0)) return bad;
+        }
         return _admissibleLeg(c, Math.min(c.p.price, cap), e.newDebt, e.units, minBufferWad);
+    }
+
+    /// @dev THE NON-HOLDER RULE: the record at or above the price, the record at or above the deleverage band's level, and the term's last quarter.
+    /// @dev So a stranger lands only where the holder's book settlement at expiry is out of the money and no crank can open.
+    /// @dev The band level is `Deleverage`'s own spelling; with no record the cap reads max, so price and band are vacuous and the clock alone holds.
+    /// @dev The rule prices the put at the RECORD: a record lagging a fall lets a last-block extension land at a true price under the market's.
+    function _strangerLeg(Cfg memory c, Extension memory e, uint256 cap) private view returns (bytes4) {
+        if (cap < c.p.price) return UnderPrice.selector;
+        uint256 trig = LoanMath.triggerPrice(e.debt, e.units, c.p.minCoverageWad, c.unitScale);
+        if (cap < FullMath.mulDivRoundingUp(trig, 1e18, 1e18 - c.p.deleverageBandBps * 1e14)) return BufferBelowMin.selector;
+        return e.expiry - block.timestamp > (e.newExpiry - block.timestamp) / 4 ? ExtensionTooEarly.selector : bytes4(0);
+    }
+
+    /// @notice THE holder test, one spelling for `drawMore` and `extend`: the holder, or an operator of its title, as OZ's `_isAuthorized` reads it.
+    /// @dev A credit grant is no title: the market lender holding one is a non-holder here.
+    /// @dev Asked only of a loan that exists, so `getApproved` never meets an unminted id; the holder skips both calls.
+    function actsForHolder(Cfg memory c, uint256 id, address holder, address caller) internal view returns (bool) {
+        if (caller == address(0)) return false;
+        if (caller == holder) return true;
+        PositionTitleNFT t = PositionTitleNFT(c.positionTitle);
+        return t.isApprovedForAll(holder, caller) || t.getApproved(id) == caller;
     }
 
     /// @dev The extension's writes: earn the escrow and re-anchor the term at now, book the cash fee, bump the draw counter, and log the time added.
     /// @dev The counter moves because the lender's position did, as at a draw: it is a lender contract's change detector.
+    /// @dev So the holder or its title operator can bump it once a second a loan for an atom's fee, a stranger once in three quarters of a tenor.
     function _applyExtension(LoanBook storage B, Market storage M, uint256 id, uint256 fee) private {
         uint64 expiry = B.loans[id].expiry;
         LoanAccounting.respread(B, M, id);
-        LoanAccounting.bookExtensionFee(B, M, id, fee);
+        LoanAccounting.bookFee(B, M, id, fee);
         M.s.drawCount++;
         uint64 newExpiry = B.loans[id].expiry;
         emit Extended(id, newExpiry - expiry, newExpiry, fee, msg.sender);
@@ -449,6 +491,111 @@ library Borrower {
         if (policy == address(0)) return false;
         bytes32 yes = bytes32(IRollPolicy.admitsExtension.selector);
         return Probe.askBool(policy, abi.encodeCall(IRollPolicy.admitsExtension, (e, data)), c.policyGas, yes);
+    }
+
+    /* ====== 3b. TOP UP: more principal or more collateral on a live loan, in place ====== */
+
+    /// @notice A live loan drew `amount` more at its market's price, for `fee` on the `term` left, its debt now `debt`; `executor` called.
+    event DrewMore(uint256 indexed id, uint256 amount, uint256 fee, uint64 term, uint256 debt, address indexed executor);
+    /// @notice `payer` put `units` more under a live loan, which now holds `unitsAfter` at trigger `trigger`.
+    event CollateralAdded(uint256 indexed id, address indexed payer, uint256 units, uint256 unitsAfter, uint256 trigger);
+
+    /// @notice Draw `amount` more on a live loan from its market's resting cash at the one price: debt and claim rise by it, the term holds.
+    /// @notice The fee is the origination fee on the term left, netted from the payout; the holder is paid `amount - fee`, last.
+    /// @notice Refuses through `tryDrawMore`'s predicate, re-raising its selector bare, so the preview and the verb cannot answer differently.
+    /// @dev The escrow earns to now and the schedule re-anchors there, so each tranche earns from its own draw to the one expiry.
+    /// @return fee The top-up's fee.
+    function drawMore(LoanBook storage B, Market storage M, Cfg memory c, uint256 id, uint256 amount, OpenBounds memory bnd) public returns (uint256 fee) {
+        bytes4 bad;
+        uint64 term;
+        (bad, fee, term) = _drawable(B, M, c, id, amount, bnd, msg.sender);
+        _raise(bad);
+        Loan storage L = B.loans[id];
+        LoanAccounting.reanchor(B, M, id);
+        LoanAccounting.bookFee(B, M, id, fee);
+        _takeCash(M, amount);
+        M.claim[id] += amount;
+        LoanAccounting.addLent(M, amount);
+        M.s.drawCount++;
+        /// @dev The top-up's one debt write: a new draw, admitted at the one price as an open is; its fee never enters the debt.
+        L.debt += amount;
+        address holder = L.borrower;
+        emit Funded(id, amount, holder);
+        emit DrewMore(id, amount, fee, term, L.debt, msg.sender);
+        IERC20(c.p.quote).safeTransfer(holder, amount - fee); // stable LAST (CEI)
+    }
+
+    /// @notice Whether `drawMore` would land for `caller` now, its fee and the term it is charged on: the verb's own predicate.
+    /// @notice It answers for any loan's id; at the hub an id naming no loan reverts `NoMarket`, and a call inside a hub call reverts on the guard.
+    /// @notice Blind to token-side failure, as `previewOpen` is.
+    /// @param caller The address that would call `drawMore`.
+    /// @return ok Whether the top-up would land.
+    /// @return reason The first failing leg's selector; zero when `ok`.
+    /// @return fee The top-up's fee; zero when refused.
+    /// @return term The term the fee is charged on, `expiry - now`; zero when refused.
+    function tryDrawMore(LoanBook storage B, Market storage M, Cfg memory c, uint256 id, uint256 amount, OpenBounds memory bnd, address caller)
+        public
+        view
+        returns (bool ok, bytes4 reason, uint256 fee, uint64 term)
+    {
+        (reason, fee, term) = _drawable(B, M, c, id, amount, bnd, caller);
+        ok = reason == bytes4(0);
+    }
+
+    /// @dev THE PREDICATE, TOTAL: the first failing leg as a zero-arg selector, with the fee and the term charged when it admits.
+    /// @dev Legs in order: closed, the caller, matured, the term left, the deadline, the amount, the borrower rule, then `_drawLegs`.
+    /// @dev The term-left floor is `minTenor`, so every draw books at least the term the escrow's rebate assumes; a holder near expiry extends first.
+    function _drawable(LoanBook storage B, Market storage M, Cfg memory c, uint256 id, uint256 amount, OpenBounds memory bnd, address caller)
+        private
+        view
+        returns (bytes4, uint256 fee, uint64 term)
+    {
+        Loan storage L = B.loans[id];
+        if (L.closedAt != 0) return (LoanClosed.selector, 0, 0);
+        if (!actsForHolder(c, id, L.borrower, caller)) return (NotBorrower.selector, 0, 0);
+        if (block.timestamp >= L.expiry) return (LoanMatured.selector, 0, 0);
+        if (L.expiry - block.timestamp < c.p.minTenor) return (TenorOutOfRange.selector, 0, 0);
+        if (bnd.deadline != 0 && block.timestamp > bnd.deadline) return (OpenExpired.selector, 0, 0);
+        if (amount < c.p.minPrincipal) return (BelowMinPrincipal.selector, 0, 0);
+        if (!gateAdmits(c.p.borrower, L.borrower)) return (GateRefused.selector, 0, 0);
+        term = L.expiry - uint64(block.timestamp);
+        fee = LoanMath.originationFee(amount, term, c.p.lenderAprBps);
+        bytes4 bad = _drawLegs(M, c, L, amount, fee, bnd);
+        if (bad != bytes4(0)) return (bad, 0, 0);
+        return (bytes4(0), fee, term);
+    }
+
+    /// @dev The payout bound, `_payoutCheck`'s made total, the record and cash, and admission on the new debt, in their own frame; zero means admitted.
+    /// @dev The record leg is `_previewFloor`'s question made total: unreadable and dark refuse by name, a cap under the price is the draw cap.
+    /// @dev Admission is `open`'s, on `debt + amount` at the market's price, which the draw cap has just shown the record does not undercut.
+    function _drawLegs(Market storage M, Cfg memory c, Loan storage L, uint256 amount, uint256 fee, OpenBounds memory bnd) private view returns (bytes4) {
+        (bool got, uint256 payout) = Math.trySub(amount, fee);
+        if (!got || payout < bnd.minPayout) return PayoutBelowMin.selector;
+        (bool read, RecordState s, uint256 cap) = tryRecordState(c);
+        if (!read) return RecordUnreadable.selector;
+        if (s == RecordState.NoPrice) return NoRecordPrice.selector;
+        if (c.p.price > cap || M.s.cash < amount) return InsufficientCash.selector;
+        return _admissibleLeg(c, c.p.price, L.debt + amount, L.collateralUnits, bnd.minBufferWad);
+    }
+
+    /// @notice Put `units` more collateral under a live loan, paid by the caller: anyone may, as anyone may repay, and only the lot moves.
+    /// @notice It lowers the trigger as a repay does, so it cures distress; it reads no record, so a dark record never blocks a cure.
+    /// @notice `permit2` empty pulls on the caller's allowance to custody; non-empty spends a Permit2 signature through the hub.
+    /// @dev The units are credited before custody receives them, as at open: an unguarded view read inside a hooked transfer sees them early.
+    function addCollateral(LoanBook storage B, Cfg memory c, uint256 id, uint256 units, bytes calldata permit2) public {
+        Loan storage L = B.loans[id];
+        if (L.closedAt != 0) revert LoanClosed();
+        if (units == 0) revert NothingAdded();
+        if (block.timestamp >= L.expiry) revert LoanMatured();
+        if (units > type(uint256).max / 1e18 - L.collateralUnits) revert CollateralOutOfRange(); // the bound every lot entered under
+        L.collateralUnits += units;
+        emit CollateralAdded(id, msg.sender, units, L.collateralUnits, triggerPrice(L, c));
+        if (permit2.length == 0) {
+            IPositionManager(c.positionManager).pull(id, msg.sender, units);
+        } else {
+            pullCollateralPermit(c, units, permit2);
+            IPositionManager(c.positionManager).pull(id, address(this), units);
+        }
     }
 
     /* ====== 4. REFINANCE: close a loan and open its successor, atomically, on one shared body ====== */
@@ -600,7 +747,7 @@ library Borrower {
     /// @dev Every term is the SAME token, which `refinance`'s quote rail establishes before any state moves.
     /// @return out The net out, for `refinance` to pay after the release.
     function _net(Cfg memory cd, MigrateArgs memory a, uint256 debtOld, uint256 refundOld) private pure returns (uint256 out) {
-        uint256 feeNew = LoanMath.originationFee(a.newPrincipal, a.newTenor, cd.p.baseBps, cd.p.minTenor);
+        uint256 feeNew = LoanMath.originationFee(a.newPrincipal, a.newTenor, cd.p.lenderAprBps);
         uint256 credit = a.newPrincipal - feeNew + refundOld; // `_openNew` already ran `_payoutCheck` on this pair, so the fee cannot exceed it
         if (credit < debtOld) revert DrawBelowDebt(); // repay the gap first, then refinance, in one multicall
         out = credit - debtOld;
@@ -714,8 +861,8 @@ library Borrower {
     /// @notice The coverage line: the smallest ADMISSIBLE holding, at `minCoverageWad` times settlement's own need.
     /// @notice Read at BOTH doors -- admission may not open under it, and a withdrawal may not fall below it.
     /// @notice `requiredAt` plus ONE atom -- DERIVED off that same rail, never a chosen constant.
-    /// @dev The atom IS settlement's ceiling excess: `collateralNeeded` ceils the claim once, and one ceil overshoots by under one atom.
-    /// @dev Debt-INDEPENDENT, which is the point -- the proportional coverage margin thins as debt melts and this term does not.
+    /// @dev The atom is margin: while the bounty sits within the coverage margin (b <= k - 1, as genesis forces), `requiredAt` alone covers need plus sliver.
+    /// @dev Debt-INDEPENDENT: the proportional coverage margin thins as debt melts, and this atom does not.
     /// @dev Saturating: `requiredAt` returns the max sentinel at price zero, and adding to it would panic instead of refusing by name.
     /// @param c The market config cache.
     /// @param debt The loan's live debt.

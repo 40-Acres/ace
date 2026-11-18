@@ -66,7 +66,7 @@ contract AceWindowedRecordOneLowPrintTest is WarpClock {
         p.price = (P0 * 99) / 100;
         p.record = address(record);
         p.minCoverageWad = 1.4e18;
-        p.baseBps = 40;
+        p.lenderAprBps = 40;
         p.minTenor = 7 days;
         p.maxTenor = 7 days;
         p.settleBountyBps = 50;

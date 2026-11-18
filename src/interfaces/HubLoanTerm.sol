@@ -6,9 +6,18 @@ import {Storage} from "../ace/hub/Types.sol";
 /// @title HubLoanTerm
 /// @notice Where the hub keeps a loan's term, and how to read it: one packed word of open time, tenor, expiry and close, 64 bits each.
 /// @notice For a contract reading the term through `extsload`, since the hub keeps no view of it; an immutable hub's layout never moves.
+/// @notice The debt word too: a settlement closes the loan and leaves it as it stood, where the hub's own `debtOf` reads zero.
 library HubLoanTerm {
     uint256 internal constant LOANS = uint256(Storage.BOOK) + 1; // the hub's loans mapping, the loan book's second member
+    uint256 internal constant DEBT_WORD = 3; // a loan's debt, in the quote
     uint256 internal constant TERM_WORD = 4; // a loan's packed word of open, tenor, expiry and close, 64 bits each
+
+    /// @notice The hub storage slot holding `loanId`'s debt word.
+    /// @param loanId The loan.
+    /// @return The slot to `extsload`.
+    function debtSlot(uint256 loanId) internal pure returns (bytes32) {
+        return bytes32(uint256(keccak256(abi.encode(loanId, LOANS))) + DEBT_WORD);
+    }
 
     /// @notice The hub storage slot holding `loanId`'s term word.
     /// @param loanId The loan.
@@ -19,7 +28,7 @@ library HubLoanTerm {
 
     /// @notice A term word's open time, tenor and expiry; the close, its top 64 bits, is `closedAt`'s.
     /// @param word The word `extsload` returned for the loan's slot.
-    /// @return openTime The second the loan's current term opened.
+    /// @return openTime The second the loan's fee schedule opened: its open, its last extension or its last top-up.
     /// @return tenor The loan's tenor.
     /// @return expiry The second the loan's current term ends.
     function decode(bytes32 word) internal pure returns (uint64 openTime, uint64 tenor, uint64 expiry) {

@@ -5,8 +5,9 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {MarketParams} from "../../../src/ace/hub/Types.sol";
 import {AceVault} from "../../../src/curator/AceVault.sol";
 import {AceVaultFlows, BorrowRequest} from "../../../src/curator/AceVaultFlows.sol";
-import {CuratorVault} from "../../../src/curator/CuratorVault.sol";
+import {CuratorTerms} from "../../../src/entities/curated/CuratorTerms.sol";
 import {MockStakeVault} from "../../mocks/MockStakeVault.sol";
+import {IAceVaultLens, VaultLens} from "../../utils/VaultLens.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
 
 /// @notice The core borrow door: the vault opens to itself in its own market, withdraws every unit, and hands over.
@@ -35,7 +36,7 @@ contract AceVaultDoorTest is AceVaultRig {
         assertTrue(mp.inventoryAsk, "the hub sells this vault's settled pots");
         assertEq(mp.minPrincipal, MIN_PRINCIPAL, "minPrincipal is the vault's immutable");
         assertEq(mp.minCoverageWad, COVERAGE, "coverage is the vault's immutable");
-        assertEq(mp.baseBps, RATE_BPS, "the rate is the row's");
+        assertEq(mp.lenderAprBps, RATE_BPS, "the rate is the row's");
         assertEq(mp.minTenor, MIN_TENOR, "the floor term is the row's");
         assertEq(mp.maxTenor, MAX_TENOR, "the ceiling term is the row's");
     }
@@ -76,8 +77,9 @@ contract AceVaultDoorTest is AceVaultRig {
 
     /// @notice A bystander creating the door's exact market first blocks nothing: the next borrow lands in it.
     function test_ABystandersMarketIsTheDoorsMarket() public {
+        IAceVaultLens lens = VaultLens.deploy();
         vm.prank(borrower);
-        (bytes32 id, MarketParams memory mp,) = vault.previewTerms(_req(UNITS, PRINCIPAL, MIN_TENOR), "");
+        (bytes32 id, MarketParams memory mp,) = lens.previewTerms(address(vault), borrower, _req(UNITS, PRINCIPAL, MIN_TENOR), "");
         vm.prank(stranger);
         assertEq(ace.createMarket(mp), id, "premise: the bystander made the door's market");
         uint256 loanId = _borrow(MIN_TENOR);
@@ -86,8 +88,9 @@ contract AceVaultDoorTest is AceVaultRig {
 
     /// @notice `previewTerms` names the market a borrow lands in, before the borrow.
     function test_PreviewTermsNamesTheMarket() public {
+        IAceVaultLens lens = VaultLens.deploy();
         vm.prank(borrower);
-        (bytes32 id,,) = vault.previewTerms(_req(UNITS, PRINCIPAL, MIN_TENOR), "");
+        (bytes32 id,,) = lens.previewTerms(address(vault), borrower, _req(UNITS, PRINCIPAL, MIN_TENOR), "");
         assertEq(_mid(_borrow(MIN_TENOR)), id, "the preview's id is the borrow's market");
     }
 
@@ -99,7 +102,7 @@ contract AceVaultDoorTest is AceVaultRig {
         r.collateral = address(other);
         vm.startPrank(borrower);
         other.approve(address(vault), UNITS);
-        vm.expectRevert(CuratorVault.NotListed.selector);
+        vm.expectRevert(CuratorTerms.NotListed.selector);
         vault.borrow(r, "", "");
         vm.stopPrank();
         assertEq(other.balanceOf(borrower), UNITS, "nothing was pulled");

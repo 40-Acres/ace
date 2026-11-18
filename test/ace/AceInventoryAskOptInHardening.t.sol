@@ -223,7 +223,7 @@ contract AceInventoryAskRecordlessTwinTest is WarpClock {
         p.collateral = address(item);
         p.price = (uint256(1) << 96) / 1e12; // one quote per whole item, in the hub's frame
         p.minCoverageWad = 1.4e18;
-        p.baseBps = 40;
+        p.lenderAprBps = 40;
         p.minTenor = 7 days;
         p.maxTenor = 30 days;
         p.minPrincipal = 10e6;

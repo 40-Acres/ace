@@ -3,8 +3,9 @@ pragma solidity 0.8.36;
 
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
+import {IAceVaultDoor} from "../../src/interfaces/IAceVaultDoor.sol";
 import {InstantExitRig} from "./CuratorVaultInstantExit.t.sol";
 
 /// @title CuratorVaultInstantExitEdges
@@ -15,40 +16,41 @@ contract CuratorVaultInstantExitEdgesTest is InstantExitRig {
 
     event DrainSet(address indexed by, bool on);
 
-    function _seeded() internal returns (CuratorVault v) {
+    function _seeded() internal returns (AceVault v) {
         v = _instantVault(0);
         _lpDeposit(v, alice, 10_000e6);
         _lpDeposit(v, bob, 10_000e6);
     }
 
     /// @dev The instant bound: exitable cash the requests do not hold.
-    function _instantBound(CuratorVault v) internal view returns (uint256) {
-        (uint256 exitable, uint256 heldReq) = v.holds();
+    function _instantBound(AceVault v) internal view returns (uint256) {
+        (uint256 exitable, uint256 heldReq) = vlens.holds(address(v));
         return exitable - heldReq;
     }
 
     // ---- boundaries ----
 
-    /// @notice THE SOLE HOLDER OF AN UNLENT VAULT TAKES ITS CASH EXACTLY: both max views name the whole of it, each verb empties it to zero.
+    /// @notice THE SOLE HOLDER OF AN UNLENT VAULT TAKES ITS CASH EXACTLY: both max views name the whole of it, each verb leaves the seed alone.
     /// @notice The emptied vault then re-opens at par, with nothing stranded for the next entrant.
     function test_Boundary_TheSoleHolderOfAnUnlentVaultEmptiesThePotExactly() public {
-        CuratorVault v = _instantVault(0);
+        AceVault v = _instantVault(0);
         _lpDeposit(v, alice, 20_000e6);
         uint256 free = _instantBound(v);
         uint256 all = v.balanceOf(alice);
-        assertEq(free, 20_000e6, "PREMISE: the whole deposit sits free in the vault");
-        assertEq(v.maxWithdraw(alice), free, "the sole holder's cash bound is not exactly the vault's cash");
+        uint256 seed = v.MIN_SEED();
+        assertEq(free, 20_000e6 + seed, "PREMISE: the whole deposit sits free in the vault beside the seed");
+        assertEq(v.maxWithdraw(alice), 20_000e6, "the sole holder's cash bound is not exactly its own cash");
         assertEq(v.maxRedeem(alice), all, "the sole holder's share bound is not exactly the holding");
 
         uint256 snap = vm.snapshotState();
         vm.prank(alice);
-        assertEq(v.withdraw(free, alice, alice), all, "withdrawing the exact cash did not burn exactly the holding");
-        assertEq(usdc.balanceOf(address(v)), 0, "withdrawing the exact cash left cash in the vault");
+        assertEq(v.withdraw(20_000e6, alice, alice), all, "withdrawing the exact cash did not burn exactly the holding");
+        assertEq(usdc.balanceOf(address(v)), seed, "withdrawing the exact cash left cash in the vault past the seed");
         vm.revertToState(snap);
 
-        assertEq(_redeem(v, alice, all), free, "redeeming the whole holding did not pay exactly the vault's cash");
-        assertEq(usdc.balanceOf(address(v)), 0, "redeeming the whole holding left cash in the vault");
-        assertEq(v.totalSupply(), 0, "redeeming the whole holding left a share");
+        assertEq(_redeem(v, alice, all), 20_000e6, "redeeming the whole holding did not pay exactly the holder's cash");
+        assertEq(usdc.balanceOf(address(v)), seed, "redeeming the whole holding left cash in the vault past the seed");
+        assertEq(v.totalSupply(), v.SEED_SHARES(), "redeeming the whole holding left a live share");
         assertEq(_lpDeposit(v, bob, 1_000e6), 1_000e12, "a vault emptied by an instant exit re-opened off par");
     }
 
@@ -57,7 +59,7 @@ contract CuratorVaultInstantExitEdgesTest is InstantExitRig {
     /// @notice A WITHDRAW ROUNDS ITS BURN UP AGAINST THE EXITER, and the preview names that exact ceiling.
     /// @dev The price is made non-integral first, so a floor and a ceiling differ and a flipped rounding cannot hide.
     function test_Rounding_AWithdrawBurnsTheCeilingAndARedeemPaysTheFloor() public {
-        CuratorVault v = _grownFeeVault();
+        AceVault v = _grownFeeVault();
         uint256 want = 1_234_567_891;
         (uint256 a, uint256 q) = (v.totalAssets(), _quoteSupply(v));
         uint256 lo = Math.mulDiv(want, q, a + 1);
@@ -77,7 +79,7 @@ contract CuratorVaultInstantExitEdgesTest is InstantExitRig {
     /// @notice SAMPLER: the max views never offer more than the verbs accept, each max ask pays its preview, and one wei more is refused.
     /// @dev Two LPs, an optional fee, an optional loan and an optional counted rise, read at a fuzzed later time.
     function testFuzz_MaxViewsNeverPromiseMoreThanTheVerbsPay(uint256 d1, uint256 d2, uint256 lendSeed, uint256 giftSeed, uint256 dt, bool fee) public {
-        CuratorVault v = _instantVault(fee ? FEE : 0);
+        AceVault v = _instantVault(fee ? FEE : 0);
         uint256 a1 = bound(d1, 1e6, 50_000e6);
         uint256 a2 = bound(d2, 1e6, 50_000e6);
         _lpDeposit(v, alice, a1);
@@ -97,7 +99,7 @@ contract CuratorVaultInstantExitEdgesTest is InstantExitRig {
         _checkMaxes(v, bob);
     }
 
-    function _checkMaxes(CuratorVault v, address who) internal {
+    function _checkMaxes(AceVault v, address who) internal {
         uint256 bal = v.balanceOf(who);
         uint256 free = _instantBound(v);
         (uint256 r, uint256 w) = (v.maxRedeem(who), v.maxWithdraw(who));
@@ -128,7 +130,7 @@ contract CuratorVaultInstantExitEdgesTest is InstantExitRig {
 
     /// @notice A SPENDER'S WITHDRAW SPENDS THE CEILING BURN from the allowance: one share-wei short is refused, by the standard error.
     function test_Auth_AWithdrawBySpenderSpendsTheCeilingBurn() public {
-        CuratorVault v = _grownFeeVault();
+        AceVault v = _grownFeeVault();
         uint256 want = 1_234_567_891;
         uint256 burn = v.previewWithdraw(want);
         vm.prank(bob);
@@ -147,7 +149,7 @@ contract CuratorVaultInstantExitEdgesTest is InstantExitRig {
 
     /// @notice A SPENDER EXITS FOR THE OWNER, the event names the spender as sender, and a spent allowance is refused.
     function test_Auth_ASpenderExitsForTheOwnerAndTheEventNamesIt() public {
-        CuratorVault v = _grownFeeVault();
+        AceVault v = _grownFeeVault();
         uint256 want = 1_000e6;
         uint256 burn = v.previewWithdraw(want);
         uint256 sh = 1_000e12;
@@ -177,7 +179,7 @@ contract CuratorVaultInstantExitEdgesTest is InstantExitRig {
 
     /// @notice A REDEEM PAST THE HOLDING REVERTS by the share token's own error, and pays nothing.
     function test_Instant_ARedeemPastTheHoldingReverts() public {
-        CuratorVault v = _seeded();
+        AceVault v = _seeded();
         uint256 bal = v.balanceOf(alice);
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InsufficientBalance.selector, alice, bal, bal + 1));
@@ -186,10 +188,10 @@ contract CuratorVaultInstantExitEdgesTest is InstantExitRig {
 
     /// @notice NOBODY EXITS THE VAULT'S OWN ESCROW: naming the vault as owner needs an allowance it never grants.
     function test_Instant_NoCallerExitsTheVaultsOwnEscrow() public {
-        CuratorVault v = _seeded();
+        AceVault v = _seeded();
         _request(v, bob, 5_000e12);
         uint256 escrow = v.balanceOf(address(v));
-        assertEq(escrow, 5_000e12, "PREMISE: the vault holds bob's escrow");
+        assertEq(escrow, 5_000e12 + v.SEED_SHARES(), "PREMISE: the vault holds bob's escrow beside the seed");
         vm.prank(carol);
         vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InsufficientAllowance.selector, carol, 0, 1e12));
         v.redeem(1e12, carol, address(v));
@@ -203,7 +205,7 @@ contract CuratorVaultInstantExitEdgesTest is InstantExitRig {
     /// @notice THE LAST FREE HOLDER'S `withdraw` IS REFUSED TOO when it would burn the whole free supply over a vesting gain.
     /// @notice One asset-wei less burns less than the whole, and pays: the refusal is the exact predicate, not a band.
     function test_LastOut_AWithdrawOfTheWholeFreeSupplyIsRefused() public {
-        CuratorVault v = _instantVault(0);
+        AceVault v = _instantVault(0);
         _lpDeposit(v, alice, 10_000e6);
         _gift(v, 500e6);
         v.crank();
@@ -226,7 +228,7 @@ contract CuratorVaultInstantExitEdgesTest is InstantExitRig {
 
     /// @notice SWITCHING ON A STANDING DRAIN IS A NO-OP THAT STILL SPEAKS: it stays on, names the second key, and one curator off lifts it.
     function test_Drain_SwitchingOnWhileItStandsStillSpeaks() public {
-        CuratorVault v = _seeded();
+        AceVault v = _seeded();
         vm.prank(curator);
         v.setDrain(true);
         vm.expectEmit(true, true, true, true, address(v));
@@ -241,9 +243,9 @@ contract CuratorVaultInstantExitEdgesTest is InstantExitRig {
 
     /// @notice THE GUARDIAN'S SWITCH-OFF IS REFUSED BY ITS KEY, whatever the state: an undrained vault reads `NotCurator` too.
     function test_Drain_TheGuardiansOffIsRefusedOnAnUndrainedVault() public {
-        CuratorVault v = _seeded();
+        AceVault v = _seeded();
         vm.prank(guardian);
-        vm.expectRevert(AceVault.NotCurator.selector);
+        vm.expectRevert(IAceVaultDoor.NotCurator.selector);
         v.setDrain(false);
     }
 
@@ -251,10 +253,10 @@ contract CuratorVaultInstantExitEdgesTest is InstantExitRig {
     function test_Drain_NoGuardianLeavesTheCuratorTheOnlyKey() public {
         VaultConfig memory cfg = _cfg(0);
         cfg.guardian = address(0);
-        CuratorVault v = _deploy(cfg, "Keyless", "cKEY");
+        AceVault v = _deploy(cfg, "Keyless", "cKEY");
         assertEq(v.GUARDIAN(), address(0), "PREMISE: no guardian");
         vm.prank(guardian);
-        vm.expectRevert(AceVault.NotCurator.selector);
+        vm.expectRevert(IAceVaultDoor.NotCurator.selector);
         v.setDrain(true);
         vm.prank(curator);
         v.setDrain(true);

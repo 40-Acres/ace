@@ -67,7 +67,7 @@ contract AceMinCoverageRenameTest is Test {
     function _params() internal view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(record);
-        p.baseBps = 40;
+        p.lenderAprBps = 40;
         p.minTenor = TEN7;
         p.maxTenor = TEN30;
     }

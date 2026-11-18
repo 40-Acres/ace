@@ -14,7 +14,7 @@ import {MatchingPolicy, NoPolicy, YesPolicy} from "../utils/RollPolicyMocks.sol"
 
 /// @title AceExtendFromNowTest
 /// @notice `extend` re-anchors a live loan at its own tenor from now, and charges the fee on exactly the time it adds.
-/// @notice It lands only strictly inside `(openTime, expiry)`: the open second adds nothing and refuses, and from expiry it refuses `LoanMatured`.
+/// @notice It lands only strictly inside `(expiry - tenor, expiry)`: the term's first second adds nothing and refuses; from expiry, `LoanMatured`.
 /// @notice From the expiry second `refinanceTo` refuses `LoanMatured` too, so a matured loan leaves only by repay, forceClose or finalize.
 /// @dev Reasoning: the design record.
 contract AceExtendFromNowTest is ExtendRig {
@@ -293,11 +293,11 @@ contract AceExtendFromNowTest is ExtendRig {
         _assertRefusedWhole(loanId, alice, LoanMatured.selector);
     }
 
-    /// @notice The caller leg still runs before the matured one: a stranger from expiry is refused `NotBorrower`.
-    function test_AStrangerFromExpiryIsRefusedNotBorrowerFirst() public {
+    /// @notice No caller leg runs first any more: a stranger from expiry is refused `LoanMatured`, as the holder is.
+    function test_AStrangerFromExpiryIsRefusedLoanMatured() public {
         uint256 loanId = _open(P, TEN7, 5000);
         _warpTo(read.loan(loanId).expiry);
-        _assertRefusedWhole(loanId, stranger, NotBorrower.selector);
+        _assertRefusedWhole(loanId, stranger, LoanMatured.selector);
     }
 
     /// @notice From expiry the Permit2 door refuses `LoanMatured` before the pull: no quote moves and the signed nonce stays unspent.

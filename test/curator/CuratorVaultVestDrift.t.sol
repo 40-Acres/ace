@@ -4,16 +4,18 @@ pragma solidity 0.8.36;
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
 import {VaultConfig} from "../../src/curator/AceVault.sol";
+import {CapListing, ProductConfig} from "../../src/curator/AceVaultCaps.sol";
+import {CuratedVaults} from "../utils/CuratedVaults.sol";
 import {AccumVault} from "./CuratorVaultVestAccumulator.t.sol";
 
 /// @title CuratorVaultVestDrift
 /// @notice Bunni-class confirmation for the vest accumulator: N alternating 1-wei gross rises and falls inside ONE window.
-/// @notice A rise grosses the basis UP and a fall scales it DOWN; together they must not walk `unvested()` away from the exact pile.
+/// @notice A rise grosses the basis DOWN, so it reads back exactly, and a fall scales it DOWN; together they must not walk `unvested()` off the exact pile.
 /// @notice The exact pile is the first gain decayed linearly to the one maturity, plus each rise and less each fall, tracked here at 1e18 precision.
-/// @notice `unvested()` sits within N wei over the exact pile and under two wei below it, and reads zero at maturity.
+/// @notice `unvested()` sits within one wei an op of the exact pile either way, reads back exactly at each rise, and reads zero at maturity.
 /// @dev Drives `_stampVest(1)` and `_burnVest(1)` through the shipped `AccumVault` harness: exactly what `_sync` runs on a 1-wei move.
 /// @dev The pile is kept over the window in seconds, so a 1-wei stamp's maturity shift floors to zero and the maturity never moves.
-/// @dev MUTANTS: `_grossed` Ceil -> Floor, and `_scaled` Floor -> Ceil.
+/// @dev MUTANTS: `_grossed` Floor -> Ceil, and `_scaled` Floor -> Ceil.
 contract CuratorVaultVestDriftTest is CuratorVaultBase {
     uint256 internal constant Q = 1e18;
 
@@ -32,7 +34,9 @@ contract CuratorVaultVestDriftTest is CuratorVaultBase {
     function _accum(uint64 window) internal returns (AccumVault a) {
         VaultConfig memory cfg = _cfg(0);
         cfg.vestWindow = window;
-        a = new AccumVault(cfg, _listing());
+        (ProductConfig memory pc, CapListing[] memory c) =
+            CuratedVaults.prepared(cfg, CuratedVaults.Terms(10e6, 1.4e18, 1 days, CuratedVaults.UNCAPPED), _listing());
+        a = new AccumVault(cfg, pc, c);
     }
 
     /// @dev Decays the exact pile to now: linear toward the one maturity.
@@ -49,9 +53,10 @@ contract CuratorVaultVestDriftTest is CuratorVaultBase {
         if (uQ > pQ && uQ - pQ > worstOverQ) worstOverQ = uQ - pQ;
         if (pQ > uQ && pQ - uQ > worstUnderQ) worstUnderQ = pQ - uQ;
         assertLe(uQ, pQ + ops * Q + Q, "unvested() sits at most one wei an op over the exact pile");
-        assertGe(uQ, pQ, "and never under it: no stayer-unfavourable drift");
+        assertGe(uQ + ops * Q + Q, pQ, "and at most one wei an op under it: the floored basis drifts down, never past that");
         uint256 realQ = maturity <= _now() ? 0 : FullMath.mulDiv(uint256(v.basis()) * Q, maturity - _now(), _window());
-        assertGe(realQ, pQ, "the basis itself, before the read's ceil, never carries less than the exact pile");
+        assertGe(uQ, realQ, "the read is the basis's own pile, ceiled: never under it");
+        assertLe(uQ, realQ + Q, "and never a wei over it");
     }
 
     function _window() internal view returns (uint256) {
@@ -63,8 +68,7 @@ contract CuratorVaultVestDriftTest is CuratorVaultBase {
         uint256 u = v.unvested();
         v.stamp(1);
         pQ += Q;
-        assertGe(v.unvested(), u + 1, "a 1-wei rise defers at least that wei");
-        assertLe(v.unvested(), u + 2, "and at most one wei of ceiling beyond it");
+        assertEq(v.unvested(), u + 1, "a 1-wei rise defers exactly that wei: the floored basis reads back exactly");
     }
 
     /// @dev One 1-wei fall, and its read-back law at the instant it lands.

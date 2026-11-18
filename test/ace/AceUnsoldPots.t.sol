@@ -624,9 +624,19 @@ contract AceUnsoldPotsTest is WarpClock {
         uint256 sliver = FullMath.mulDiv(principal * bounty, scale, 10000 * price);
         assertEq(read.unitsOwedOf(id, keeper), sliver, "PREMISE: the keeper took exactly the sliver this door pays");
         assertGe(need, 1, "PREMISE: a live claim needs at least one unit");
-        assertEq(read.invPotOf(m.id, id), need, "the pot is the claims' whole need, so it is never empty");
+        if (door == 0) _assertInTermLinePot(m, id, units, sliver, need);
+        else assertEq(read.invPotOf(m.id, id), need, "from expiry the pot is the claims' whole need, so it is never empty");
         (uint256 u, uint256 s) = _pair(m);
         assertEq(u, 1, "so the settlement counts one unsold");
         assertEq(s, 1, "and one settled");
+    }
+
+    /// @dev The finalize door's pot on the line: the claim at the trigger capped at the line, here the lot itself, and at most two atoms over the need.
+    function _assertInTermLinePot(Mkt memory m, uint256 id, uint256 lot, uint256 sliver, uint256 need) internal view {
+        uint256 atTrigger = FullMath.mulDivRoundingUp(lot, 1e18, ace.idToMarketParams(m.id).minCoverageWad);
+        uint256 pot = read.invPotOf(m.id, id);
+        uint256 take = Math.min(Math.max(need, Math.min(atTrigger, lot)), lot - sliver); // the lot IS the coverage line on this row
+        assertEq(pot, take, "inside the term the pot is the claim at the trigger, so it is never empty");
+        assertLe(pot - need, 2, "and on the line it overshoots the claims' need by at most two atoms");
     }
 }

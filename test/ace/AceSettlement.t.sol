@@ -2,6 +2,8 @@
 pragma solidity 0.8.36;
 
 import {Test} from "forge-std/Test.sol";
+import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {Storage, MarketParams, MarketState, OpenBounds} from "../../src/ace/hub/Types.sol";
@@ -173,12 +175,14 @@ contract AceSettlementTest is WarpClock {
 
     // ============ the title transfer itself ============
 
-    /// @dev The two roundings AGREE: custody takes the ceiled requirement and the tick books that same figure.
-    /// @dev A claim needs `ceil(amount * unitScale / price)` units, so anything less cannot pay it.
+    /// @dev The two roundings AGREE: custody retires the ceiled take and the pot books that same figure.
+    /// @dev Inside the term the take is the claim at the trigger, `ceil(lot * 1e18 / k)`, capped at the coverage line, never under the claim's ceiled need.
     /// @dev So a covered settlement leaves NO sub-unit resting on the hub outside a class's pot.
     function test_Finalize_ConvertsClaimsToInventoryAtTheirOwnTickPrices() public {
         uint256 loanId = _openStd(); // one claim, 4,500 at T4
-        uint256 taken = _need(4_500e6, T4); // ceiled: what leaves the positionManager, and what the tick books
+        uint256 k = ace.idToMarketParams(id).minCoverageWad;
+        uint256 line = FullMath.mulDivRoundingUp(k * 4_500e6, UNIT_SCALE, T4 * 1e18) + 1; // the coverage line, requiredAt plus one atom
+        uint256 taken = Math.max(_need(4_500e6, T4), Math.min(FullMath.mulDivRoundingUp(COLL, 1e18, k), line)); // what leaves custody and the pot books
         /// @dev DEBT-based and converted at the loan's funding floor, so pay tracks the obligation.
         /// @dev The keeper supplies no capital to a title transfer, so it is not paid off the over-collateralization.
         /// @dev Mirrors `LoanAccounting.sliverUnits` exactly.
@@ -188,7 +192,7 @@ contract AceSettlementTest is WarpClock {
         vm.prank(keeper);
         ace.finalize(loanId);
 
-        assertEq(read.invPotOf(id, loanId), taken, "the claim fills at its own pre-committed tick price");
+        assertEq(read.invPotOf(id, loanId), taken, "inside the term the pot is the claim at the trigger capped at the line, ceiled");
         assertEq(read.claimOf(id, loanId), 0, "the claim is gone: title moved instead of cash");
         assertEq(read.unitsOwedOf(loanId, keeper), sliver, "the keeper's in-kind sliver comes off the top");
         vm.prank(keeper);
@@ -336,7 +340,7 @@ contract AceSettlementTest is WarpClock {
     /// @dev What reaches `totalCash` at open: the lender cut NET of the withheld early-exit escrow.
     /// @dev The escrow sits on the hub outside `totalCash`, so it is not part of this figure.
     function _lenderFee() internal pure returns (uint256) {
-        uint256 fee = LoanMath.originationFee(4_500e6, ProtocolPolicy.MIN_TENOR, PocDeployConfig.BASE_BPS, ProtocolPolicy.MIN_TENOR);
+        uint256 fee = LoanMath.originationFee(4_500e6, ProtocolPolicy.MIN_TENOR, PocDeployConfig.LENDER_APR_BPS);
         uint256 lender = fee - (fee * Constants.PROTOCOL_SHARE_BPS) / (10000 + Constants.PROTOCOL_SHARE_BPS);
         return lender - (lender * Constants.REBATE_PHI_BPS) / 10000;
     }

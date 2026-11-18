@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {VaultConfig} from "../../src/curator/AceVault.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
 
@@ -25,8 +25,6 @@ interface ICuratorVaultExits {
     function lapseExit(address holder) external;
     function claimExit(uint256 shares, address receiver, uint256 minAssets) external returns (uint256 assets);
     function maxClaim(address holder) external view returns (uint256 shares);
-    function requestOf(address holder) external view returns (uint256 shares, uint64 expiresAt);
-    function requestedShares() external view returns (uint256);
     function setDrain(bool on) external;
     function draining() external view returns (bool);
 }
@@ -46,19 +44,19 @@ abstract contract CuratorVaultExitsRig is CuratorVaultBase {
     event DrainSet(address indexed by, bool on);
 
     /// @dev The surface under test, cast so each row reads as a call on the vault.
-    function _x(CuratorVault v) internal pure returns (ICuratorVaultExits) {
+    function _x(AceVault v) internal pure returns (ICuratorVaultExits) {
         return ICuratorVaultExits(address(v));
     }
 
     /// @dev A production vault, with a guardian, listing the rig collateral; `mid` is its door market.
-    function _vault(uint16 fee) internal returns (CuratorVault v) {
+    function _vault(uint16 fee) internal returns (AceVault v) {
         VaultConfig memory c = _cfg(fee);
         c.guardian = guardian;
         v = _deploy(c, "Exits", "cEXIT");
     }
 
     /// @dev Two equal LPs and `lent` drawn by one door loan, NAV flat once the open's own gain has vested.
-    function _lent(uint256 lent) internal returns (CuratorVault v, uint256 loanId) {
+    function _lent(uint256 lent) internal returns (AceVault v, uint256 loanId) {
         v = _vault(0);
         _lpDeposit(v, alice, SEED);
         _lpDeposit(v, bob, SEED);
@@ -69,37 +67,37 @@ abstract contract CuratorVaultExitsRig is CuratorVaultBase {
     }
 
     /// @dev The requests' hold now: exitable cash fenced for standing requests, zero while draining.
-    function _heldReq(CuratorVault v) internal view returns (uint256 held) {
-        (, held) = v.holds();
+    function _heldReq(AceVault v) internal view returns (uint256 held) {
+        (, held) = vlens.holds(address(v));
     }
 
     /// @dev Exitable cash: all of idle, as no roll holds any back.
-    function _exitable(CuratorVault v) internal view returns (uint256 exitable) {
-        (exitable,) = v.holds();
+    function _exitable(AceVault v) internal view returns (uint256 exitable) {
+        (exitable,) = vlens.holds(address(v));
     }
 
     /// @dev What `shares` are worth now at the fee-inclusive price, as a claim would pay them, rounded down.
-    function _worth(CuratorVault v, uint256 shares) internal view returns (uint256) {
+    function _worth(AceVault v, uint256 shares) internal view returns (uint256) {
         uint256 a = v.totalAssets();
         return Math.mulDiv(shares, a + 1, v.totalSupply() + v.pendingFeeShares() + V_OFF);
     }
 
-    function _request(CuratorVault v, address who, uint256 shares) internal {
+    function _request(AceVault v, address who, uint256 shares) internal {
         vm.prank(who);
         _x(v).requestExit(shares);
     }
 
-    function _claim(CuratorVault v, address who, uint256 shares) internal returns (uint256) {
+    function _claim(AceVault v, address who, uint256 shares) internal returns (uint256) {
         vm.prank(who);
         return _x(v).claimExit(shares, who, 0);
     }
 
-    function _redeem(CuratorVault v, address who, uint256 shares) internal returns (uint256) {
+    function _redeem(AceVault v, address who, uint256 shares) internal returns (uint256) {
         vm.prank(who);
         return v.redeem(shares, who, who);
     }
 
-    function _escrow(CuratorVault v, address who) internal view returns (uint256 shares) {
-        (shares,) = _x(v).requestOf(who);
+    function _escrow(AceVault v, address who) internal view returns (uint256 shares) {
+        (shares,) = vlens.requestOf(address(v), who);
     }
 }

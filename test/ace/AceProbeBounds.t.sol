@@ -44,13 +44,43 @@ contract WidthSource {
     }
 }
 
+/// @notice A callee that burns every drop of gas it is handed.
+contract GasBurnSource {
+    fallback() external {
+        assembly {
+            for {} 1 {} {}
+        }
+    }
+}
+
+/// @notice A callee that REVERTS with a payload whose width and first word are both dials.
+/// @dev `WidthSource`'s revert carries four bytes, so the length check refuses it alone; a word-wide payload leaves only the success flag.
+contract RevertWidthSource {
+    uint256 public word = 7e18; // the payload's first word: a plausible price, so a leak would read as one
+    uint256 public width = 64; // bytes of revert payload
+
+    function set(uint256 w, uint256 n) external {
+        word = w;
+        width = n;
+    }
+
+    fallback() external {
+        uint256 v = word;
+        uint256 n = width;
+        assembly {
+            mstore(0, v)
+            revert(0, n)
+        }
+    }
+}
+
 /// @title AceProbeBounds
 /// @notice `Probe.askWord` on its own, where both of its properties are one assertion each.
 /// @notice TOTALITY: no code, a revert, and a short answer are all `ok == false`, never an in-band value.
 /// @notice BOUNDEDNESS: a megabyte answer costs this caller no more than the callee's own expansion.
 /// @dev The door suites measure the bound through `deposit` and the extension's predicate; this measures it at the source.
 /// @dev The bound is on MEMORY, never on GAS: a callee that burns its allowance still drains the caller.
-/// @dev That non-property is pinned in `AceVenueExposureEdges` and is deliberately not re-asserted here.
+/// @dev That non-property is pinned by `test_AskWord_ABurningCallee_DrainsTheCallersGas`.
 contract AceProbeBoundsTest is Test {
     WidthSource internal src;
     bytes internal ASK; // encoded once: the encode buffer must not sit inside a gas measurement
@@ -66,7 +96,7 @@ contract AceProbeBoundsTest is Test {
     /* ============================ totality ============================ */
 
     /// @notice An address with no code cannot have answered, and the probe must not report that it did.
-    /// @dev The early return is what stops solc's absent extcodesize check reading empty returndata as a value.
+    /// @dev An EOA returns nothing, so the length check would refuse it too; the early return's own case is a codeless precompile, pinned below.
     function test_AskWord_ACodelessTarget_IsNotAnAnswer() public view {
         (bool ok, uint256 word) = Probe.askWord(address(0xE0A), ASK);
         assertFalse(ok, "a codeless target answered");
@@ -155,6 +185,50 @@ contract AceProbeBoundsTest is Test {
         assertEq(word, short_ ? 0 : w, "and a legal answer carries its first word unchanged");
     }
 
+    /// @notice A codeless address that DOES answer: a precompile returns a word, and only the code check refuses it.
+    /// @dev An EOA returns nothing, so the length check refuses it as well; SHA-256 at 0x02 returns 32 bytes to any input.
+    function test_AskWord_APrecompile_IsNotAnAnswer() public view {
+        address sha = address(2);
+        assertEq(sha.code.length, 0, "fixture: the precompile carries no code");
+        (bool raw, uint256 size) = _rawAsk(sha, ASK);
+        assertTrue(raw, "fixture: a raw call to it succeeds");
+        assertEq(size, 32, "fixture: with a whole word, which the length check alone would accept");
+        (bool ok, uint256 word) = Probe.askWord(sha, ASK);
+        assertFalse(ok, "a codeless precompile answered");
+        assertEq(word, 0, "and its digest must not read as the word");
+    }
+
+    /// @notice No precompile answers a record-shaped ask, whatever it would return: each is codeless.
+    /// @dev The ask is `minPrice`'s width, so the identity precompile at 0x04 would echo a word back.
+    function testFuzz_AskWord_NoPrecompileIsAnAnswer(uint8 which, address a, address b) public view {
+        address p = address(uint160(bound(uint256(which), 1, 10)));
+        assertEq(p.code.length, 0, "fixture: a precompile carries no code");
+        (bool ok, uint256 word) = Probe.askWord(p, abi.encodeWithSignature("minPrice(address,address)", a, b));
+        assertFalse(ok, "a precompile answered");
+        assertEq(word, 0, "and carried a word out");
+    }
+
+    /// @notice A revert carrying a whole word is still a refusal, and its payload must not become the word.
+    /// @dev `Nope()` is four bytes, so the length check refuses it alone; a word-wide payload leaves only the success flag between it and an answer.
+    function test_AskWord_ARevertCarryingAWord_IsNotAnAnswer() public {
+        RevertWidthSource r = new RevertWidthSource();
+        (bool raw, uint256 size) = _rawAsk(address(r), ASK);
+        assertFalse(raw, "fixture: the callee reverts");
+        assertEq(size, 64, "fixture: with two words of payload, past the probe's floor");
+        (bool ok, uint256 word) = Probe.askWord(address(r), ASK);
+        assertFalse(ok, "a revert carrying a word answered");
+        assertEq(word, 0, "and its payload must not surface as the word");
+    }
+
+    /// @notice A revert of any width and any first word is no answer.
+    function testFuzz_AskWord_ARevertOfAnyWidth_IsNotAnAnswer(uint256 w, uint16 n) public {
+        RevertWidthSource r = new RevertWidthSource();
+        r.set(w, bound(uint256(n), 0, 32 * 8));
+        (bool ok, uint256 word) = Probe.askWord(address(r), ASK);
+        assertFalse(ok, "a revert answered");
+        assertEq(word, 0, "and carried a word out");
+    }
+
     /* ============================ boundedness ============================ */
 
     /// @notice THE BOUND: a megabyte answer bills this caller nothing beyond what the callee itself spent.
@@ -198,6 +272,27 @@ contract AceProbeBoundsTest is Test {
         assertTrue(ok, "a byte short of the last word is still over one word, so it answers");
     }
 
+    /// @notice The NON-property: the bound is on memory, never gas, so a callee that never returns takes all but a sixty-fourth of the frame.
+    /// @dev Run under a 200k frame, since an unbounded test frame would hand the burner its whole allowance.
+    /// @dev Measured INSIDE that frame, around the probe alone, so no harness overhead is credited to the burner.
+    function test_AskWord_ABurningCallee_DrainsTheCallersGas() public {
+        GasBurnSource b = new GasBurnSource();
+        (bool ran, bytes memory ret) = address(this).staticcall{gas: 200_000}(abi.encodeCall(this.probeOnce, (address(b))));
+        assertTrue(ran, "fixture: the frame survives the probe on the sixty-fourth it keeps");
+        (bool ok, uint256 before, uint256 left) = abi.decode(ret, (bool, uint256, uint256));
+        assertFalse(ok, "a callee that never returns is no answer");
+        assertGt(before, 190_000, "fixture: the probe was handed nearly the whole frame");
+        assertLe(left, before / 64 + 500, "the probe kept no reserve beyond the EVM's sixty-fourth: nothing bounds its gas");
+    }
+
+    /// @dev The probe in a frame of its own, so the test can cap the gas it is handed; it reports gas either side of the probe.
+    function probeOnce(address t) external view returns (bool ok, uint256 before, uint256 left) {
+        bytes memory data = ASK;
+        before = gasleft();
+        (ok,) = Probe.askWord(t, data);
+        left = gasleft();
+    }
+
     /* ================================= fixture ================================= */
 
     /// @dev The callee's OWN cost, taken with a zero-length output window so this frame copies nothing.
@@ -209,6 +304,14 @@ contract AceProbeBoundsTest is Test {
             pop(staticcall(gas(), t, add(data, 32), mload(data), 0, 0))
         }
         cost = g0 - gasleft();
+    }
+
+    /// @dev A raw staticcall with no output window: whether it succeeded and how wide its returndata was.
+    function _rawAsk(address t, bytes memory data) internal view returns (bool ok, uint256 size) {
+        assembly ("memory-safe") {
+            ok := staticcall(gas(), t, add(data, 32), mload(data), 0, 0)
+            size := returndatasize()
+        }
     }
 
     /// @dev One probe, measured; the answer rides back so a compiler cannot elide the call.

@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 
 /// @title CuratorVaultRemoveMarketRail
 /// @notice THE RECOVERY DOOR: removing a collateral ends new lending on it, and the value behind its markets still comes home.
@@ -22,7 +22,7 @@ contract CuratorVaultRemoveMarketRailTest is CuratorVaultBase {
     address internal stranger = address(0x57A2);
 
     /// @dev One loan, cranked, settled, cranked again: the trough is open and the pot holds the whole recovery.
-    function _settled(CuratorVault v) internal returns (uint256 loanId) {
+    function _settled(AceVault v) internal returns (uint256 loanId) {
         _lpDeposit(v, alice, SEED);
         loanId = _open(DRAW);
         _crank(v, loanId, T2, 0);
@@ -31,11 +31,11 @@ contract CuratorVaultRemoveMarketRailTest is CuratorVaultBase {
     }
 
     /// @dev Remove the rig collateral by capping its row at zero, and return what the vault still had at the hub when it did.
-    function _remove(CuratorVault v) internal returns (uint256 left) {
+    function _remove(AceVault v) internal returns (uint256 left) {
         left = ace.lenderAssets(address(v), v.asset());
         vm.prank(curator);
         v.submitCap(address(collateral), 0);
-        assertEq(v.rowOf(address(collateral)).cap, 0, "fixture: the row really is capped at zero");
+        assertEq(_cap(v, address(collateral)), 0, "fixture: the row really is capped at zero");
     }
 
     // ---- HALF A: the recovery door, so a removal stops being terminal for value ----
@@ -43,7 +43,7 @@ contract CuratorVaultRemoveMarketRailTest is CuratorVaultBase {
     /// @dev The market this issue is about: `invPot` holds the whole recovery and no aggregate can see it.
     /// @dev So the removal is legal at ANY moment, and the crank is what makes that safe rather than fatal.
     function test_ARemovedMarketsRecoveryStillComesHome() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         bytes32 id = mid;
         uint256 loanId = _settled(v);
         uint256 pot = lens.inventoryMark(id, loanId);
@@ -74,7 +74,7 @@ contract CuratorVaultRemoveMarketRailTest is CuratorVaultBase {
     /// @dev The plan's oscillation bound was on the FALL only, and under pooling there is no fall at all.
     /// @dev What bounds the rise is `_sync`'s deferral, so the recovery must arrive DEFERRED, never as a jump.
     function test_ARemovedMarketsRecoveryArrivesDeferred() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         bytes32 id = mid;
         uint256 loanId = _settled(v);
         uint256 pot = lens.inventoryMark(id, loanId);
@@ -112,7 +112,7 @@ contract CuratorVaultRemoveMarketRailTest is CuratorVaultBase {
     /// @dev anyone can move a removed market's value home with a fee collection right behind it.
     /// @dev It is safe for ONE reason: `feeHighWater` never follows a loss down, and the loss drove NAV under it.
     function test_RemoveThenRecoverMintsNoFeeBelowTheHighWaterMark() public {
-        CuratorVault v = _newVault(FEE);
+        AceVault v = _newVault(FEE);
         _lpDeposit(v, alice, SEED);
         uint256 good = _open(DRAW);
         _crank(v, good, T2, 0);

@@ -1,4 +1,4 @@
-// CuratorVault: SPLIT-ADDITIVITY of entry, the property Bunni v2 lacked. Two entries never beat one entry of their sum.
+// AceVault: SPLIT-ADDITIVITY of entry, the property Bunni v2 lacked. Two entries never beat one entry of their sum.
 //
 // Bunni's rounding was safe per call and ratcheted across 44 calls; a fuzzer never chained them. A rule stated from
 // ANY state covers every chain: a split of n pieces is n-1 applications of the two-piece rule, each from the state
@@ -18,16 +18,25 @@
 // NAV. The catch-all's DISPATCH list is what routes them: a call runs a listed function only when its callee IS that
 // contract and its selector matches. The links fix the two immutables the callees are read from (OZ's `_asset` and
 // the vault's `ACE`). The asset's pull is dispatched too, so a deposit's cash lands in the balance the next leg reads.
-// Every other outside call, the hub's writing verbs a borrow or a crank reaches among them, takes the default.
+// Every other outside call, the hub's writing verbs a borrow or a crank reaches among them, takes the default. So does
+// the entry cap, a raw static call to the vault's terms: an answer that differs between legs reverts one, and a rule
+// asserts only on paths where every leg lands.
 //
 // THE START STATE IS ANY STATE, LESS THREE THINGS NO DEPLOYMENT REACHES (`aReachableStart`), each a fact of the code:
 //   - a real clock, as VaultArithmetic.spec states it: the vest maturity is stored as `uint64(now + VEST_WINDOW)`;
 //   - the fee bound and the vest-window bounds the constructor enforces;
 //   - the pile within the mark: `unvested() <= navMark()`, which the two lemma rules below PROVE inductively. The
-//     constructor starts both at zero, every mutator keeps it at its own timestamp, and time only lowers the pile.
+//     constructor starts the pile at zero and the mark at the genesis seed, every mutator keeps it at its own timestamp,
+//     and time only lowers the pile.
 // Without the first two the counterexamples began at timestamp 2^255. Without the third they began with a pile k wei
-// past a mark equal to gross, the state the vest cap now refuses to write. A fourth premise, the
-// redemption queue's escrow, went with the queue.
+// past a mark equal to gross, a state the floored vest basis can no longer write: a stamp reads back exactly the pile
+// plus its rise, which the mark takes too. A fourth premise, the redemption queue's escrow, went with the
+// queue, and SUPPLY CONSISTENCY stands in its place: the caller's balance plus the vault's own within the supply,
+// in `VaultBoundary`'s form (). Without it an exit FAILED from shares outside the supply:
+// a redeem burning more than the whole supply, and a claimExit where supply plus VIRTUAL_SHARES sat under the vault's
+// own balance. Each paid more than NAV, which `_assetsAt` allows only for such shares. A spender
+// then still redeemed and withdrew for an OWNER holding more than the supply, so those two verbs have their own rules with
+// the owner named and bounded, in `VaultBoundary`'s `transferFrom` form.
 
 using DummyERC20 as token;
 using AceLenderView as hub;
@@ -43,6 +52,7 @@ methods {
     function MIN_VEST_WINDOW() external returns (uint64) envfree;
     function MAX_VEST_WINDOW() external returns (uint64) envfree;
     function totalSupply() external returns (uint256) envfree;
+    function balanceOf(address) external returns (uint256) envfree;
     function navMark() external returns (uint256) envfree; // the harness getter: a raw read fails under via-IR
     function unvested() external returns (uint256); // reads the clock, so it takes an env
 
@@ -61,6 +71,7 @@ function aReachableStart(env e) {
     require PERF_FEE_BPS() <= MAX_PERF_FEE_BPS();
     require VEST_WINDOW() >= MIN_VEST_WINDOW() && VEST_WINDOW() <= MAX_VEST_WINDOW();
     require unvested(e) <= navMark(); // proven by pileStaysWithinMark and pileOnlyDecays
+    require balanceOf(e.msg.sender) + balanceOf(currentContract) <= to_mathint(totalSupply()); // the lemma's own premise
 }
 
 function mdExact(uint256 x, uint256 y, uint256 d, bool up) returns uint256 {
@@ -78,17 +89,55 @@ function mdExactRounded(uint256 x, uint256 y, uint256 d, Math.Rounding r) return
 // ---- the pile-within-mark lemma, which the split rules' start state assumes ----
 
 // Every mutator, run at time t from a state whose pile at t is within the mark, leaves the pile at t within the mark.
-// The stamp is capped at the gross it observed, a fall floors, an exit pays at most NAV, and a deposit lifts both sides.
-rule pileStaysWithinMark(env e, method f, calldataarg args) filtered { f -> !f.isView } {
+// A stamp reads back exactly the pile plus the rise the mark takes, a fall floors, an exit pays at most NAV, and a deposit lifts both sides.
+// `redeem` and `withdraw` burn an OWNER's shares, who may not be the caller, so each has its own rule below with the owner named.
+rule pileStaysWithinMark(env e, method f, calldataarg args) filtered {
+    f -> !f.isView && f.selector != sig:redeem(uint256, address, address).selector
+        && f.selector != sig:withdraw(uint256, address, address).selector
+} {
     require e.msg.sender != currentContract;
     require e.block.timestamp > 0 && e.block.timestamp + VEST_WINDOW() < 2^64;
     require PERF_FEE_BPS() <= MAX_PERF_FEE_BPS();
     require VEST_WINDOW() >= MIN_VEST_WINDOW() && VEST_WINDOW() <= MAX_VEST_WINDOW();
     require unvested(e) <= navMark();
+    require balanceOf(e.msg.sender) + balanceOf(currentContract) <= to_mathint(totalSupply()); //
 
     f(e, args);
 
     assert unvested(e) <= navMark(), "a mutator left the vest pile past the NAV mark";
+}
+
+// The same step for `redeem`, its owner named, as `VaultBoundary` names `transferFrom`'s payer. A spender burns the owner's
+// shares, so the supply bound must hold for that owner: without it a spender burned more than the whole supply and paid past NAV.
+rule pileStaysWithinMarkOnRedeem(env e, uint256 shares, address receiver, address owner) {
+    require e.msg.sender != currentContract;
+    require e.block.timestamp > 0 && e.block.timestamp + VEST_WINDOW() < 2^64;
+    require PERF_FEE_BPS() <= MAX_PERF_FEE_BPS();
+    require VEST_WINDOW() >= MIN_VEST_WINDOW() && VEST_WINDOW() <= MAX_VEST_WINDOW();
+    require unvested(e) <= navMark();
+    require balanceOf(e.msg.sender) + balanceOf(currentContract) <= to_mathint(totalSupply()); //
+    require owner == currentContract || balanceOf(owner) + balanceOf(currentContract) <= to_mathint(totalSupply());
+    require balanceOf(currentContract) <= totalSupply();
+
+    redeem(e, shares, receiver, owner);
+
+    assert unvested(e) <= navMark(), "a redeem left the vest pile past the NAV mark";
+}
+
+// The same step for `withdraw`, its owner named.
+rule pileStaysWithinMarkOnWithdraw(env e, uint256 assets, address receiver, address owner) {
+    require e.msg.sender != currentContract;
+    require e.block.timestamp > 0 && e.block.timestamp + VEST_WINDOW() < 2^64;
+    require PERF_FEE_BPS() <= MAX_PERF_FEE_BPS();
+    require VEST_WINDOW() >= MIN_VEST_WINDOW() && VEST_WINDOW() <= MAX_VEST_WINDOW();
+    require unvested(e) <= navMark();
+    require balanceOf(e.msg.sender) + balanceOf(currentContract) <= to_mathint(totalSupply()); //
+    require owner == currentContract || balanceOf(owner) + balanceOf(currentContract) <= to_mathint(totalSupply());
+    require balanceOf(currentContract) <= totalSupply();
+
+    withdraw(e, assets, receiver, owner);
+
+    assert unvested(e) <= navMark(), "a withdraw left the vest pile past the NAV mark";
 }
 
 // With storage fixed, the pile read later is never larger: time between two verbs cannot lift it past the mark.

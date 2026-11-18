@@ -7,6 +7,7 @@ import {Ace} from "../../src/ace/hub/Ace.sol";
 import {PositionTitleNFT} from "../../src/ace/positions/PositionTitleNFT.sol";
 import {Loan, MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {NotBorrower, NotPositionTitle, RetitleToZero} from "../../src/ace/hub/Ace.sol";
+import {ExtensionTooEarly} from "../../src/ace/hub/Borrower.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockStakeVault} from "../mocks/MockStakeVault.sol";
@@ -239,16 +240,16 @@ contract AcePositionTransferTest is Test {
         uint256 id = _open(seller);
         _transfer(id, seller, buyer);
 
-        vm.startPrank(seller);
+        vm.prank(seller);
         vm.expectRevert(NotBorrower.selector);
         ace.withdrawCollateral(id, 1e18, seller);
-        vm.expectRevert(NotBorrower.selector);
-        ace.extend(id, 0, "");
-        vm.stopPrank();
 
-        AceFixtures.installYesPolicy(ace, alice); // so the new holder's extension is refused by nothing but its caller leg
+        AceFixtures.installYesPolicy(ace, alice); // so an extension a day in is refused by nothing but the non-holder rule
         usdc.mint(buyer, FEE_FLOAT);
         vm.warp(vm.getBlockTimestamp() + 1 days); // past the open second, which an extension adds nothing in
+        vm.prank(seller);
+        vm.expectRevert(ExtensionTooEarly.selector);
+        ace.extend(id, 0, "");
         vm.startPrank(buyer);
         usdc.approve(address(ace), FEE_FLOAT);
         ace.extend(id, 0, "");

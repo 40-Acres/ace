@@ -68,7 +68,7 @@ contract AceP8CaptureTest is WarpClock {
     function _params() internal view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(usdc), address(coll));
         p.record = address(record);
-        p.baseBps = 40;
+        p.lenderAprBps = 40;
         p.minTenor = TEN7;
         p.maxTenor = TEN7;
         p.settleBountyBps = 50;

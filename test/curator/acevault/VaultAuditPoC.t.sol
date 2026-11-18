@@ -7,7 +7,7 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {PolicyRefused} from "../../../src/ace/hub/Borrower.sol";
 import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
 import {Loan, MarketParams} from "../../../src/ace/hub/Types.sol";
-import {Row} from "../../../src/curator/CuratorVault.sol";
+import {CuratorTerms, Row} from "../../../src/entities/curated/CuratorTerms.sol";
 import {PriceGrid} from "../../../src/curator/PriceGrid.sol";
 import {_extended} from "../../utils/Extended.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
@@ -26,7 +26,7 @@ contract VaultAuditPoCTest is AceVaultRig {
     function _fundFee() internal {
         Loan memory l = read.loan(loanId);
         MarketParams memory mp = ace.idToMarketParams(l.market);
-        uint256 fee = LoanMath.originationFee(l.debt, uint64(_now()) + l.tenor - l.expiry, mp.baseBps, mp.minTenor);
+        uint256 fee = LoanMath.originationFee(l.debt, uint64(_now()) + l.tenor - l.expiry, mp.lenderAprBps);
         usdc.mint(borrower, fee);
         vm.prank(borrower);
         usdc.approve(address(ace), fee);
@@ -62,16 +62,17 @@ contract VaultAuditPoCTest is AceVaultRig {
 
     /// @dev Re-list the rig's collateral on `r` through the timelock.
     function _relist(Row memory r) internal {
+        CuratorTerms t = _terms(vault);
         vm.prank(curator);
-        vault.submitCollateral(address(coll), r);
+        t.submitCollateral(address(coll), r);
         _warpBy(TIMELOCK);
-        vault.accept(address(coll));
+        t.accept(address(coll));
     }
 
     /// @notice V-2: a rate edit on the same record stops the vault's policy admitting an extension of a loan on the old terms.
     function test_V2_ARateEditStopsTheOldTermsExtension() public {
-        Row memory r = _row(address(record), type(uint192).max);
-        r.baseBps = 2 * RATE_BPS;
+        Row memory r = _row(address(record));
+        r.lenderAprBps = 2 * RATE_BPS;
         _relist(r);
         _toWindow(loanId);
         _expectRefused();
@@ -79,7 +80,7 @@ contract VaultAuditPoCTest is AceVaultRig {
 
     /// @notice V-2: a shorter tenor ceiling on the same record stops the vault's policy admitting an extension of a loan on the old terms.
     function test_V2_ATenorEditStopsTheOldTermsExtension() public {
-        Row memory r = _row(address(record), type(uint192).max);
+        Row memory r = _row(address(record));
         r.maxTenor = MAX_TENOR - 1 days;
         _relist(r);
         _toWindow(loanId);
@@ -88,7 +89,7 @@ contract VaultAuditPoCTest is AceVaultRig {
 
     /// @notice V-2 control: a buffer-only edit still lets the loan extend in place, since the record test already judges the price.
     function test_V2_Control_ABufferOnlyEditKeepsTheExtension() public {
-        Row memory r = _row(address(record), type(uint192).max);
+        Row memory r = _row(address(record));
         r.bufferBps = 3000;
         _relist(r);
         _toWindow(loanId);

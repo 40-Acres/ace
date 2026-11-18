@@ -46,9 +46,10 @@ contract AceRefinanceTest is WarpClock {
     uint256 internal constant COLL = 100_000e18;
     uint256 internal constant FLOAT = 1_000_000e6;
 
-    uint256 internal constant FEE30 = 1_320e6; // the borrower's ALL-IN: 40 bps to the lender, 10% on top
-    uint256 internal constant REFUND30_AT15 = 300e6; // half the escrow, which is phi of the 1,200 lender share
-    uint256 internal constant TOPUP_AT15 = 1_020e6; // the repay gap the composition covers: FEE30 - REFUND30_AT15 at P_new == D_old
+    uint256 internal constant RATE = 2190; // bps a year to the lender: 6 a day, so every figure below is exact
+    uint256 internal constant FEE30 = 1_386e6; // the borrower's ALL-IN: 2190 bps a year to the lender, 10% on top
+    uint256 internal constant REFUND30_AT15 = 315e6; // half the escrow, which is phi of the 1,260 lender share
+    uint256 internal constant TOPUP_AT15 = 1_071e6; // the repay gap the composition covers: FEE30 - REFUND30_AT15 at P_new == D_old
 
     uint256 internal T; // ticks above this pair's par; assigned in setUp, since par is not a compile-time value
     uint256 internal DEEP;
@@ -91,6 +92,7 @@ contract AceRefinanceTest is WarpClock {
         p.record = address(record);
         p.minTenor = TEN7;
         p.maxTenor = TEN30;
+        p.lenderAprBps = RATE;
     }
 
     function _deposit(address who, uint256 amt) internal {
@@ -137,7 +139,7 @@ contract AceRefinanceTest is WarpClock {
     /// @dev The same shortfall on a named market, for rows that build their own.
     function _gapIn(bytes32 mid, uint256 oldId, uint256 principal, uint64 tenor) internal view returns (uint256) {
         MarketParams memory p = ace.idToMarketParams(mid);
-        uint256 feeNew = LoanMath.originationFee(principal, tenor, p.baseBps, p.minTenor);
+        uint256 feeNew = LoanMath.originationFee(principal, tenor, p.lenderAprBps);
         uint256 credit = principal - feeNew + read.earlyExitRefund(oldId);
         uint256 debtOld = read.loan(oldId).debt;
         return credit >= debtOld ? 0 : debtOld - credit;
@@ -220,8 +222,8 @@ contract AceRefinanceTest is WarpClock {
 
         assertEq(quote0 - usdc.balanceOf(borrower), TOPUP_AT15, "one net movement: fee_new less refund_old");
         assertEq(esc.feeEscrowOf(oldId), 0, "the old escrow is settled and cleared");
-        assertEq(esc.feeEscrowOf(newId), 600e6, "and the new loan gets a fresh full-term escrow");
-        assertEq(_pot(), 600e6, "the hub holds exactly the new loan's escrow");
+        assertEq(esc.feeEscrowOf(newId), 630e6, "and the new loan gets a fresh full-term escrow");
+        assertEq(_pot(), 630e6, "the hub holds exactly the new loan's escrow");
     }
 
     /// @notice Plan test 21: the borrower moves the NET, never the gross legs.
@@ -395,14 +397,14 @@ contract AceRefinanceTest is WarpClock {
     function test_Refinance_Repeated_ChargesAFreshFeeEachTime() public {
         uint256 rev0 = read.protocolRevenue(id);
         uint256 a = _open(P, TEN30);
-        assertEq(read.protocolRevenue(id) - rev0, 120e6, "fixture: the first open banked one protocol cut");
+        assertEq(read.protocolRevenue(id) - rev0, 126e6, "fixture: the first open banked one protocol cut");
 
         _warpTo(t0 + 15 days);
         uint256 b = _refiViaMulticall(a, P, TEN30);
         _warpTo(t0 + 30 days);
         uint256 c = _refiViaMulticall(b, P, TEN30);
 
-        assertEq(read.protocolRevenue(id) - rev0, 360e6, "three originations, three protocol cuts");
+        assertEq(read.protocolRevenue(id) - rev0, 378e6, "three originations, three protocol cuts");
         assertGt(c, b, "and three distinct loans");
     }
 

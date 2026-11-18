@@ -40,8 +40,8 @@ contract AceAllInFeeNettingTest is WarpClock {
     uint256 internal constant PS = Constants.PROTOCOL_SHARE_BPS;
     uint64 internal constant TEN7 = 7 days;
     uint64 internal constant TEN30 = 30 days;
-    uint256 internal constant BASE_BPS_A = 40; // the launch rung: 40 bps to the LENDER per shortest term
-    uint256 internal constant BASE_BPS_B = 80; // twice A's, so the two markets price the same debt differently
+    uint256 internal constant BASE_BPS_A = 2190; // the launch rung: 2190 bps a year to the LENDER, 6 a day
+    uint256 internal constant BASE_BPS_B = 4380; // twice A's, so the two markets price the same debt differently
 
     uint256 internal constant P = 10_000e6;
     uint256 internal constant COLL = 100_000e18;
@@ -75,7 +75,7 @@ contract AceAllInFeeNettingTest is WarpClock {
 
         uint256 refundOld = read.earlyExitRefund(loanId);
         assertGt(refundOld, 0, "fixture: a mid-term roll must carry an unearned escrow");
-        uint256 pExact = AllInFeeSpec.principalForOwed(read.debtOf(loanId) - refundOld, TEN30, BASE_BPS_A, TEN7, PS);
+        uint256 pExact = AllInFeeSpec.principalForOwed(read.debtOf(loanId) - refundOld, TEN30, BASE_BPS_A, PS);
 
         vm.prank(borrower);
         vm.expectRevert(DrawBelowDebt.selector);
@@ -101,7 +101,7 @@ contract AceAllInFeeNettingTest is WarpClock {
         uint256 refund = read.earlyExitRefund(loanId);
         assertLe(refund, read.feeEscrowOf(loanId) / TEN30, "fixture: one second of calendar time is left to rebate");
         uint256 debtOld = read.debtOf(loanId);
-        uint256 pExact = AllInFeeSpec.principalForOwed(debtOld - refund, TEN30, BASE_BPS_A, TEN7, PS);
+        uint256 pExact = AllInFeeSpec.principalForOwed(debtOld - refund, TEN30, BASE_BPS_A, PS);
 
         vm.prank(borrower);
         vm.expectRevert(DrawBelowDebt.selector);
@@ -119,15 +119,15 @@ contract AceAllInFeeNettingTest is WarpClock {
     }
 
     /// @notice A boundary priced at the SOURCE market's rate is refused when the destination charges more.
-    /// @notice The netting reads the DESTINATION's `baseBps`, and this is the case that tells the two apart.
+    /// @notice The netting reads the DESTINATION's `lenderAprBps`, and this is the case that tells the two apart.
     /// @dev A migration that carried the source's fee would open here and leave the hub short by the difference.
     function test_TheManualBoundary_CrossMarket_IsPricedByTheDestination() public {
         uint256 loanId = _open(idA, P, TEN30);
         _warpBy(15 days);
 
         uint256 owed = read.debtOf(loanId) - read.earlyExitRefund(loanId);
-        uint256 pSource = AllInFeeSpec.principalForOwed(owed, TEN30, BASE_BPS_A, TEN7, PS);
-        uint256 pDest = AllInFeeSpec.principalForOwed(owed, TEN30, BASE_BPS_B, TEN7, PS);
+        uint256 pSource = AllInFeeSpec.principalForOwed(owed, TEN30, BASE_BPS_A, PS);
+        uint256 pDest = AllInFeeSpec.principalForOwed(owed, TEN30, BASE_BPS_B, PS);
         assertGt(pDest, pSource, "fixture: B must charge more, or the two boundaries cannot be told apart");
 
         vm.prank(borrower);
@@ -156,8 +156,8 @@ contract AceAllInFeeNettingTest is WarpClock {
         _warpTo(uint256(read.loan(loanId).expiry) - 1 hours);
 
         uint256 owed = read.debtOf(loanId) - read.earlyExitRefund(loanId);
-        uint256 derived = RefinanceMath.principalForOwed(owed, TEN7, BASE_BPS_A, TEN7);
-        assertEq(derived, AllInFeeSpec.principalForOwed(owed, TEN7, BASE_BPS_A, TEN7, PS), "fixture: the library and the spec agree");
+        uint256 derived = RefinanceMath.principalForOwed(owed, TEN7, BASE_BPS_A);
+        assertEq(derived, AllInFeeSpec.principalForOwed(owed, TEN7, BASE_BPS_A, PS), "fixture: the library and the spec agree");
 
         vm.prank(borrower);
         vm.expectRevert(DrawBelowDebt.selector);
@@ -179,7 +179,7 @@ contract AceAllInFeeNettingTest is WarpClock {
         uint256 loanId = _open(idA, P, TEN30);
         _warpBy(bound(elapsedSeed, 0, uint256(TEN30) - 1));
 
-        uint256 pExact = AllInFeeSpec.principalForOwed(read.debtOf(loanId) - read.earlyExitRefund(loanId), TEN30, BASE_BPS_A, TEN7, PS);
+        uint256 pExact = AllInFeeSpec.principalForOwed(read.debtOf(loanId) - read.earlyExitRefund(loanId), TEN30, BASE_BPS_A, PS);
 
         vm.prank(borrower);
         vm.expectRevert(DrawBelowDebt.selector);
@@ -239,7 +239,7 @@ contract AceAllInFeeNettingTest is WarpClock {
         assertEq(ret.length, 6 * 32, "the quote must be exactly six words");
 
         (uint256 w0, uint256 w1, uint256 w2, uint256 w3, uint256 w4, uint256 w5) = abi.decode(ret, (uint256, uint256, uint256, uint256, uint256, uint256));
-        assertEq(w0, AllInFeeSpec.feeAllIn(P, TEN30, BASE_BPS_A, TEN7, PS), "word 0 must still be the all-in fee");
+        assertEq(w0, AllInFeeSpec.feeAllIn(P, TEN30, BASE_BPS_A, PS), "word 0 must still be the all-in fee");
         assertEq(w1, P - w0, "word 1 must still be the payout");
         assertEq(w3, _trigger(P), "word 3 must still be the trigger at open");
         assertEq(w4, ((w2 - w3) * 1e18) / w2, "word 4 must still be the buffer measured against word 2");
@@ -291,14 +291,14 @@ contract AceAllInFeeNettingTest is WarpClock {
     }
 
     /// @dev The all-in this market charges, from the record's spelling rather than the hub's.
-    function _allIn(uint256 principal, uint256 baseBps) private pure returns (uint256) {
-        return AllInFeeSpec.feeAllIn(principal, TEN30, baseBps, TEN7, PS);
+    function _allIn(uint256 principal, uint256 lenderAprBps) private pure returns (uint256) {
+        return AllInFeeSpec.feeAllIn(principal, TEN30, lenderAprBps, PS);
     }
 
-    function _params(uint256 baseBps) private view returns (MarketParams memory p) {
+    function _params(uint256 lenderAprBps) private view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(record);
-        p.baseBps = baseBps;
+        p.lenderAprBps = lenderAprBps;
         p.minTenor = TEN7;
         p.maxTenor = TEN30;
     }

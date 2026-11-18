@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {Lender} from "../../src/ace/hub/Lender.sol";
 
 /// @title CuratorVaultExitLanding
@@ -21,7 +21,7 @@ contract CuratorVaultExitLandingTest is CuratorVaultBase {
         uint256 callerCash;
     }
 
-    function _snap(CuratorVault v, address caller) internal view returns (Snap memory s) {
+    function _snap(AceVault v, address caller) internal view returns (Snap memory s) {
         s.gross = v.grossNav();
         s.total = v.totalAssets();
         s.position = ace.lenderAssets(address(v), address(usdc));
@@ -31,7 +31,7 @@ contract CuratorVaultExitLandingTest is CuratorVaultBase {
 
     /// @notice `crank` brings the vault's whole pool home into its own balance: the pool empties, the cash rises by it, NAV-neutral.
     function test_Crank_BringsThePoolHomeInPlaceAndMovesNoNav() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         _repay(_open(1_000e6), 300e6); // partial: the credit pools for the vault and nothing closes, so nothing pushes it
         uint256 owed = ace.lenderOwed(address(v), address(usdc));

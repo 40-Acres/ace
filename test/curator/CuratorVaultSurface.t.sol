@@ -3,28 +3,13 @@ pragma solidity 0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault, Listing, Row} from "../../src/curator/CuratorVault.sol";
 import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
+import {CapListing, ProductConfig} from "../../src/curator/AceVaultCaps.sol";
+import {CuratorTerms, Listing, Row} from "../../src/entities/curated/CuratorTerms.sol";
+import {CuratedVaults} from "../utils/CuratedVaults.sol";
 import {PocDeployConfig} from "../../src/config/Defaults.sol";
 import {PriceFrame} from "../utils/PriceFrame.sol";
 import {MockStakeVault} from "../mocks/MockStakeVault.sol";
-
-/// @notice A vault whose NAV can be nudged with no collection behind it, so a fee is genuinely pending.
-/// @dev Every shipped verb that moves NAV ends in `_collectFeeAt`, so nothing in-band leaves one outstanding.
-/// @dev That is a property of the CALLER SET, not of the preview arithmetic, which is why it is pinned here.
-contract GrownNavVault is CuratorVault {
-    uint256 public extra;
-
-    constructor(VaultConfig memory cfg, Listing[] memory listings) CuratorVault(cfg, 10e6, 1.4e18, 1 days, listings, "Grown", "cGROW") {}
-
-    function grow(uint256 amount) external {
-        extra += amount;
-    }
-
-    function totalAssets() public view override returns (uint256) {
-        return super.totalAssets() + extra;
-    }
-}
 
 /// @title CuratorVaultSurface
 /// @notice Every external verb's guards, the freshness gate in both directions, and the D1 inversion.
@@ -42,7 +27,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
     /// @dev Twelve positions: more than a single touch window, which is the whole point of the rig.
     /// @dev A position is a LOAN -- one market, one price, one claim -- so twelve positions is twelve door loans,
     /// @dev and the LAST is the one returned.
-    function _wide(CuratorVault v) internal returns (uint256 loanId) {
+    function _wide(AceVault v) internal returns (uint256 loanId) {
         _lpDeposit(v, alice, 12 * 500e6 + 6_000e6);
         for (uint256 i; i < 12; i++) {
             loanId = _open(500e6);
@@ -55,9 +40,10 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
 
     function testRevert_Constructor_PerfFeeOutOfBounds() public {
         VaultConfig memory cfg = _cfg(5001);
-        Listing[] memory l = _listing(); // built first: it deploys a record, and that call would spend the expectation
+        // built first: the record and the terms are creates, and either would spend the expectation
+        (ProductConfig memory pc, CapListing[] memory c) = CuratedVaults.prepared(cfg, _curated(), _listing());
         vm.expectRevert(AceVault.PerfFeeOutOfBounds.selector);
-        new CuratorVault(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, "Curator", "cVLT");
+        new AceVault(cfg, pc, c, "Curator", "cVLT");
     }
 
     /// @notice A ZERO CURATOR IS REFUSED AT CONSTRUCTION: on a fee vault the first chargeable collection would mint to it and revert.
@@ -65,14 +51,14 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
     function testRevert_Constructor_ZeroCurator() public {
         VaultConfig memory cfg = _cfg(2000);
         cfg.curator = address(0);
-        Listing[] memory l = _listing();
+        (ProductConfig memory pc, CapListing[] memory c) = CuratedVaults.prepared(cfg, _curated(), _listing());
         vm.expectRevert(AceVault.ZeroCurator.selector);
-        new CuratorVault(cfg, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, "Curator", "cVLT");
+        new AceVault(cfg, pc, c, "Curator", "cVLT");
     }
 
     /// @dev A crank with nothing to sweep is a NO-OP, not a refusal: there is no batch shape left to get wrong.
     function test_Crank_WithNothingToSweepIsANoOp() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 gross = v.grossNav();
         v.crank();
         assertEq(v.grossNav(), gross, "an empty sweep moved nothing and reverted nothing");
@@ -81,7 +67,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
     /// @dev The crank is idempotent: a second call books nothing and reverts nothing.
     /// @dev RENAMED from `..._IsIdempotentPerClassLot`: there is no (class, lot) coordinate left to key it on.
     function test_Register_IsIdempotent() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(DRAW);
 
@@ -100,7 +86,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
     /// @dev T31: nothing about elapsed time may stand between an LP and their cash, in either direction.
     /// @dev Was `test_Withdraw_IsFreshnessGatedAndCrankClears`: there is no clock left to gate on.
     function test_Withdraw_IsNeverTimeGated() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _wide(v);
         _warpBy(3 days);
 
@@ -119,7 +105,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
     /// @dev The old law -- exit before the sync and take the stale price -- required a mark that lagged down.
     /// @dev What is left is the opposite guarantee: the unsynced price is never the BETTER one to exit at.
     function test_Withdraw_ASettlementIsPricedBeforeAnybodySyncs() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _wide(v);
         uint256 grossBefore = v.grossNav();
         _finalize(loanId);
@@ -139,7 +125,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
     /// @dev A crank with nothing to sweep is a NO-OP, and a fresh, all-idle vault still takes deposits after it.
     /// @dev The row survives because the SECOND half was always the point: a no-op must not wedge entry.
     function test_Sweep_AnEmptyCrankIsInertAndAnIdleVaultStillTakesCapital() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _warpBy(3 days);
         uint256 navBefore = v.grossNav();
         v.crank();
@@ -153,7 +139,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
     /// @dev T37, the surviving half: the exit is CASH and carries no title, donated or earned.
     /// @dev What still needs pinning is the part that never depended on a gift: an exit moves no unit.
     function test_Exit_CarriesNoTitleOfAnyKind() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(DRAW);
 
@@ -179,7 +165,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
     /// @dev The vest is what defends it: the rise is deferred, so the share price does not move in the block,
     /// @dev and entry shuts while a pile over `GATE_BPS` of NAV stands.
     function test_Inflation_ADonationIsCountedAndVests() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 navBefore = v.totalAssets();
         uint256 grossBefore = v.grossNav();
@@ -204,7 +190,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
     /// @dev The full inflate-then-donate sequence: the attacker cannot profit off the next depositor.
     /// @dev The donation is counted and vests, so the victim waits out the gate; after it the 1e6 virtual offset still protects her.
     function test_Inflation_InflateThenDonate_NoProfit() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         // the one-wei open is ADMITTED, so the virtual offset is the whole defence and must carry it alone
         usdc.mint(bob, MIN_DEP);
         vm.startPrank(bob);
@@ -233,7 +219,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
 
     /// @dev The virtual offset is a named security parameter, so pin its magnitude, not just its effect.
     function test_Inflation_VirtualOffsetMagnitudeIsPinned() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         assertEq(v.previewDeposit(1), 1e6, "a fresh vault prices the first wei at the 1e6 offset");
         assertEq(v.previewDeposit(0), 0, "and zero assets still mint zero shares");
         _lpDeposit(v, alice, SEED);
@@ -246,14 +232,14 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
     /// @dev `previewWithdraw` does not, by the ladder's CEIL, and its repro is held outside this repository with the
     /// @dev entry pair's larger break on a fall -- one cause, two magnitudes, and neither is pinned as law.
     function test_Views_TheSyncInsideAVerbNeverMovesThePriceAgainstItsCaller_OnARise() public {
-        CuratorVault a = _newVault(0);
+        AceVault a = _newVault(0);
         _pendingRise(a);
         uint256 promisedShares = a.previewDeposit(ENTRY);
         uint256 minted = _lpDeposit(a, bob, ENTRY);
         assertGe(minted, promisedShares, "a deposit mints no fewer shares than previewDeposit quoted");
         assertLe(a.convertToAssets(minted), ENTRY, "and the entrant rounded no value out of the stayers");
 
-        CuratorVault b = _newVault(0);
+        AceVault b = _newVault(0);
         _lpDeposit(b, bob, SEED); // a second holder, so alice is not the last free one an instant exit refuses over the rise
         _pendingRise(b);
         uint256 sh = b.balanceOf(alice) / 8;
@@ -263,7 +249,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
         vm.prank(alice);
         assertGe(b.redeem(sh, alice, alice), promisedAssets, "a redeem pays no fewer assets than previewRedeem quoted");
 
-        CuratorVault c = _newVault(0);
+        AceVault c = _newVault(0);
         _pendingRise(c);
         uint256 promisedPull = c.previewMint(WANT);
         usdc.mint(bob, promisedPull);
@@ -279,13 +265,13 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
     /// @dev THE ENTRY LEG'S 4626 DIRECTION DOES NOT SURVIVE THAT and is held as a repro outside this repository, NOT here.
     /// @dev What is pinned here is the half that holds: no caller rounds value out, and the exit is honest.
     function test_Views_TheSyncInsideAVerbNeverMovesThePriceAgainstItsCaller_OnAFall() public {
-        CuratorVault a = _newVault(0);
+        AceVault a = _newVault(0);
         _pendingFallUnderALadder(a);
         assertGt(a.unvested(), 0, "fixture: a ladder the loss has not yet retired is still standing");
         uint256 minted = _lpDeposit(a, bob, ENTRY);
         assertLe(a.convertToAssets(minted), ENTRY, "the entrant rounded no value out of the stayers");
 
-        CuratorVault b = _newVault(0);
+        AceVault b = _newVault(0);
         _pendingFallUnderALadder(b);
         uint256 heldB = b.balanceOf(alice); // BEFORE the prank: a read is a call, and a call would eat it
         uint256 promisedAssets = b.convertToAssets(heldB); // the unsynced quote, taken before the verb
@@ -298,7 +284,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
 
     /// @dev A clean close nobody has synced yet: gross is above the mark and the ladder has not seen it.
     /// @dev Twice the seed goes in and less than half of it is lent, so the exit legs have idle to be served from.
-    function _pendingRise(CuratorVault v) internal returns (uint256 loanId) {
+    function _pendingRise(AceVault v) internal returns (uint256 loanId) {
         _lpDeposit(v, alice, 2 * SEED);
         loanId = _open(DRAW);
         _crank(v, loanId, T2, 0);
@@ -308,7 +294,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
 
     /// @dev A ladder standing from an earlier arrival, then an unsynced settlement big enough to burn it.
     /// @dev A fall of about four percent, large enough that it still burns past the ladder.
-    function _pendingFallUnderALadder(CuratorVault v) internal {
+    function _pendingFallUnderALadder(AceVault v) internal {
         _pendingRise(v);
         _crankAll(v); // banks the repayment AND stamps the arrival on the ladder in one sync
         assertGt(v.unvested(), 0, "fixture: a ladder is standing");
@@ -323,7 +309,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
 
     /// @dev previewDeposit must never promise MORE shares than deposit mints in the same transaction.
     function test_Preview_DepositIsNeverOptimistic() public {
-        CuratorVault v = _newVault(2000);
+        AceVault v = _newVault(2000);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(DRAW);
         _crank(v, loanId, T2, 0);
@@ -336,7 +322,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
 
     /// @dev With nothing left to crank and the fee already taken, the preview must be EXACT.
     function test_Preview_IsExactOnceTheFeeIsCollected() public {
-        CuratorVault v = _newVault(2000);
+        AceVault v = _newVault(2000);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(DRAW);
         _crank(v, loanId, T2, 0);
@@ -352,12 +338,19 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
         assertEq(actual, promised, "and the preview priced it exactly");
     }
 
+    /// @dev A rise that finished vesting with no verb since leaves a fee genuinely outstanding: the in-band state the previews must price.
+    function _grow(AceVault v, uint256 amount) internal {
+        _gift(v, amount);
+        v.crank(); // stamps the rise into the vest; its collection sees NAV still at the high-water
+        _warpBy(VEST_W);
+    }
+
     /// @dev The previews price the fee the entry ITSELF collects, so that term is arithmetic, not a guard.
     function test_Preview_PricesTheFeeTheDepositItselfCollects() public {
-        GrownNavVault v = new GrownNavVault(_cfg(2000), _listing());
+        AceVault v = _newVault(2000);
         _lpDeposit(v, alice, SEED);
         v.collectFee(); // at NAV, a no-op: the first deposit stamped the high-water at its cash
-        v.grow(1_000e6);
+        _grow(v, 1_000e6);
 
         uint256 pending = v.pendingFeeShares();
         assertGt(pending, 0, "a fee really is outstanding at the moment of the quote");
@@ -374,8 +367,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
     /// @dev Two vaults, one identical growth: only the one still under its pre-loss mark reads zero.
     /// @dev Replaces `test_PendingFeeShares_IsNetOfTheDiversion` on the same fixture, new mechanism.
     function test_PendingFeeShares_IsZeroUnderTheHighWaterMark() public {
-        GrownNavVault impaired = new GrownNavVault(_cfg(2000), _listing());
-        mid = _doorMarket(impaired, address(collateral)); // it lends for real, through its own door
+        AceVault impaired = _newVault(2000); // it lends for real, through its own door
         _lpDeposit(impaired, alice, SEED);
         uint256 loanId = _open(DRAW);
         _crank(impaired, loanId, T2, 0);
@@ -385,11 +377,14 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
         _crankAll(impaired);
         assertEq(impaired.feeHighWater(), mark, "and the write-off left it exactly there");
 
-        GrownNavVault healthy = new GrownNavVault(_cfg(2000), _listing());
+        AceVault healthy = _newVault(2000);
         _lpDeposit(healthy, alice, SEED);
         healthy.collectFee(); // at NAV, a no-op: the deposit stamped the high-water, so the two vaults are comparable
-        impaired.grow(1_000e6);
-        healthy.grow(1_000e6);
+        _gift(impaired, 1_000e6);
+        _gift(healthy, 1_000e6);
+        impaired.crank();
+        healthy.crank();
+        _warpBy(VEST_W); // both rises vest with no verb since, so whatever fee they owe is outstanding
 
         assertGt(healthy.pendingFeeShares(), 0, "the same growth is a real fee on a vault sitting at its mark");
         assertLt(impaired.totalAssets(), mark, "the impaired one is under it");
@@ -398,7 +393,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
 
     /// @dev previewMint must never promise FEWER assets than mint actually pulls.
     function test_Preview_MintIsNeverOptimistic() public {
-        CuratorVault v = _newVault(2000);
+        AceVault v = _newVault(2000);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(DRAW);
         _crank(v, loanId, T2, 0);
@@ -421,30 +416,30 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
     /// @dev A borrow on a collateral with no live row is refused; a row naming an arbitrary record is admitted once it waits the timelock.
     /// @dev The disclosure is the row itself: `rowOf` names the record the door prices off.
     function test_Envelope_GatesTokenNotOracle() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
 
         MockStakeVault other = new MockStakeVault(43);
         other.mint(borrower, COLL);
         vm.startPrank(borrower);
         other.approve(address(v), COLL);
-        vm.expectRevert(CuratorVault.NotListed.selector);
+        vm.expectRevert(CuratorTerms.NotListed.selector);
         v.borrow(_request(address(other), COLL, 1_000e6), "", "");
         vm.stopPrank();
 
         Row memory row = _list(v, address(other)); // a fresh record: an arbitrary oracle the curator chose
         uint256 loanId = _borrowOn(v, address(other), 1_000e6);
         assertEq(ace.idToMarketParams(ace.loanMarket(loanId)).record, row.record, "an arbitrary record is admitted: the table reads the TOKEN");
-        assertEq(v.rowOf(address(other)).record, row.record, "and the row discloses the record it prices off");
+        assertEq(_terms(v).rowOf(address(other)).record, row.record, "and the row discloses the record it prices off");
     }
 
     /// @dev The other end of the same deletion: the vault's own entry minimum went with `MIN_DEPOSIT`,
     /// @dev so the virtual offset is now the WHOLE first-depositor defence and has to carry it alone.
     function test_Entry_ADustDepositIsAdmittedAndTheOffsetStillPricesIt() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 first = _lpDeposit(v, bob, 1);
         assertEq(first, 1e6, "the one-wei open mints exactly the 1e6 virtual offset, and no more");
-        assertEq(v.idle(), 1, "and the wei really did land in the vault");
+        assertEq(v.idle(), 1 + v.MIN_SEED(), "and the wei really did land in the vault beside the seed");
 
         uint256 victim = _lpDeposit(v, alice, 5_000e6);
         assertGt(victim, 0, "a real depositor after it is not rounded to nothing");
@@ -455,7 +450,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
 
     /// @dev The hub exposes exactly the members the vault is compiled against; the lens legs pin the reader surface.
     function test_InterfaceParity_SelectorsPinned() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(DRAW);
 
@@ -474,7 +469,7 @@ contract CuratorVaultSurfaceTest is CuratorVaultBase {
     /// @dev Repeated calls book once: the hub's own guard is it, not a batch-level dedupe.
     /// @dev WAS `test_Crank_DuplicateLegsMintOnce` over a (loan, tick, lot) batch; the reachable shape is repeated calls.
     function test_Crank_RepeatedCallsBookOnce() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 id = _open(DRAW);
 

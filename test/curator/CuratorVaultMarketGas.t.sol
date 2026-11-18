@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
@@ -36,11 +36,11 @@ contract CuratorVaultMarketGasTest is CuratorVaultBase {
     /// @dev One vault lending in exactly `n` markets, each carrying a live loan.
     /// @dev A market whose words are all zero would understate the walk, so every one carries a loan; nothing rests between calls.
     /// @dev Each market is the door's at a record print 1% lower than the last, so each borrow opens a fresh id.
-    function _withMarkets(uint256 n, uint16 perfFeeBps) internal returns (CuratorVault v) {
+    function _withMarkets(uint256 n, uint16 perfFeeBps) internal returns (AceVault v) {
         v = _newVault(perfFeeBps);
         _lpDeposit(v, alice, SEED);
         delete _rig;
-        MockPersistenceRecord r = MockPersistenceRecord(v.rowOf(address(collateral)).record);
+        MockPersistenceRecord r = MockPersistenceRecord(_terms(v).rowOf(address(collateral)).record);
         for (uint256 i; i < n; i++) {
             r.setMinPrice(AceFixtures.px(2e18 - i * 2e16, address(usdc), address(collateral)));
             _rig.push(ace.loanMarket(_borrow(v, PER_MARKET)));
@@ -56,15 +56,17 @@ contract CuratorVaultMarketGasTest is CuratorVaultBase {
 
     /// @dev Cold-measure one deposit against a vault holding `n` markets.
     function _measureDeposit(uint256 n, uint16 perfFeeBps) internal returns (uint256 used) {
-        CuratorVault v = _withMarkets(n, perfFeeBps);
+        AceVault v = _withMarkets(n, perfFeeBps);
         assertEq(_rig.length, n, "fixture: exactly the markets this row is about");
         usdc.mint(bob, PER_MARKET);
         vm.prank(bob);
         usdc.approve(address(v), PER_MARKET);
 
+        address terms = v.TERMS(); // every entry asks the terms for its cap, so they are cooled with the rest
         vm.cool(address(v));
         vm.cool(address(ace));
         vm.cool(address(usdc));
+        vm.cool(terms);
         vm.cool(bob);
         vm.prank(bob);
         uint256 g = gasleft();
@@ -85,7 +87,7 @@ contract CuratorVaultMarketGasTest is CuratorVaultBase {
     /// @dev Alice funded the vault, so she holds the shares; a tenth of them is far inside idle and pays in cash.
     /// @dev The exit is the instant `redeem`, one call and one base fee: what an LP pays to leave from free cash.
     function _measureRedeem(uint256 n, uint16 perfFeeBps) internal returns (uint256 used) {
-        CuratorVault v = _withMarkets(n, perfFeeBps);
+        AceVault v = _withMarkets(n, perfFeeBps);
         assertEq(_rig.length, n, "fixture: exactly the markets this row is about");
         uint256 sh = v.balanceOf(alice) / 10;
         assertGt(sh, 0, "fixture: alice must hold shares for there to be an exit to measure");
@@ -123,7 +125,7 @@ contract CuratorVaultMarketGasTest is CuratorVaultBase {
     /// @dev a deposit at the cap has to stay inside what a shipped multi-market vault charges today.
     /// @dev If this ever trips, the answer is to lower `MAX_MARKETS`, never to raise the ceiling.
     function test_Gas_DepositAtTheCapStaysInsidePriorArt() public {
-        CuratorVault probe = _newVault(0);
+        AceVault probe = _newVault(0);
         uint256 cap = LARGE_N;
         assertEq(cap, 28, "the ruling, read off the contract rather than restated here");
 

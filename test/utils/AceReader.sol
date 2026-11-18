@@ -265,11 +265,13 @@ contract AceReader {
     }
 
     /// @notice What a clean close right now would return to the borrower; rounds DOWN, as the hub does.
+    /// @dev Over the fee schedule's span, `expiry - openTime`, which a top-up shortens below the tenor.
     function earlyExitRefund(uint256 loanId) external view returns (uint256) {
         Loan memory l = loan(loanId);
-        if (l.closedAt != 0 || l.tenor == 0) return 0;
+        uint256 span = l.expiry > l.openTime ? l.expiry - l.openTime : 0;
+        if (l.closedAt != 0 || span == 0) return 0;
         uint256 remaining = l.expiry > block.timestamp ? l.expiry - block.timestamp : 0;
-        return FullMath.mulDiv(feeEscrowOf(loanId), remaining, l.tenor);
+        return FullMath.mulDiv(feeEscrowOf(loanId), remaining, span);
     }
 
     /// @notice The roll policy every extension of this lender's loans asks; zero consents to none.

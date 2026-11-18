@@ -10,8 +10,8 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
-import {LaunchVault} from "../../src/curator/LaunchVault.sol";
-import {SetValue} from "../../src/curator/sets/SetValue.sol";
+import {LaunchVault} from "../../src/entities/launch/LaunchVault.sol";
+import {PriceGrid} from "../../src/curator/PriceGrid.sol";
 import {LaunchLock} from "../../src/entities/launch/LaunchLock.sol";
 import {LockAccount} from "../../src/entities/launch/LockAccount.sol";
 import {RunwayHook} from "../../src/entities/launch/RunwayHook.sol";
@@ -71,7 +71,7 @@ contract LaunchVaultCapHandler is WarpClock {
         (ace, read, vault, usdc, lock, strat, key) = (ace_, new AceReader(address(ace_)), vault_, usdc_, lock_, strat_, key_);
         token = IERC20(vault_.terms().token);
         (who, holders) = (who_, holders_);
-        cTick = TickMath.getTickAtSqrtPrice(SetValue.sqrtPriceX96(_clearing(), false));
+        cTick = TickMath.getTickAtSqrtPrice(PriceGrid.sqrtPriceX96(_clearing(), false));
     }
 
     modifier tokenStays() {
@@ -373,7 +373,7 @@ contract LaunchVaultSequenceTest is LaunchVaultFixture {
             vm.prank(buyers[i]);
             try vault.reserve(type(uint256).max) returns (bytes32 id, uint256 got) {
                 loanIds[i] = _borrow(m, buyers[i], id, got, 30 days);
-                pnl += int256(LoanMath.lenderCut(LoanMath.originationFee(got, 30 days, BASE, 7 days)));
+                pnl += int256(LoanMath.lenderCut(LoanMath.originationFee(got, 30 days, BASE)));
             } catch {}
         }
         for (uint256 i; i < 2; ++i) {

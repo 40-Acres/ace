@@ -5,18 +5,20 @@ import {LoanClosed} from "../../../src/ace/hub/Borrower.sol";
 import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
 import {MarketParams} from "../../../src/ace/hub/Types.sol";
 import {AceVaultFlows} from "../../../src/curator/AceVaultFlows.sol";
-import {CuratorVault} from "../../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../../src/curator/AceVault.sol";
+import {CuratorTerms} from "../../../src/entities/curated/CuratorTerms.sol";
 import {_extended} from "../../utils/Extended.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
 
-/// @notice The core's edges on the shipped CuratorVault: a placement exactly at lendable, the market's cash cap, a closed loan's extension.
+/// @notice The core's edges on the shipped AceVault: a placement exactly at lendable, the market's cash cap, a closed loan's extension.
 /// @dev Each row sits on the boundary a comparison draws, so a strict test turned non-strict, or a dropped leg, fails here.
 contract AceVaultBoundariesTest is AceVaultRig {
     address internal lp2 = address(0x1F2);
 
-    /// @dev A fresh vault on the rig's row, holding exactly `cash` of one LP's deposit and nothing else.
-    function _seeded(uint256 cash) internal returns (CuratorVault v) {
-        v = _newVault(_row(address(record), type(uint192).max));
+    /// @dev A fresh vault on the rig's row, holding exactly `cash`: its genesis seed and one LP's deposit of the rest.
+    function _seeded(uint256 cash) internal returns (AceVault v) {
+        v = _newVault(_row(address(record)));
+        cash -= v.MIN_SEED(); // the genesis seed is idle too, so the vault holds exactly `cash`
         usdc.mint(lp2, cash);
         vm.startPrank(lp2);
         usdc.approve(address(v), cash);
@@ -25,7 +27,7 @@ contract AceVaultBoundariesTest is AceVaultRig {
     }
 
     /// @dev Borrow on `v` as `who`, minted and approving exactly the units.
-    function _borrowOn(CuratorVault v, address who, uint256 principal) internal returns (uint256 loanId) {
+    function _borrowOn(AceVault v, address who, uint256 principal) internal returns (uint256 loanId) {
         coll.mint(who, UNITS);
         vm.startPrank(who);
         coll.approve(address(v), UNITS);
@@ -37,7 +39,7 @@ contract AceVaultBoundariesTest is AceVaultRig {
 
     /// @notice A draw of exactly lendable is admitted and leaves idle at zero: the door books nothing beside the principal.
     function test_ADrawExactlyAtLendableLeavesIdleAtZero() public {
-        CuratorVault v = _seeded(PRINCIPAL);
+        AceVault v = _seeded(PRINCIPAL);
         assertEq(v.lendable(), PRINCIPAL, "premise: every unit of the fresh vault is lendable");
         uint256 loanId = _borrowOn(v, borrower, PRINCIPAL);
         assertEq(v.idle(), 0, "the door lent every idle unit");
@@ -47,7 +49,7 @@ contract AceVaultBoundariesTest is AceVaultRig {
 
     /// @notice One unit past lendable the draw is refused, pulling nothing; exactly lendable fits.
     function test_ADrawOneUnitPastLendableIsRefused() public {
-        CuratorVault v = _seeded(PRINCIPAL - 1);
+        AceVault v = _seeded(PRINCIPAL - 1);
         coll.mint(borrower, UNITS);
         vm.startPrank(borrower);
         coll.approve(address(v), UNITS);
@@ -86,7 +88,7 @@ contract AceVaultBoundariesTest is AceVaultRig {
         assertEq(vault.idle(), idle0, "and no cash moved");
     }
 
-    // ---- CuratorVault's own legs at their edges ----
+    // ---- AceVault's own legs at their edges ----
 
     /// @notice The price leg admits a record exactly at the market's price: the extension lands, and the hub's preview agrees on both sides of it.
     function test_ARecordExactlyAtThePriceStillExtends() public {
@@ -100,7 +102,7 @@ contract AceVaultBoundariesTest is AceVaultRig {
         (bool p2,,) = ace.tryExtend(loanId, 0, "", borrower);
         assertTrue(p2, "at the price both legs answer yes");
         uint64 expiry = read.loan(loanId).expiry;
-        uint256 fee = LoanMath.originationFee(ace.debtOf(loanId), MIN_TENOR, mp.baseBps, mp.minTenor);
+        uint256 fee = LoanMath.originationFee(ace.debtOf(loanId), MIN_TENOR, mp.lenderAprBps);
         usdc.mint(borrower, fee);
         vm.startPrank(borrower);
         usdc.approve(address(ace), fee);
@@ -123,7 +125,7 @@ contract AceVaultBoundariesTest is AceVaultRig {
             coll.mint(bob, UNITS);
             vm.startPrank(bob);
             coll.approve(address(vault), UNITS);
-            vm.expectRevert(CuratorVault.PriceZero.selector);
+            vm.expectRevert(CuratorTerms.PriceZero.selector);
             vault.borrow(_req(UNITS, PRINCIPAL, MIN_TENOR), "", "");
             vm.stopPrank();
         }

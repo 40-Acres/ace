@@ -4,18 +4,19 @@
 // real routine reverts (a zero divisor, a quotient past 256 bits) pruned. Uniswap's implementation of that
 // definition is taken as correct; what is checked is that LoanMath's formulas, built on it, round the way they say.
 //
-// The constants are Constants.sol's: PROTOCOL_SHARE_BPS = 1000, REBATE_PHI_BPS = 5000, MAX_FEE_SHARE_BPS = 2500.
+// The constants are Constants.sol's: PROTOCOL_SHARE_BPS = 1000, REBATE_PHI_BPS = 5000, MAX_FEE_SHARE_BPS = 2500,
+// SECONDS_PER_YEAR = 31536000 (the rate is bps a year) and MIN_LENDER_APR_BPS = 1.
 
 methods {
     function FullMath.mulDivRoundingUp(uint256 a, uint256 b, uint256 d) internal returns (uint256) => ceilMulDiv(a, b, d);
 
     function triggerPrice(uint256, uint256, uint256, uint256) external returns (uint256) envfree;
-    function originationFee(uint256, uint64, uint256, uint64) external returns (uint256) envfree;
+    function originationFee(uint256, uint64, uint256) external returns (uint256) envfree;
     function protocolCut(uint256) external returns (uint256) envfree;
     function lenderCut(uint256) external returns (uint256) envfree;
     function escrowCut(uint256) external returns (uint256) envfree;
     function tickCut(uint256) external returns (uint256) envfree;
-    function feeFundable(uint256, uint64, uint64) external returns (bool) envfree;
+    function feeFundable(uint256, uint64) external returns (bool) envfree;
 }
 
 function ceilMulDiv(uint256 a, uint256 b, uint256 d) returns uint256 {
@@ -27,6 +28,7 @@ function ceilMulDiv(uint256 a, uint256 b, uint256 d) returns uint256 {
 
 definition SHARE() returns mathint = 1000;
 definition MAX_FEE_SHARE() returns mathint = 2500;
+definition YEAR() returns mathint = 31536000;
 
 // ---- the split ----
 
@@ -58,17 +60,33 @@ rule theTriggerRoundsUpByUnderOne(uint256 debt, uint256 units, uint256 minCovera
 // ---- the fee and its bound ----
 
 // "that single rounding is what bounds the fee by the principal" -- under the genesis rail feeFundable
-rule theFeeStaysWithinItsShareOfThePrincipal(uint256 principal, uint64 tenor, uint256 baseBps, uint64 minTenor) {
-    require minTenor > 0;
-    require feeFundable(baseBps, tenor, minTenor);
-    mathint fee = originationFee(principal, tenor, baseBps, minTenor);
+rule theFeeStaysWithinItsShareOfThePrincipal(uint256 principal, uint64 tenor, uint256 lenderAprBps) {
+    require feeFundable(lenderAprBps, tenor);
+    mathint fee = originationFee(principal, tenor, lenderAprBps);
     assert fee * 10000 <= principal * MAX_FEE_SHARE() + 10000, "the fee passed MAX_FEE_SHARE of the principal by more than a wei";
     assert fee <= to_mathint(principal) || principal == 0, "the fee exceeded the principal it prices";
 }
 
 // "At maxTenor it bounds every shorter term too, because the fee is monotone in tenor."
-rule theFeeIsMonotoneInTenor(uint256 principal, uint64 t1, uint64 t2, uint256 baseBps, uint64 minTenor) {
-    require minTenor > 0 && t1 <= t2;
-    assert originationFee(principal, t1, baseBps, minTenor) <= originationFee(principal, t2, baseBps, minTenor),
+rule theFeeIsMonotoneInTenor(uint256 principal, uint64 t1, uint64 t2, uint256 lenderAprBps) {
+    require t1 <= t2;
+    assert originationFee(principal, t1, lenderAprBps) <= originationFee(principal, t2, lenderAprBps),
         "a longer term priced cheaper";
+}
+
+// "Division form, exact for integers: r <= floor(A / B) iff r * B <= A" -- for every rate, with no product of r taken
+// Called @withrevert, so a mutant dropping the `tenor == 0` guard (a division by zero) fails here rather than being pruned.
+rule feeFundableIsExact(uint256 lenderAprBps, uint64 tenor) {
+    bool fundable = feeFundable@withrevert(lenderAprBps, tenor);
+    assert !lastReverted, "the rail reverted instead of answering";
+    assert fundable <=> (tenor != 0 && lenderAprBps * tenor * (10000 + SHARE()) <= MAX_FEE_SHARE() * 10000 * YEAR()),
+        "the rail is not the exact share bound on rate times term";
+}
+
+// "With r, P and T all at least 1, the round-up keeps the fee at least 1 atom and the lender's immediate share at least 1."
+rule theFeeAndTickCutAreNeverZero(uint256 principal, uint64 tenor, uint256 lenderAprBps) {
+    require principal >= 1 && tenor >= 1 && lenderAprBps >= 1;
+    mathint fee = originationFee(principal, tenor, lenderAprBps);
+    assert fee >= 1, "a priced draw paid no fee";
+    assert tickCut(require_uint256(fee)) >= 1, "the lender's immediate share rounded to zero";
 }

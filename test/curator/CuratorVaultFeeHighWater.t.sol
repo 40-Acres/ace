@@ -2,36 +2,37 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title CuratorVaultFeeHighWater
-/// @notice The fee threshold held in ASSETS: an entry adds its cash, an exit or a claim takes the cash paid, a collection lifts it to NAV.
-/// @notice So every flow keeps the fee-free gap `H - NAV` exactly, with no per-share frame to round in or concentrate.
-/// @dev WRITTEN RED against the per-share mark it replaced, each row naming the reason it failed there.
+/// @notice The fee threshold, stored in ASSETS and carried per virtual share: an entry takes the larger of its cash and its per-share price.
+/// @notice An exit or a claim scales it by the virtual shares left, never under the NAV left, and a collection lifts it to NAV.
+/// @notice So with no gap every flow moves it by exactly its cash, and with one every flow keeps the gap per share, all in one frame.
+/// @dev WRITTEN RED against the mixed-frame per-share mark it replaced, each row naming the reason it failed there.
 contract CuratorVaultFeeHighWaterTest is CuratorVaultBase {
     uint16 internal constant BPS = 1000;
     uint256 internal constant V_OFF = 1e6; // the vault's virtual-share offset
     address internal carol = address(0xCA601);
 
     /// @dev The fee high-water in assets.
-    function _hw(CuratorVault v) internal view returns (uint256) {
+    function _hw(AceVault v) internal view returns (uint256) {
         return v.feeHighWater();
     }
 
     /// @dev The fee-free gap in assets.
-    function _gap(CuratorVault v) internal view returns (uint256) {
+    function _gap(AceVault v) internal view returns (uint256) {
         return Math.saturatingSub(_hw(v), v.totalAssets());
     }
 
-    function _request(CuratorVault v, address who, uint256 shares) internal {
+    function _request(AceVault v, address who, uint256 shares) internal {
         vm.prank(who);
         v.requestExit(shares);
     }
 
     /// @dev Claim `who`'s whole request, returning the cash paid.
-    function _claimAll(CuratorVault v, address who) internal returns (uint256) {
-        (uint256 esc,) = v.requestOf(who);
+    function _claimAll(AceVault v, address who) internal returns (uint256) {
+        (uint256 esc,) = vlens.requestOf(address(v), who);
         vm.prank(who);
         return v.claimExit(esc, who, 0);
     }
@@ -39,7 +40,7 @@ contract CuratorVaultFeeHighWaterTest is CuratorVaultBase {
     /// @notice AN ENTRY MOVES THE HIGH-WATER BY EXACTLY ITS CASH, on `deposit` and on `mint`, at a supply past 1e19 share-wei.
     /// @dev RED on the per-share mark: the blend's two ceilings add up to `2 * s / 1e18` atoms.
     function testFuzz_Fee_AnEntryMovesTheHighWaterByExactlyItsCash(uint256 xSeed, uint256 sharesSeed) public {
-        CuratorVault v = _newVault(BPS);
+        AceVault v = _newVault(BPS);
         _lpDeposit(v, alice, 12_000_000e6);
         v.collectFee(); // at NAV, a no-op: the first deposit already set the high-water to its cash
         uint256 h = _hw(v);
@@ -60,7 +61,7 @@ contract CuratorVaultFeeHighWaterTest is CuratorVaultBase {
     /// @notice A CLAIM ABOVE PAR LOWERS THE HIGH-WATER BY EXACTLY ITS CASH: a 1 USDC book gifted to about 100x par, then a claim.
     /// @dev RED on the per-share mark: it falls by the true-frame rate times the shares, about `paid * V / s` past the cash.
     function test_Fee_AClaimAboveParLowersTheHighWaterByExactlyItsCash() public {
-        CuratorVault v = _newVault(BPS);
+        AceVault v = _newVault(BPS);
         _lpDeposit(v, alice, 1e6);
         _gift(v, 99e6);
         v.crank();
@@ -77,7 +78,7 @@ contract CuratorVaultFeeHighWaterTest is CuratorVaultBase {
     /// @dev The gain is synced by a crank while it is all unvested, so that crank charges nothing and it has vested when the first collection reads it.
     /// @dev RED on the per-share mark: its first collection only stamps, so the gain since the first deposit is never charged.
     function test_Fee_TheFirstDepositStampsTheHighWater() public {
-        CuratorVault v = _newVault(BPS);
+        AceVault v = _newVault(BPS);
         _lpDeposit(v, alice, 10_000e6);
         _gift(v, 1_000e6);
         v.crank(); // syncs the gain into the vest; the fee it collects reads only the vested part, which has not moved
@@ -89,10 +90,10 @@ contract CuratorVaultFeeHighWaterTest is CuratorVaultBase {
         assertApproxEqAbs(minted, Math.mulDiv(1_000e6, BPS, 10_000), 2, "the gain since the first deposit was not charged");
     }
 
-    /// @notice A STAY OF ONLY DONATED SHARES CARRIES THE GAP: an exit leaving one donated share-wei keeps G where it was.
-    /// @dev RED on the per-share mark: with only donations staying it skips the raise, so the gap collapses with the supply.
-    function test_Fee_ADonatedOnlyStayCarriesTheGap() public {
-        CuratorVault v = _newVault(5000);
+    /// @notice A STAY OF ONLY DONATED SHARES CARRIES THE GAP PER SHARE: an exit leaving one donated share-wei carries G down with the virtual supply.
+    /// @dev On one share-wei over the virtual shares that carry is under an atom in assets, so a later entrant inherits none of it.
+    function test_Fee_ADonatedOnlyStayCarriesTheGapPerShare() public {
+        AceVault v = _newVault(5000);
         _lpDeposit(v, alice, 10_000e6);
         uint256 loanId = _open(800e6);
         _crankAllTicks(v, loanId, 0);
@@ -104,21 +105,23 @@ contract CuratorVaultFeeHighWaterTest is CuratorVaultBase {
         _crankAll(v);
         uint256 g0 = _gap(v);
         assertGt(g0, 0, "PREMISE: the loss opened a gap");
+        uint256 sv0 = v.totalSupply() + V_OFF;
         _request(v, alice, v.balanceOf(alice));
         _request(v, curator, v.balanceOf(curator)); // the open's recognized gain minted the curator in: it leaves too
         _claimAll(v, alice); // each claim at the trough, the requested supply leaving whole
         _claimAll(v, curator);
-        assertEq(v.totalSupply(), 1, "PREMISE: only the donated share-wei is left");
+        assertEq(v.totalSupply(), v.SEED_SHARES() + 1, "PREMISE: only the seed and the donated share-wei are left");
         emit log_named_uint("the gap before the exit", g0);
         emit log_named_uint("the gap after it", _gap(v));
-        assertApproxEqAbs(_gap(v), g0, 10, "an exit leaving only donated shares moved the gap");
+        uint256 left = v.SEED_SHARES() + 1 + V_OFF; // the donated wei keeps live supply off zero, so the gap carries over the seed's shares too
+        assertApproxEqAbs(_gap(v), Math.mulDiv(g0, left, sv0), 2, "an exit leaving only donated shares did not carry the gap per virtual share");
     }
 
     /// @notice A LAST-OUT RELEASE WITH A DONATED REMAINDER charges the fee on the pile at that claim, and only once: the next collection mints nothing.
     /// @dev The release runs before the claim's collection, so the pile it frees is growth there, charged past the high-water.
     /// @dev The burn then takes the claim's cash out of the high-water, so the next collection finds NAV at it.
     function test_Fee_AReleaseToTheLastOutChargesTheFeeOnThePileOnce() public {
-        CuratorVault v = _newVault(BPS);
+        AceVault v = _newVault(BPS);
         _lpDeposit(v, alice, 10_000e6);
         uint256 loanId = _open(800e6);
         _crankAllTicks(v, loanId, 0);
@@ -137,7 +140,9 @@ contract CuratorVaultFeeHighWaterTest is CuratorVaultBase {
         _claimAll(v, alice); // every share escrow or donation: the release, then the claim
         assertEq(v.unvested(), 0, "PREMISE: the claim released the pile");
         uint256 feeShares = v.balanceOf(curator);
-        assertEq(v.totalSupply(), 1 + feeShares, "PREMISE: the releasing claim paid alice out whole, leaving the donated share-wei and the fee");
+        assertEq(
+            v.totalSupply(), v.SEED_SHARES() + 1 + feeShares, "PREMISE: the releasing claim paid alice out whole, leaving the seed, the donated wei and the fee"
+        );
         uint256 charged = v.convertToAssets(feeShares);
         emit log_named_uint("the fee on the rise past the high-water", fee);
         emit log_named_uint("what the releasing claim's fee shares are worth", charged);
@@ -148,10 +153,10 @@ contract CuratorVaultFeeHighWaterTest is CuratorVaultBase {
 
     /// @notice A DEPOSIT AND ITS WHOLE EXIT LEAVE THE HIGH-WATER AT THE RESIDUAL NAV: the entry added its cash and the burn took its pay.
     /// @notice The empty vault holds a vested 1 USDC first, so the entry prices far off par and the exit leaves the virtual shares' slice.
-    /// @dev So the zero-supply stamp finds it already at a real NAV, never a wei, and the next entrant is billed for nothing.
+    /// @dev So the zero-live-supply stamp finds it already at a real NAV, never a wei, and the next entrant is billed for nothing.
     function test_Fee_ADepositAndItsWholeExitLeaveTheHighWaterAtTheResidualNav() public {
-        CuratorVault v = _newVault(BPS);
-        _giftPart(v, 100e6, 1e6); // NAV with no supply: the virtual shares own it
+        AceVault v = _newVault(BPS);
+        _giftPart(v, 100e6, 1e6); // NAV with no live supply: the seed and virtual shares own it
         v.crank();
         _warpBy(VEST_W);
         uint256 nav0 = v.totalAssets();
@@ -161,7 +166,7 @@ contract CuratorVaultFeeHighWaterTest is CuratorVaultBase {
         assertEq(_hw(v), nav0 + x, "the entry's zero-supply stamp did not set the high-water at the NAV it found, before its cash");
         _request(v, alice, v.balanceOf(alice));
         uint256 paid = _claimAll(v, alice); // the cash the claim moved, floored by a wei off par
-        assertEq(v.totalSupply(), 0, "PREMISE: the exit took the whole supply");
+        assertEq(v.totalSupply(), v.SEED_SHARES(), "PREMISE: the exit took the whole live supply");
         assertGt(v.totalAssets(), 1e5, "PREMISE: the exit left a real residual at zero supply, not a wei");
         assertEq(_hw(v), nav0 + x - paid, "the whole exit did not take its pay out of the high-water");
         assertEq(_hw(v), v.totalAssets(), "and left it off the residual NAV");

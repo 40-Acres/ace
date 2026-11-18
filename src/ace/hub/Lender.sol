@@ -62,7 +62,7 @@ library Lender {
         Storage.poolOf(M.p).resting += a;
     }
 
-    /// @dev NOT THE ONLY WRITER of this pair -- `Borrower._fund` inlines it on the draw, so a bound added here is owed there too.
+    /// @dev NOT THE ONLY WRITER of this pair -- `Borrower._takeCash` inlines it for an open's and a top-up's draw, so a bound added here is owed there too.
     function debitCash(Market storage M, uint256 a) internal {
         M.s.cash -= a;
         Storage.poolOf(M.p).resting -= a;

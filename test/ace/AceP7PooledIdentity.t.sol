@@ -116,7 +116,7 @@ contract AceP7PooledIdentityTest is WarpClock {
 
         _warpTo(uint256(read.loan(a).expiry) - 30 minutes); // the borrower moves late in the term, before expiry
         MarketParams memory dp = ace.idToMarketParams(d);
-        uint256 p2 = RefinanceMath.principalForOwed(read.debtOf(a), tenor, dp.baseBps, dp.minTenor); // the draw that retires the old debt
+        uint256 p2 = RefinanceMath.principalForOwed(read.debtOf(a), tenor, dp.lenderAprBps); // the draw that retires the old debt
         vm.prank(b1);
         uint256 a2 = ace.refinanceTo(MigrateArgs(a, d, p2, tenor, OpenBounds(0, 0, 0), 0, address(0)));
         assertEq(ace.loanMarket(a2), d, "fixture: the successor sits in the other lender's market");

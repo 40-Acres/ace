@@ -48,7 +48,7 @@ contract AceGenesisRailsTest is Test {
         p.record = address(0);
         p.fillFeeBps = 25;
         p.minCoverageWad = PocDeployConfig.MIN_COVERAGE_WAD;
-        p.baseBps = PocDeployConfig.BASE_BPS;
+        p.lenderAprBps = PocDeployConfig.LENDER_APR_BPS;
         p.minTenor = ProtocolPolicy.MIN_TENOR;
         p.maxTenor = ProtocolPolicy.MAX_TENOR;
         p.minPrincipal = PocDeployConfig.MIN_PRINCIPAL;
@@ -93,26 +93,28 @@ contract AceGenesisRailsTest is Test {
 
     /// @notice THE FEE-SHARE CEILING: no admissible market may price a term above a quarter of the draw.
     /// @notice The old rail bounded only the SIGN of the slack, so a 99%-fee market was constructible.
-    /// @dev THE COUNTEREXAMPLE, pinned exactly: baseBps 200 over a 45x term multiple cleared the old rail
-    /// @dev at 693e6 < 700e6, charging 99% of principal, with `payout == 0` reachable for ordinary draws.
-    /// @dev It is also why a term-multiple cap cannot do this job: at M=45 this market passes one.
+    /// @dev At a 315-day maxTenor the rail admits 2633 bps a year and refuses 2634, the first rate whose fee passes a quarter.
+    /// @dev The rate is bps a year, so the 7-day minTenor plays no part: the ceiling is `2500 * 1e4 * 365 days / (315 days * 11000)`.
     function test_Rail_FeeShareCeiling_RefusesAFeeThatEatsThePrincipal() public {
         MarketParams memory p = _base();
-        p.baseBps = 200;
+        p.lenderAprBps = 2634;
         p.minTenor = 7 days;
         p.maxTenor = 315 days;
         _reject(p, "fee bps too high");
+
+        p.lenderAprBps = 2633; // the last rate inside the quarter at this term
+        assertTrue(ace.createMarket(p) != bytes32(0), "the rail admits its own last rate");
     }
 
-    /// @notice The ceiling is a SHARE, so the same term multiple is admissible at a low enough rate.
+    /// @notice The ceiling is a SHARE, so the same 315-day term is admissible at a low enough rate.
     /// @dev Bounds the row above to the product rather than to either dial, which is the whole point.
-    function test_Rail_FeeShareCeiling_TheSameTermMultiplePassesAtALowerRate() public {
+    function test_Rail_FeeShareCeiling_TheSameLongestTermPassesAtALowerRate() public {
         MarketParams memory p = _base();
-        p.baseBps = 40; // the shipped rate: 40 * 45 * 11000 * 10000 <= 2500 * 1e8 * 1
+        p.lenderAprBps = 40; // 40 * 315 days * 11000 <= 2500 * 1e4 * 365 days, far inside the share
         p.minTenor = 7 days;
         p.maxTenor = 315 days;
         bytes32 id = ace.createMarket(p);
-        assertTrue(id != bytes32(0), "a 45x grid is fine when the rate leaves the fee inside the share");
+        assertTrue(id != bytes32(0), "a 315-day longest term is creatable at 40 bps a year, its fee inside the share");
     }
 
     // DELETED with the draw walk: test_Rail_TickSpacingFloor_RefusesWhereTheScanBudgetCanBind guarded a scan budget; a draw reads one price and walks nothing
@@ -350,39 +352,41 @@ contract AceGenesisRailsTest is Test {
         ace.createMarket(p);
     }
 
-    /// @notice `baseBps` is the LENDER's origination rate, and this rail is its FLOOR alone.
+    /// @notice `lenderAprBps` is the LENDER's origination rate, and this rail is its FLOOR alone.
     /// @dev Zero is refused deliberately: a market with no origination premium pays its lenders nothing.
     function test_Rail_BaseBpsBelowFloor() public {
         MarketParams memory p = _base();
-        p.baseBps = 0; // MIN_BASE_BPS is 1
-        _reject(p, "base bps out of band");
+        p.lenderAprBps = 0; // MIN_LENDER_APR_BPS is 1
+        _reject(p, "rate below floor");
 
         p = _base();
-        p.baseBps = 1; // the floor itself admits
+        p.lenderAprBps = 1; // the floor itself admits
         ace.createMarket(p);
     }
 
     /// @notice THE ONLY CEILING ON THE RATE IS THE FEE-VS-PRINCIPAL RAIL, and this row is where that is said.
-    /// @notice The fixture is single-tenor, so the tenor cancels in `feeFundable` and the boundary is an exact integer.
+    /// @notice At a one-year maxTenor the rail's boundary is 2272 against 2273, whatever the minTenor.
     /// @dev 2272 and 2273 are LITERALS: a mirror of the implementation cannot disagree with it.
     /// @dev So this row is the tripwire if `MAX_FEE_SHARE_BPS` or `PROTOCOL_SHARE_BPS` ever moves.
     function test_Rail_FeeShareIsTheOnlyCeiling() public {
         MarketParams memory p = _base();
-        p.baseBps = 501; // what the deleted per-term band used to refuse, and an ordinary rate now
+        p.maxTenor = 365 days;
+        p.lenderAprBps = 501; // what the deleted per-term band used to refuse, and an ordinary rate now
         ace.createMarket(p);
 
         p = _base();
-        p.baseBps = 2272; // `b * 11000 <= 2500 * 10000` at minTenor == maxTenor
+        p.maxTenor = 365 days;
+        p.lenderAprBps = 2272; // `b * 365 days * 11000 <= 2500 * 1e4 * 365 days`
         ace.createMarket(p);
 
         p = _base();
-        p.baseBps = 2273;
+        p.maxTenor = 365 days;
+        p.lenderAprBps = 2273;
         _reject(p, "fee bps too high");
     }
 
-    /// @notice A zero tenor is refused HERE, BY NAME: no other rail names it, and one later rail divides by it.
-    /// @dev With min == max == 0 the fee rail reads `0 <= 0` and passes, then `min principal under fee` divides by `minTenor`.
-    /// @dev So the rail's ORDER is load-bearing: moved below that rail, the first case reverts with EMPTY data instead.
+    /// @notice A zero tenor is refused HERE, BY NAME: below this rail, the share rail would refuse it as `fee bps too high`.
+    /// @dev `feeFundable` is false at a zero `maxTenor` and reads no `minTenor`, so the rail's ORDER decides the first case's name.
     /// @dev Zero is caught by the derived tenor floor, which subsumes the old zero-only rail; this row keeps the degenerate end.
     function test_Rail_TenorZero() public {
         MarketParams memory p = _base();
@@ -391,7 +395,7 @@ contract AceGenesisRailsTest is Test {
         _reject(p, "min tenor under floor");
 
         p = _base();
-        p.minTenor = 0; // min alone, where the fee rail would also catch it under a different name
+        p.minTenor = 0; // min alone, which neither fee rail reads: only the floor refuses it
         _reject(p, "min tenor under floor");
     }
 

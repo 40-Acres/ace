@@ -3,25 +3,22 @@ pragma solidity 0.8.36;
 
 import {Vm} from "forge-std/Vm.sol";
 import {MarketParams} from "../../../src/ace/hub/Types.sol";
+import {AceVault} from "../../../src/curator/AceVault.sol";
 import {AceVaultFlows, Terms} from "../../../src/curator/AceVaultFlows.sol";
 import {AceFixtures} from "../../utils/AceFixtures.sol";
-import {AceVaultHarness} from "./AceVaultHarness.sol";
+import {MockTerms} from "../vault/MockTerms.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
 
 /// @notice The core's edges a shipped product cannot reach: a zero tenor, a room exactly the draw, and the door's `Borrowed` log.
-/// @dev Driven through the test product, whose terms a row sets.
+/// @dev Driven through a `MockTerms` product, whose terms a row sets.
 contract AceVaultHarnessEdgesTest is AceVaultRig {
     uint256 internal constant LO = 10e6; // the market's minPrincipal
-    AceVaultHarness internal h;
+    AceVault internal h;
+    MockTerms internal mt;
 
     function setUp() public override {
         super.setUp();
-        h = new AceVaultHarness(_cfg());
-        usdc.mint(alice, LP_CASH);
-        vm.startPrank(alice);
-        usdc.approve(address(h), LP_CASH);
-        h.deposit(LP_CASH, alice);
-        vm.stopPrank();
+        (h, mt) = _onMockTerms();
     }
 
     /// @dev A vault market on the rig's collateral at `minPrincipal`, priced by the rig's record, paying no bounty.
@@ -34,7 +31,7 @@ contract AceVaultHarnessEdgesTest is AceVaultRig {
     }
 
     function _hborrow(MarketParams memory p, uint64 tenor) internal returns (uint256 loanId) {
-        h.setTerms(p, Terms({units: UNITS, principal: PRINCIPAL, tenor: tenor, minBufferWad: 0}));
+        mt.setTerms(p, Terms({units: UNITS, principal: PRINCIPAL, tenor: tenor, minBufferWad: 0}));
         coll.mint(borrower, UNITS);
         vm.startPrank(borrower);
         coll.approve(address(h), UNITS);
@@ -46,7 +43,7 @@ contract AceVaultHarnessEdgesTest is AceVaultRig {
 
     /// @notice A cap room exactly the principal admits the draw.
     function test_ARoomExactlyThePrincipalAdmits() public {
-        h.setRoom(PRINCIPAL);
+        mt.setRoom(MockTerms.Mode.Answer, PRINCIPAL);
         uint256 id = _hborrow(_hmp(LO), MIN_TENOR);
         assertTrue(ace.isLiveLoan(id), "a draw of exactly the room opens");
     }

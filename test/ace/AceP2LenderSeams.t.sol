@@ -15,7 +15,7 @@ import {AceReader} from "../utils/AceReader.sol";
 
 /// @title AceP2StarvedRoll
 /// @notice Audit run 2026-09-13-670568 phase 2, F1: a sole lender starved an armed recordless roll and was paid the coverage.
-/// @notice Arming is gone: a recordless loan's one continuation is its borrower's cash `extend`, which asks the lender's roll policy.
+/// @notice Arming is gone: a recordless loan's one continuation is a cash `extend`, the borrower's or a late stranger's, on the lender's roll policy.
 /// @notice What stands is the default: a loan nobody extends settles at tenor and the lender's pot takes the whole coverage line.
 /// @dev The premises pin the forfeit and the escape; the KNOWN row pins that the lender's policy alone answers the extension.
 contract AceP2StarvedRollTest is WarpClock {

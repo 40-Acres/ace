@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 
 /// @notice The rig's loan rails, exposed so the handler can drive a door draw and its repayment.
@@ -15,7 +15,7 @@ interface IHoldRig {
 /// @dev Amounts are bounded rather than fuzzed raw: an unbounded draw reverts on coverage and reaches nothing.
 contract HoldHandler {
     CuratorVaultBase private immutable RIG;
-    CuratorVault public immutable VAULT;
+    AceVault public immutable VAULT;
     uint256 private constant MIN_DRAW = 100e6; // over the rig's minPrincipal, so half a repayment leaves a live loan
     uint256 private constant MAX_DRAW = 15_000e6; // what one loan on the rig's collateral can draw
 
@@ -24,7 +24,7 @@ contract HoldHandler {
     uint256 public overOrdersRefused; // over-balance orders turned away BY NAME; a coverage ghost, not a property
     bool public overOrderAccepted; // set if the vault ever stands an order past its caller's balance
 
-    constructor(CuratorVaultBase rig, CuratorVault v) {
+    constructor(CuratorVaultBase rig, AceVault v) {
         (RIG, VAULT) = (rig, v);
     }
 
@@ -121,7 +121,7 @@ contract HoldHandler {
 /// @dev The per-suite NAV check is a consistency assertion because its arithmetic must agree with `grossNav`.
 /// @dev These do not: each is a one-sided bound or a partition read off public views, so agreement here is evidence.
 contract CuratorVaultHoldInvariantsTest is CuratorVaultBase {
-    CuratorVault internal v;
+    AceVault internal v;
     HoldHandler internal handler;
 
     function setUp() public override {
@@ -158,7 +158,7 @@ contract CuratorVaultHoldInvariantsTest is CuratorVaultBase {
     /// @dev The holds PARTITION idle: the requests' hold comes out of exitable, which is all of idle, and lending takes the rest.
     /// @dev A hold is part of idle, never additional to it, so no cash is promised twice; while draining nothing is lendable.
     function invariant_theHoldsPartitionIdle() public view {
-        (uint256 exitable, uint256 heldReq) = v.holds();
+        (uint256 exitable, uint256 heldReq) = vlens.holds(address(v));
         uint256 idle = v.idle();
         assertEq(exitable, idle, "exitable is all of idle");
         assertLe(v.lendable(), exitable, "more is lendable than is exitable");
@@ -173,8 +173,8 @@ contract CuratorVaultHoldInvariantsTest is CuratorVaultBase {
     /// @dev The requests' hold never outruns what the requests are worth, read off the public views alone.
     function invariant_theRequestHoldIsInsideTheRequestsWorth() public view {
         if (v.draining()) return;
-        (uint256 exitable,) = v.holds();
-        assertLe(exitable - v.lendable(), v.previewRedeem(v.requestedShares()) + 1, "more is held than the requests are worth");
+        (uint256 exitable,) = vlens.holds(address(v));
+        assertLe(exitable - v.lendable(), v.previewRedeem(vlens.requestedShares(address(v))) + 1, "more is held than the requests are worth");
     }
 
     /// @dev NAV IS BOUNDED BY WHAT COULD ACTUALLY BE OWED, derived without the vault's own sum.
@@ -197,10 +197,10 @@ contract CuratorVaultHoldInvariantsTest is CuratorVaultBase {
     /// @dev The identity is what makes a DOUBLE REDEEM unrepresentable: a claim can only burn what some request really moved in.
     /// @dev Asserted as equality because no verb here donates, and the safety direction is the `>=` half anyway.
     function invariant_everyRequestedShareIsEscrowed() public view {
-        assertEq(v.balanceOf(address(v)), v.requestedShares(), "the requests and the escrow behind them have parted");
-        (uint256 own,) = v.requestOf(address(handler));
-        assertEq(own, v.requestedShares(), "the one requester's record is not the vault's whole request");
-        assertLe(v.requestedShares(), v.totalSupply(), "the requests claim more shares than exist");
+        assertEq(v.balanceOf(address(v)), vlens.requestedShares(address(v)) + v.SEED_SHARES(), "the requests and the escrow behind them have parted");
+        (uint256 own,) = vlens.requestOf(address(v), address(handler));
+        assertEq(own, vlens.requestedShares(address(v)), "the one requester's record is not the vault's whole request");
+        assertLe(vlens.requestedShares(address(v)), v.totalSupply(), "the requests claim more shares than exist");
         assertFalse(handler.overOrderAccepted(), "the vault stood a request past its holder's balance");
     }
 

@@ -51,8 +51,14 @@ contract YbRecord is IPersistenceRecord {
     uint256 internal immutable PRICE_NUM; // the hub's fixed frame times the quote's atoms per whole token
     uint256 internal immutable PRICE_DEN; // the feed's own scale times the collateral's atoms per whole token
 
+    /// @notice Refuses, as BadParams, a zero feed, LT, underlying or staleness, a zero quote or one equal to the LT, and a gauge staking another LT.
+    /// @notice Refuses too an LT or gauge not 18 decimals, an underlying over 18, and an LT whose `ASSET_TOKEN()` is not `underlying`.
     /// @param feed The USD feed of the token `lt` redeems into, Chainlink-shaped.
+    /// @param lt The yb liquidity token, whose share rates the price composes.
+    /// @param gauge The LT's staking gauge when it is the collateral, else zero.
+    /// @param quote The market's quote, a USD-pegged token taken at par.
     /// @param underlying What `lt` redeems into: a TOKEN, never a decimals number, and the one the LT names.
+    /// @param maxStaleness Seconds since the feed's update before every read answers closed.
     /// @dev A hand-passed decimals is a silent mispricing when wrong; a token address is checkable, and is checked here.
     constructor(address feed, address lt, address gauge, address quote, address underlying, uint256 maxStaleness) {
         if (feed == address(0) || lt == address(0) || maxStaleness == 0) revert BadParams();

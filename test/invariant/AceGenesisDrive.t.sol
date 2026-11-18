@@ -210,6 +210,7 @@ contract AceGenesisDriveTest is StdInvariant, Test {
         console2.log("genesis attempted     ", handler.genesisAttempted());
         console2.log("  of which created    ", handler.genesisCreated());
         console2.log("  of which refused    ", handler.genesisRefused());
+        console2.log("    by the fee rail   ", handler.genesisRefusedByFeeRail());
         console2.log("  skipped at the cap  ", handler.genesisCappedOut());
         console2.log("markets that drew     ", handler.marketsThatDrew());
         console2.log("loans opened          ", handler.loansOpened());
@@ -268,6 +269,20 @@ contract AceGenesisDriveTest is StdInvariant, Test {
         /// @dev cap silently turned iterations past `maxMarkets()` into draw-seed variation on the same configs.
         assertEq(handler.genesisCappedOut(), 0, "the search hit the registry cap, so its later seeds varied no params");
         assertLe(_configsTried, SEEDS, "the search reported more param sets than it had seeds");
+    }
+
+    /// @notice THE RATE SWEEP REACHES THE SHARE RAIL: some seed's config is refused by name, `fee bps too high`.
+    /// @dev The sweep runs a tenth past the per-year top at the fixture's `maxTenor`, so about one config in eleven lands there.
+    /// @dev A search over hashed seeds, one hub each, as `_driveUntilADrawLands` does: the campaign's tally covers one sequence only.
+    function test_Coverage_TheRateSweepReachesTheFeeRail() public {
+        uint256 tried;
+        for (uint256 s; s < 64 && handler.genesisRefusedByFeeRail() == 0; s++) {
+            _rebind(new AceGenesisDriveHandler());
+            handler.createMarket(uint256(keccak256(abi.encode("fee rail", s))));
+            tried++;
+        }
+        console2.log("seeds tried before the fee rail refused one", tried);
+        assertGt(handler.genesisRefusedByFeeRail(), 0, "no seed in 64 reached the share rail's refusal");
     }
 
     /// @dev A SEARCH, never a magic seed. The claim is that SOME admissible config funds a draw, and a

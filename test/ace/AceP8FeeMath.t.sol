@@ -5,6 +5,7 @@ import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {Borrower} from "../../src/ace/hub/Borrower.sol";
 import {Constants} from "../../src/ace/hub/Constants.sol";
+import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
@@ -71,7 +72,7 @@ contract AceP8FeeMathTest is WarpClock {
     function _params() internal view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(record);
-        p.baseBps = 40; // the shipped rate, per minTenor
+        p.lenderAprBps = 2086; // the shipped rate, bps a year
         p.minTenor = TEN7;
         p.maxTenor = TEN7;
         p.settleBountyBps = 50; // PocDeployConfig.SETTLE_BOUNTY_BPS
@@ -184,22 +185,22 @@ contract AceP8FeeMathTest is WarpClock {
         assertGt(lenderTake, 20 * _feeFor(P), "and it dwarfs the origination fee the lender gave up to take it");
     }
 
-    /// @dev The all-in origination fee at this market's single tenor.
+    /// @dev The all-in fee at this market's single tenor and its 2086 a year, as the hub prices it.
     function _feeFor(uint256 principal) internal pure returns (uint256) {
-        return (principal * 40 * uint256(TEN7) * 11000 + (10000 * 10000 * uint256(TEN7)) - 1) / (10000 * 10000 * uint256(TEN7));
+        return LoanMath.originationFee(principal, TEN7, 2086);
     }
 
     /* ================================================================= */
-    /*  E3 -- baseBps is a rate PER minTenor, floored at MIN_TENOR_FLOOR. */
+    /*  E3 -- lenderAprBps is bps a year: no term unit multiplies it.   */
     /*        The fee-share rail bounds fee/principal, never fee/time.    */
     /* ================================================================= */
 
-    /// @notice Two markets, identical but for `minTenor`, price credit ~168x apart. Both pass genesis.
-    /// @dev `MAX_FEE_SHARE_BPS` bounds the fee as a fraction of the DRAW at any admissible term.
-    /// @dev It is scale-invariant in time, so it says nothing about the rate a borrower actually pays.
-    function test_P8_E3_TheFeeShareRailIsTimeScaleInvariant_SoTheRateIsUnbounded() public {
+    /// @notice An hour-long market at 500 prices credit at 5.5 percent a year all-in, not 20,000: the rate is bps a year.
+    /// @dev `MAX_FEE_SHARE_BPS` bounds the fee as a fraction of the DRAW at maxTenor; the rate field is the APR itself.
+    /// @dev Under the per-term unit this same market read as over 20,000 percent a year, and a term unit multiplied it.
+    function test_P8_E3_TheRateIsAYearSoNoTermUnitMultipliesIt() public {
         MarketParams memory p = _params();
-        p.baseBps = 500; // the rate #380 measured this at; the per-term band that once capped it here is gone
+        p.lenderAprBps = 500; // the rate #380 measured this at, now 5 percent a year
         p.minTenor = 1 hours;
         p.maxTenor = 1 hours;
         bytes32 fast = ace.createMarket(p); // genesis admits it
@@ -207,24 +208,23 @@ contract AceP8FeeMathTest is WarpClock {
 
         Borrower.Quote memory q = ace.previewOpen(fast, COLL, P, 1 hours, borrower, OpenBounds(0, 0, 0));
 
-        // the fee is 5.5% of the draw -- inside MAX_FEE_SHARE_BPS (25%) with room to spare
-        assertApproxEqRel(q.fee, (P * 55) / 1000, 1e12, "5.5% of principal, per HOUR");
+        // 500 bps a year, ACE's share on top, for one hour of 70,000: 439,497.7 atoms, ceiled
+        assertEq(q.fee, 439_498, "an hour of 5.5 percent a year all-in");
         uint256 aprBps = (q.fee * 10000 * 365 days) / (P * 1 hours);
         emit log_named_uint("fee, bps of principal, one term", (q.fee * 10000) / P);
         emit log_named_uint("implied APR, bps", aprBps);
-        assertGt(aprBps, 2_000_000, "over 20,000% APR, and every genesis rail passed");
+        assertEq(aprBps, 550, "the implied APR is the field plus the share, whatever the term");
 
-        // the shipped market, same rail, same fee-share headroom, 22.9% APR
+        // the shipped market: 2086 a year to the lender, 22.94 percent all-in
         Borrower.Quote memory s = ace.previewOpen(id, COLL, P, TEN7, borrower, OpenBounds(0, 0, 0));
         uint256 shippedAprBps = (s.fee * 10000 * 365 days) / (P * uint256(TEN7));
         emit log_named_uint("shipped market APR, bps", shippedAprBps);
-        assertLt(shippedAprBps, 3000, "the shipped market is under 30% APR");
-        assertGt(aprBps / shippedAprBps, 100, "the two differ by over 100x on ONE field neither reads as a rate");
+        assertEq(shippedAprBps, 2294, "the shipped market's all-in APR, read off its own fee");
 
         // the floor of the scale: a WINDOW rail derived from the divisors, never sized against the rate
         uint64 floor = Constants.MIN_TENOR_FLOOR;
         MarketParams memory q1 = _params();
-        q1.baseBps = 500;
+        q1.lenderAprBps = 500;
         (q1.minTenor, q1.maxTenor) = (floor - 1, floor - 1);
         vm.expectRevert(bytes("min tenor under floor"));
         ace.createMarket(q1);

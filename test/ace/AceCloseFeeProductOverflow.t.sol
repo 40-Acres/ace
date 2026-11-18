@@ -54,9 +54,8 @@ contract LoanAccountingHarness {
 /// @dev The pro-rata equivalence fuzz went with the split: there is nothing to compare a plain form against.
 contract AceCloseFeeProductOverflowTest is Test {
     uint256 internal constant CASH_CAP = type(uint128).max; // a market's most, per `Lender.creditCash`
-    uint64 internal constant MIN_TENOR = 1 days;
     uint64 internal constant MAX_TENOR = 4 days;
-    uint256 internal constant RAIL_BPS = 568; // worst rate a 4x multiple admits: feeFundable gives b <= 2500/(4*1.1) = 568.18, not a flat market's 2272
+    uint256 internal constant RAIL_BPS = 207_386; // worst rate a 4-day maxTenor admits: b <= 2500 * 1e4 * 365 days / (4 days * 11000)
 
     LoanAccountingHarness internal h;
 
@@ -66,17 +65,17 @@ contract AceCloseFeeProductOverflowTest is Test {
 
     /// @dev The refundable half of the lender fee on a draw of a whole cash cap, at the rail's worst rate.
     function _escrow() private pure returns (uint256) {
-        uint256 fee = LoanMath.originationFee(CASH_CAP, MAX_TENOR, RAIL_BPS, MIN_TENOR);
+        uint256 fee = LoanMath.originationFee(CASH_CAP, MAX_TENOR, RAIL_BPS);
         return LoanMath.escrowCut(fee);
     }
 
     /// @notice THE RATE THIS FILE'S CORNER RESTS ON, PROVED HERE rather than asserted in the comment beside it.
-    /// @notice At a 4x term multiple the fee-share rail binds four times harder than it does on a flat market.
-    /// @dev `b * M * 1.1 <= 2500` at M = 4 gives `b <= 568.18`, so 568 admits and 569 does not.
-    /// @dev Spelled out because the next reader will otherwise reach for a flat market's 2272 and re-break it.
-    function test_TheWorstRateThisShapeAdmitsIs568() public pure {
-        assertTrue(LoanMath.feeFundable(RAIL_BPS, MAX_TENOR, MIN_TENOR), "568 clears the fee-share rail at a 4x term multiple");
-        assertTrue(!LoanMath.feeFundable(RAIL_BPS + 1, MAX_TENOR, MIN_TENOR), "569 does not, so this really is the worst corner");
+    /// @notice The fee-share rail reads maxTenor alone, so a 4-day market's ceiling is the highest rate any 4-day market carries.
+    /// @dev `b * 4 days * 1.1 <= 2500 * 1e4 * 365 days` gives `b <= 207,386.4`, so 207,386 admits and 207,387 does not.
+    /// @dev Spelled out because the next reader will otherwise reach for a one-year market's 2272 and re-break it.
+    function test_TheWorstRateThisShapeAdmitsIs207386() public pure {
+        assertTrue(LoanMath.feeFundable(RAIL_BPS, MAX_TENOR), "207,386 clears the fee-share rail at a 4-day maxTenor");
+        assertTrue(!LoanMath.feeFundable(RAIL_BPS + 1, MAX_TENOR), "207,387 does not, so this really is the worst corner");
     }
 
     /// @notice THE CLOSE-SIDE REPRO, kept: the escrow earn survives the largest share a full market can carry.
@@ -93,7 +92,7 @@ contract AceCloseFeeProductOverflowTest is Test {
     /// @dev This fails on the arithmetic rather than on a constant, which is what a real rail should do.
     function test_TheWholeLenderCutIsAlsoTotal() public {
         h.seedClaim(1, CASH_CAP);
-        uint256 fee = LoanMath.originationFee(CASH_CAP, MAX_TENOR, RAIL_BPS, MIN_TENOR);
+        uint256 fee = LoanMath.originationFee(CASH_CAP, MAX_TENOR, RAIL_BPS);
         uint256 cut = LoanMath.lenderCut(fee);
 
         h.earn(1, cut);

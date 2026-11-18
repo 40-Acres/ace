@@ -162,7 +162,7 @@ contract AceDeletedChannelFenceTest is Test {
 
         MarketParams memory p = ace.idToMarketParams(id);
         /// @dev The smallest successor that clears `DrawBelowDebt`, so the only refusal left is the cash one.
-        uint256 np = RefinanceMath.principalForOwed(read.debtOf(loanId) - read.feeEscrowOf(loanId), p.minTenor, p.baseBps, p.minTenor);
+        uint256 np = RefinanceMath.principalForOwed(read.debtOf(loanId) - read.feeEscrowOf(loanId), p.minTenor, p.lenderAprBps);
         MigrateArgs memory m = MigrateArgs({
             id: loanId, dst: id, newPrincipal: np, newTenor: p.minTenor, bnd: OpenBounds(0, 0, 0), withdrawUnits: COLL / 10, withdrawTo: borrower
         });

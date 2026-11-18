@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
 import {AceVault} from "../../src/curator/AceVault.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {AceInventoryLens} from "../../src/ace/lens/AceInventoryLens.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
@@ -27,13 +27,13 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
 
     // ---- helpers ----
 
-    function _request(CuratorVault v, address who, uint256 shares) internal {
+    function _request(AceVault v, address who, uint256 shares) internal {
         vm.prank(who);
         v.requestExit(shares);
     }
 
     /// @dev Claim all of `who`'s request exitable cash covers now; nothing when it covers none of it.
-    function _claim(CuratorVault v, address who) internal returns (uint256 got) {
+    function _claim(AceVault v, address who) internal returns (uint256 got) {
         uint256 m = v.maxClaim(who); // BEFORE the prank: a read is a call, and a call would eat it
         if (m == 0 || v.previewRedeem(m) == 0) return 0;
         vm.prank(who);
@@ -42,24 +42,24 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
     }
 
     /// @dev Claim the whole of `who`'s request, which a holder may always ask for when exitable cash covers its floored worth.
-    function _claimWhole(CuratorVault v, address who) internal returns (uint256 got) {
+    function _claimWhole(AceVault v, address who) internal returns (uint256 got) {
         uint256 esc = _escrow(v, who); // BEFORE the prank: a read is a call, and a call would eat it
         vm.prank(who);
         got = v.claimExit(esc, who, 0);
         paidTo[who] += got;
     }
 
-    function _escrow(CuratorVault v, address who) internal view returns (uint256 shares) {
-        (shares,) = v.requestOf(who);
+    function _escrow(AceVault v, address who) internal view returns (uint256 shares) {
+        (shares,) = vlens.requestOf(address(v), who);
     }
 
     /// @dev The price a claim at this instant computes, at the vault's own rounding.
-    function _price(CuratorVault v) internal view returns (uint256) {
+    function _price(AceVault v) internal view returns (uint256) {
         return Math.mulDiv(v.totalAssets() + 1, 1e18, v.totalSupply() + V_OFF);
     }
 
     /// @dev Settle the loan and sweep, returning the fall in gross NAV.
-    function _settle(CuratorVault v, uint256 loanId) internal returns (uint256 drop) {
+    function _settle(AceVault v, uint256 loanId) internal returns (uint256 drop) {
         uint256 g = v.grossNav();
         _finalize(loanId);
         _crankAll(v);
@@ -67,14 +67,14 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
     }
 
     /// @dev Two equal LPs and no loans: every cent idle, nothing deferred.
-    function _flat() internal returns (CuratorVault v) {
+    function _flat() internal returns (AceVault v) {
         v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         _lpDeposit(v, bob, SEED);
     }
 
     /// @dev Two equal LPs, the given loans out, NAV flat once the opens' own gain has vested.
-    function _book(uint256 a, uint256 b) internal returns (CuratorVault v, uint256 first, uint256 second) {
+    function _book(uint256 a, uint256 b) internal returns (AceVault v, uint256 first, uint256 second) {
         v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         _lpDeposit(v, bob, SEED);
@@ -89,7 +89,7 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
     }
 
     /// @dev Entry is shut by the pile gate: both max views read zero and both verbs refuse with `GainVesting`.
-    function _assertEntryShut(CuratorVault v) internal {
+    function _assertEntryShut(AceVault v) internal {
         assertEq(v.maxDeposit(entrant), 0, "maxDeposit advertised an entry the gate refuses");
         assertEq(v.maxMint(entrant), 0, "and so did maxMint");
         usdc.mint(entrant, 1e6);
@@ -103,7 +103,7 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
     }
 
     /// @dev alice requests whole, mallory does not, `LOAN` drawn; nothing deferred.
-    function _rig41() internal returns (CuratorVault v, uint256 loanId) {
+    function _rig41() internal returns (AceVault v, uint256 loanId) {
         v = _newVault(0);
         _lpDeposit(v, alice, ALICE_IN);
         _lpDeposit(v, mallory, MALLORY_IN);
@@ -112,7 +112,7 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
         _warpBy(VEST_W);
         v.crank();
         _request(v, alice, v.balanceOf(alice));
-        assertEq(_escrow(v, alice), v.balanceOf(address(v)), "PREMISE: alice's whole holding is requested");
+        assertEq(_escrow(v, alice) + v.SEED_SHARES(), v.balanceOf(address(v)), "PREMISE: alice's whole holding is requested");
     }
 
     // ---- a claim in a dip pays the dip ----
@@ -120,7 +120,7 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
     /// @notice A DIP CLAIM PAYS THE DIP PRICE, AND THE REQUEST KEEPS NO RECOVERY CLAIM: the later sale vests to whoever still holds.
     /// @notice The same rig that once advanced alice and burned her at the window's end: she now sells at the trough, about 3,960.
     function test_Claim_ADipClaimPaysTheDipPriceAndKeepsNoRecoveryClaim() public {
-        (CuratorVault v, uint256 loanId) = _rig41();
+        (AceVault v, uint256 loanId) = _rig41();
         _settle(v, loanId);
         uint256 sh = _escrow(v, alice);
         uint256 worth = v.convertToAssets(sh);
@@ -142,7 +142,7 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
 
     /// @notice A DIP DEEPER THAN THE OLD BAND SHUTS ENTRY UNTIL ITS POT SELLS: there is no trough gate, but the settled pot is unsold.
     function test_Gate_ADeepDipRefusesEntryUntilTheSale() public {
-        (CuratorVault v, uint256 doomed,) = _book(DEEP, 0);
+        (AceVault v, uint256 doomed,) = _book(DEEP, 0);
         uint256 p0 = _price(v);
         _settle(v, doomed);
         assertLt(_price(v) * 10_000, p0 * (10_000 - v.GATE_BPS()), "PREMISE: the dip sits deeper than GATE_BPS");
@@ -152,7 +152,7 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
     /// @notice MEASURE, the exemption's disclosed cost: UNDER A GUARDIAN'S EXEMPTION A TROUGH ENTRANT TAKES `R * X / (X + F)` OF A LATE SALE.
     /// @notice An exempted pot that later sells is shared with whoever entered over it; the stayers lose exactly what the entrant gains.
     function test_Measure_ATroughEntrantSharesTheRecovery() public {
-        (CuratorVault v, uint256 doomed,) = _book(DEEP, 0);
+        (AceVault v, uint256 doomed,) = _book(DEEP, 0);
         _settle(v, doomed);
         _waivePots(v); // the guardian exempts the pot, which then sells after all
         uint256 x = v.totalAssets(); // the entrant matches the stayers' NAV, so f is about one half
@@ -176,7 +176,7 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
     /// @notice Every LP requests whole; the book is lent but for two USDC of change; the loan settles; both claim the change, voluntarily.
     /// @notice At supply zero the pile gate is skipped, but the unsold-pot gate holds at any supply, so no entrant buys the recovery.
     function test_Gate_ADustClaimEmptiesTheVaultAndTheNextEntrantWaitsForTheSale() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         _lpDeposit(v, bob, SEED);
         uint256 last = _open(2 * SEED - 2e6); // the change and the open's fee are all the idle there is
@@ -188,7 +188,7 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
         _settle(v, last);
         uint256 dust = _claimWhole(v, alice) + _claimWhole(v, bob); // the trough claims, the holders' own choice
         emit log_named_uint("what the trough claims paid the whole supply", dust);
-        assertEq(v.totalSupply(), 0, "the trough claims left supply standing");
+        assertEq(v.totalSupply(), v.SEED_SHARES(), "the trough claims left live supply standing");
         assertLt(dust * 20, 2 * SEED, "PREMISE: the claims paid under a twentieth of what was put in");
         _assertEntryWaitsForTheSale(v, entrant);
     }
@@ -196,7 +196,7 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
     /// @notice MEASURE, E3's curator variant: A FEE SHARE NOBODY REQUESTED NO LONGER TAKES THE REQUESTERS' RECOVERY.
     /// @notice Two LPs request whole and claim out while the sale's cash vests; the last requester's claim releases the pile beside the fee shares.
     function test_Measure_ACuratorFeeShareNoLongerTakesTheRecoveryRequestersClaimDuringItsVest() public {
-        CuratorVault v = _newVault(2000);
+        AceVault v = _newVault(2000);
         _lpDeposit(v, alice, SEED);
         _lpDeposit(v, bob, SEED);
         uint256 growth = _open(2_000e6);
@@ -215,7 +215,7 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
         _claim(v, bob);
         _settle(v, last);
         uint256 supply = v.totalSupply();
-        uint256 queued = v.requestedShares();
+        uint256 queued = vlens.requestedShares(address(v));
         uint256 nav = v.totalAssets();
         uint256 g = v.grossNav();
         uint256 hw = v.feeHighWater();
@@ -225,10 +225,10 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
         uint256 recovered = v.grossNav() - g;
         _repay(tail, read.debtOf(tail)); // before the claims, so exitable cash covers a claim the release prices at gross
         _crankAll(v);
-        for (uint256 i; i < 32 && v.requestedShares() != 0; i++) {
+        for (uint256 i; i < 32 && vlens.requestedShares(address(v)) != 0; i++) {
             if (_claim(v, alice) + _claim(v, bob) == 0) break;
         }
-        assertEq(v.requestedShares(), 0, "PREMISE: the requests were claimed out");
+        assertEq(vlens.requestedShares(address(v)), 0, "PREMISE: the requests were claimed out");
         _warpBy(VEST_W);
         uint256 fair = Math.mulDiv(fee, nav + recovered, supply);
         uint256 after_ = v.convertToAssets(fee);
@@ -248,7 +248,7 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
     /// @notice A WHALE IS REFUSED WHILE A RECOVERY VESTS: a pile over GATE_BPS of NAV and one unit shuts entry.
     /// @notice It holds no exit: a request, an instant withdraw and a claim all land; entry reopens once the pile has vested under the line.
     function test_Gate_AWhaleIsRefusedWhileARecoveryVests() public {
-        (CuratorVault v, uint256 doomed,) = _book(DEEP, 0);
+        (AceVault v, uint256 doomed,) = _book(DEEP, 0);
         _request(v, bob, v.balanceOf(bob));
         _settle(v, doomed);
         AceInventoryLens inv = new AceInventoryLens(address(ace), address(lens));
@@ -271,13 +271,13 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
     /// @notice A SMALL PILE ADMITS ENTRY: a pile at 4% of NAV takes a full-size deposit, and so does a near-empty vault's sub-unit pile.
     /// @dev Killed by M78, on the second leg: without the one-unit floor a pile of half a unit would shut a five-unit vault.
     function test_Gate_ASmallPileAdmitsEntry() public {
-        CuratorVault v = _flat();
+        AceVault v = _flat();
         _gift(v, 800e6); // 4% of the book
         v.crank();
         assertGt(v.unvested(), v.VEST_FLOOR(), "PREMISE: a pile over one unit stands");
         assertEq(v.maxDeposit(entrant), type(uint256).max, "a pile under GATE_BPS of NAV shut entry");
         assertGt(_lpDeposit(v, entrant, SEED), 0, "and the full-size deposit was refused");
-        CuratorVault w = _newVault(0);
+        AceVault w = _newVault(0);
         _lpDeposit(w, alice, 5e6);
         _giftPart(w, 20e6, 5e5); // half a unit on a five-unit vault
         w.crank();
@@ -290,7 +290,7 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
     /// @notice MAXDEPOSIT AGREES WITH DEPOSIT UNDER AN UNSYNCED GAIN: the view reads the pile the verb's own sync would leave.
     /// @dev Killed by M76: a view reading the stored pile advertises the entry the verb then refuses.
     function test_Gate_MaxDepositAgreesWithDepositUnderAnUnsyncedGain() public {
-        CuratorVault v = _flat();
+        AceVault v = _flat();
         _gift(v, 2_000e6); // 10% of the book, and nothing has synced it
         assertEq(v.unvested(), 0, "PREMISE: no sync has stamped the gain");
         assertEq(v.maxDeposit(entrant), 0, "maxDeposit advertised an entry the verb refuses");
@@ -310,14 +310,14 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
 
     /// @notice A VAULT EVERY LP LEFT STAYS OPEN TO A NEW LIFE: the full exit was a claim, and the next two entrants are admitted.
     function test_Gate_AVaultEveryLpLeftAdmitsANewLife() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         _gift(v, 2_000e6); // the old life ends well above genesis
         v.crank();
         _warpBy(VEST_W);
         _request(v, alice, v.balanceOf(alice));
         _claimWhole(v, alice);
-        assertEq(v.totalSupply(), 0, "PREMISE: the old life ended");
+        assertEq(v.totalSupply(), v.SEED_SHARES(), "PREMISE: the old life ended, the genesis seed alone remaining");
         assertEq(v.maxDeposit(bob), type(uint256).max, "a vault every LP left shut its first entrant out");
         assertGt(_lpDeposit(v, bob, SEED), 0, "and the first entrant was refused");
         assertGt(_lpDeposit(v, carol, SEED), 0, "and the second entrant was shut out");
@@ -328,7 +328,7 @@ contract CuratorVaultTroughTest is CuratorVaultBase {
     /// @notice A CLAIM UNDER A PILE FORFEITS ITS SHARE TO THE STAYERS: it pays at once at the net price, and the pile vests to whoever stays.
     /// @notice ACCEPTANCE of a recorded residual: at most one `VEST_WINDOW` of gains per claimed share, as any vault that unlocks profit.
     function test_Vest_AClaimUnderAPileForfeitsItsShareToTheStayers() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, 10_000e6);
         _lpDeposit(v, bob, 10_000e6);
         _request(v, bob, v.balanceOf(bob) / 2);

@@ -22,8 +22,8 @@ import {Constants} from "../../src/ace/hub/Constants.sol";
 /// @dev The escrow is measured as MONEY, not storage, so the assertion never names a slot layout.
 /// @dev `balanceOf(hub) - totalCash - protocolRevenue` IS the pot by the solvency identity.
 /// @dev `RebateReader` cross-checks the same number against the `LoanBook` slot in hub storage.
-/// @dev THE LAUNCH LADDER IS THE FIXTURE: 7d/30d rungs, 40 bps to the LENDER at the short rung.
-/// @dev The borrower's all-in is 44 bps there: the protocol's 10% is charged ON TOP, never carved out.
+/// @dev THE LAUNCH LADDER IS THE FIXTURE: 7d/30d rungs at 2190 bps a year to the LENDER, 42 bps over the short rung.
+/// @dev The borrower's all-in is 46.2 bps there: the protocol's 10% is charged ON TOP, never carved out.
 /// @dev PRINCIPAL divides EXACTLY, so the assertions are literal integers, never a re-derivation.
 contract AceEarlyExitRebateTest is WarpClock {
     Ace internal ace;
@@ -50,14 +50,16 @@ contract AceEarlyExitRebateTest is WarpClock {
     uint256 internal constant COLL = 100_000e18; // trigger 0.98e18, just under the tick-0 floor
     uint256 internal constant FLOAT = 1_000_000e6; // working capital, so cost is a balance delta
 
-    uint256 internal constant FEE30 = 1_320e6; // 70_000 * 44 bps all-in * 30/7
-    uint256 internal constant PROTO30 = 120e6; // FEE30 / 11: the take does not move, only who bears it
-    uint256 internal constant LENDER30 = 1_200e6; // 70_000 * 40 bps * 30/7, the lender's whole rate
-    uint256 internal constant ESCROW30 = 600e6; // phi = 0.5 of the lender share
-    uint256 internal constant REFUND30_AT15 = 300e6; // half the escrow at the midpoint
+    uint256 internal constant RATE = 2190; // bps a year to the lender: 6 a day, so every figure below is exact
 
-    uint256 internal constant FEE7 = 308e6; // 70_000 * 44 bps all-in
-    uint256 internal constant ESCROW7 = 140e6; // phi = 0.5 of the 280 lender share
+    uint256 internal constant FEE30 = 1_386e6; // 70_000 * 2190 bps * 30/365 * 1.1, all-in
+    uint256 internal constant PROTO30 = 126e6; // FEE30 / 11: the take does not move, only who bears it
+    uint256 internal constant LENDER30 = 1_260e6; // 70_000 * 2190 bps * 30/365, the lender's whole rate
+    uint256 internal constant ESCROW30 = 630e6; // phi = 0.5 of the lender share
+    uint256 internal constant REFUND30_AT15 = 315e6; // half the escrow at the midpoint
+
+    uint256 internal constant FEE7 = 323_400_000; // 70_000 * 2190 bps * 7/365 * 1.1, all-in
+    uint256 internal constant ESCROW7 = 147e6; // phi = 0.5 of the 294 lender share
 
     uint256 internal T; // par itself; every draw in this file floors here, and setUp assigns it
     uint256 internal DEEP; // a price the draws in this file never reach; kept as the second market cash lot
@@ -101,6 +103,7 @@ contract AceEarlyExitRebateTest is WarpClock {
         p.record = address(record);
         p.minTenor = TEN7;
         p.maxTenor = TEN30;
+        p.lenderAprBps = RATE;
     }
 
     function _deposit(address who, uint256 amt) internal {
@@ -180,7 +183,7 @@ contract AceEarlyExitRebateTest is WarpClock {
     // ============ what open withholds ============
 
     /// @notice `open` withholds phi of the LENDER share, off the tick credit, never off the protocol cut.
-    /// @dev FAILS TODAY: the funding tick takes the whole 1,140 lender share and the pot reads 0.
+    /// @dev FAILS TODAY: the funding tick takes the whole 1,260 lender share and the pot reads 0.
     function test_Open_WithholdsHalfTheLenderShare_OffTheTickCreditOnly() public {
         uint256 cash0 = read.restingOf(id);
         uint256 loanId = _open(borrowerA, TEN30);
@@ -231,7 +234,7 @@ contract AceEarlyExitRebateTest is WarpClock {
     // ============ what a clean close returns ============
 
     /// @notice Plan test 1: a 30d loan repaid at its midpoint returns a quarter of the lender share.
-    /// @dev FAILS TODAY: the refund is 0, so the cost is the whole 1,200.
+    /// @dev FAILS TODAY: the refund is 0, so the cost is the whole 1,386.
     function test_Repay_At15Days_RefundsAQuarterOfTheLenderShare() public {
         uint256 loanId = _open(borrowerA, TEN30);
         _warpTo(t0 + 15 days);
@@ -246,9 +249,9 @@ contract AceEarlyExitRebateTest is WarpClock {
     }
 
     /// @notice The headline identity, as integers, to the wei.
-    /// @dev cost/P = (baseBps / minTenor) * [ (T + t)/2 + s * T ], s = Constants.PROTOCOL_SHARE_BPS/10000.
+    /// @dev cost/P = (rate / 365 days) * [ (T + t)/2 + s * T ], s = Constants.PROTOCOL_SHARE_BPS/10000.
     /// @dev The borrower pays the midpoint of term booked and used, PLUS the share on the WHOLE term.
-    /// @dev Denominators cleared: 2*cost*1e8*minTenor == P*baseBps*(1e4*(T+t) + 2*shareBps*T).
+    /// @dev Denominators cleared: 2*cost*1e8*365 days == P*rate*(1e4*(T+t) + 2*shareBps*T).
     /// @dev Restating it in a form the source never takes is the point: this is not a mirror.
     function test_Identity_MidpointPricing_HoldsToTheWei() public {
         uint256 loanId = _open(borrowerA, TEN30);
@@ -256,22 +259,22 @@ contract AceEarlyExitRebateTest is WarpClock {
         _repayFull(borrowerA, loanId);
 
         uint256 elapsed = 15 days;
-        uint256 lhs = 2 * _cost(borrowerA) * 10000 * 10000 * uint256(TEN7);
-        uint256 rhs = P * PocDeployConfig.BASE_BPS * (10000 * (uint256(TEN30) + elapsed) + 2 * Constants.PROTOCOL_SHARE_BPS * uint256(TEN30));
+        uint256 lhs = 2 * _cost(borrowerA) * 10000 * 10000 * Constants.SECONDS_PER_YEAR;
+        uint256 rhs = P * RATE * (10000 * (uint256(TEN30) + elapsed) + 2 * Constants.PROTOCOL_SHARE_BPS * uint256(TEN30));
         assertEq(lhs, rhs, "the midpoint identity does not hold");
     }
 
-    /// @notice Plan test 2: a 7d loan at 40 bps to the lender, exited at 3.5d, costs 34 bps and refunds 10.
-    /// @dev 10 bps is HALF the 20 bps escrow pool, which is what phi = 0.5 means here.
+    /// @notice Plan test 2: a 7d loan at 2190 bps a year to the lender, exited at 3.5d, costs 35.7 bps and refunds 10.5.
+    /// @dev 10.5 bps is HALF the 21 bps escrow pool, which is what phi = 0.5 means here.
     function test_Repay_ShortRungAtHalfTerm_Refunds10Bps() public {
         uint256 loanId = _open(borrowerC, TEN7);
         _warpTo(t0 + 3.5 days);
         uint256 refund = _repayFull(borrowerC, loanId);
 
-        assertEq(refund, 70_000_000, "10 bps of 70,000 USDC");
-        assertEq(refund * 10000, P * 10, "stated as bps: refund/P == 10/10000");
+        assertEq(refund, 73_500_000, "10.5 bps of 70,000 USDC");
+        assertEq(refund * 20000, P * 21, "stated as bps: refund/P == 10.5/10000");
         assertEq(refund, ESCROW7 / 2, "which is half the 7d escrow");
-        assertEq(_cost(borrowerC), FEE7 - 70_000_000, "cost is 34 bps");
+        assertEq(_cost(borrowerC), FEE7 - 73_500_000, "cost is 35.7 bps");
     }
 
     /// @notice Plan tests 3 and 31: closing in the opening block returns the escrow, still at a loss.
@@ -325,7 +328,7 @@ contract AceEarlyExitRebateTest is WarpClock {
     /// @notice THE PIN. A 30d rung held to maturity undercuts five 7d rungs.
     /// @notice And a 30d rung exited at 28d still costs MORE than four 7d rungs.
     /// @dev Every figure is a measured borrower drawdown, not a formula, and every one is exact.
-    /// @dev AT PHI = 1 the 28d exit prices at 1,240 instead of 1,280: above 1,232 by 8 USDC, not 48.
+    /// @dev AT PHI = 1 the 28d exit prices at 1,302 instead of 1,344: above 1,293.6 by 8.4 USDC, not 50.4.
     /// @dev The equalities are what kill a phi = 1 mutant; the inequalities are the doctrine.
     /// @dev Three loans open in one block and close on their own clocks, so no snapshot is needed.
     function test_Ladder_LongRungUndercutsFiveShort_ButAnEarlyExitDoesNotUndercutFour() public {
@@ -344,12 +347,12 @@ contract AceEarlyExitRebateTest is WarpClock {
         uint256 long30 = _cost(borrowerA);
         uint256 exit28 = _cost(borrowerB);
 
-        assertEq(short7, 308e6, "7d held to maturity: 44 bps all-in");
-        assertEq(long30, 1_320e6, "30d held to maturity: 188.57 bps");
-        assertEq(exit28, 1_280e6, "30d exited at 28d: 182.86 bps");
+        assertEq(short7, 323_400_000, "7d held to maturity: 46.2 bps all-in");
+        assertEq(long30, 1_386e6, "30d held to maturity: 198 bps");
+        assertEq(exit28, 1_344e6, "30d exited at 28d: 192 bps");
 
-        assertLt(long30, 5 * short7, "term must beat rolling five short rungs: 1320 < 1540");
-        assertGt(exit28, 4 * short7, "and an early exit must not beat four of them: 1280 > 1232");
+        assertLt(long30, 5 * short7, "term must beat rolling five short rungs: 1386 < 1617");
+        assertGt(exit28, 4 * short7, "and an early exit must not beat four of them: 1344 > 1293.6");
         _assertSolvency();
     }
 

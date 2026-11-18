@@ -42,7 +42,7 @@ contract AceS3ZeroFreshDeficitTest is WarpClock {
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(coll));
         p.record = address(rec);
         p.lender = alice;
-        p.baseBps = 40;
+        p.lenderAprBps = 40;
         p.minTenor = TEN7;
         p.maxTenor = TEN28;
         AceFixtures.Deployment memory d = AceFixtures.deploy(p);

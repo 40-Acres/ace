@@ -12,7 +12,7 @@ import {Borrower} from "../../src/ace/hub/Borrower.sol";
 import {LoanClosed, NotExpired, NotSettleable} from "../../src/ace/hub/Settlement.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {Cfg, Loan, MarketParams, MarketState, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol";
-import {NotBorrower, QuoteMismatch} from "../../src/ace/hub/Borrower.sol";
+import {BufferBelowMin, ExtensionTooEarly, QuoteMismatch, UnderPrice} from "../../src/ace/hub/Borrower.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {PositionTitleNFT} from "../../src/ace/positions/PositionTitleNFT.sol";
 import {PriceFrame} from "../utils/PriceFrame.sol";
@@ -230,16 +230,33 @@ contract AceHandler is WarpClock, DeleverageCrank {
     uint8 public extendInPlaceCode; // first law broken: 1 minted, 2 expiry, 3 debt, 4 resting moved, 5 cash fee short, 6 draw count off
     uint256 public extendInPlaceLoanId;
 
-    /// @dev THE CALLER SPLIT of the view-versus-verb straddle: 0 the holder, 1 the market lender.
+    /// @dev THE CALLER SPLIT of the view-versus-verb straddle: 0 the holder, 1 a stranger.
     uint256[2] public modeBothAdmit;
     uint256[2] public modeBothRefuse;
 
-    /// @dev THE E-3 PATH: the market lender, holding the holder's credit grant, extends in cash it pays itself; ungranted it refuses.
-    uint256 public operatorTries; // `lenderExtend` straddles run
-    uint256 public operatorLanded; // of those, the ones that extended: granted
-    uint256 public operatorRefusedByName; // the ungranted asks, refused `NotBorrower` at both doors as they must be
-    uint8 public operatorCode; // first break: 1 landed ungranted, 2 refused it by another name, 3 the fee not the lender's
-    uint256 public operatorLoanId;
+    /// @dev THE NON-HOLDER RULE: a stranger, holding no title and no approval, extends in cash it pays itself, or is refused by the rule's name.
+    address public extStranger = address(0x5E7E1); // extends, tops up and adds lots it holds no title to; distinct from every fuzzed actor
+    uint256 public strangerTries; // `strangerExtend` straddles run
+    uint256 public strangerLanded; // of those, the ones that extended
+    uint256 public strangerRefusedEarly; // refused `ExtensionTooEarly`
+    uint256 public strangerRefusedUnderPrice; // refused `UnderPrice`
+    uint256 public strangerRefusedInBand; // refused `BufferBelowMin`, the band leg's
+    uint8 public strangerCode; // first break: a landing under the price 1, in the band 2, early 3, at the wrong wallet 4; a misnamed refusal 5 to 7
+    uint256 public strangerLoanId;
+
+    /// @dev THE TOP-UP: `tryDrawMore` straddled against `drawMore`, the holder's ask or one stranger's in four.
+    uint256 public drawMoreTries; // straddles run
+    uint256 public drawMoreLanded; // of those, the ones that drew
+    uint256 public drawMoreBothRefuse; // refused at both doors
+    uint8 public drawMoreCode; // first break: 1 a stranger drew, 2-4 the view against the verb, 5 debt or claim off, 6 term or lot moved, 7 payout off
+    uint256 public drawMoreLoanId;
+
+    /// @dev THE ADDED LOT: anyone may add units to a live loan, and only the lot moves.
+    uint256 public addTries; // `addCollateral` asks that reached the hub
+    uint256 public addLanded; // of those, the ones that added
+    uint256 public addByStranger; // landed adds a stranger paid for
+    uint8 public addCode; // first break: 1 the lot moved by another amount, 2 debt, claim, term or escrow moved, 3 the payer's units off, 4 refused
+    uint256 public addLoanId;
 
     /// @dev The refinance ghosts, SUCCEEDING the rotation's: same floor law, different writer.
     /// @dev A refinance retires exactly one loan's floor and writes exactly one new one.
@@ -894,7 +911,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
 
     function _fee(uint256 principal, uint64 tenor) internal view returns (uint256) {
         MarketParams memory p = ace.idToMarketParams(id);
-        return LoanMath.originationFee(principal, tenor, p.baseBps, p.minTenor);
+        return LoanMath.originationFee(principal, tenor, p.lenderAprBps);
     }
 
     // ---- ghost snapshots ----
@@ -1831,7 +1848,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
     }
 
     /// @dev Whether an extension can still land: live, and short of its expiry.
-    /// @dev `_extendOne` first warps to a seeded second past the open one, where an extension adds no time, and short of expiry.
+    /// @dev `_extendOne` first warps past `openTime`, so past the term's first second where an extension adds no time, and short of expiry.
     /// @dev Judged at the later of the clock and the chain, which is the time `_warpAtLeastTo` re-anchors to and the hub reads.
     function _reachable(uint256 loanId) internal view returns (bool) {
         Loan memory l = read.loan(loanId);
@@ -1844,7 +1861,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
         return chain > _now() ? chain : _now();
     }
 
-    /// @dev Warp to a seeded second inside `loanId`'s term: past its open second and the present, short of its expiry.
+    /// @dev Warp to a seeded second inside `loanId`'s term: past `openTime`, which a top-up may have moved, and the present, short of expiry.
     function _warpIntoTerm(uint256 loanId, uint256 whenSeed) internal {
         Loan memory l = read.loan(loanId);
         uint256 t = _later();
@@ -1852,7 +1869,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
         _warpAtLeastTo(bound(whenSeed, lo, uint256(l.expiry) - 1));
     }
 
-    /// @notice Whether an extension can still land on `loanId`: the reach `extend` and `lenderExtend` pick by.
+    /// @notice Whether an extension can still land on `loanId`: the reach `extend`, `strangerExtend`, `drawMore` and `addCollateral` pick by.
     function reachable(uint256 loanId) external view returns (bool) {
         return _reachable(loanId);
     }
@@ -1868,52 +1885,209 @@ contract AceHandler is WarpClock, DeleverageCrank {
         }
     }
 
-    /// @notice THE E-3 PATH: the market lender, holding the holder's credit grant, extends a loan within reach in cash it pays itself.
-    /// @notice One ask in four runs ungranted: it must refuse `NotBorrower`, at the view and at the verb.
-    /// @dev The holder sets or revokes the grant first, so the grant is the seed's, never a leftover of an earlier call.
-    function lenderExtend(uint256 loanSeed, uint256 grantSeed) external {
-        _bump("lenderExtend");
+    /// @notice THE NON-HOLDER RULE: a stranger extends a loan within reach in cash it pays itself, judged on the rule's three legs.
+    /// @notice `legSeed % 4` sets the record: 0 and 3 healthy, 1 one under the price, 2 one under the band's level where that is at or over the price.
+    /// @notice Bit 2 sends it into the term's last quarter, else anywhere in the term; the bits above pick the second.
+    /// @dev A landing with the record under the price or the band level, or with more than a quarter left, latches; so does a misnamed refusal.
+    function strangerExtend(uint256 loanSeed, uint256 legSeed) external {
+        _bump("strangerExtend");
         (bool found, uint256 loanId) = _reachableLoan(loanSeed);
-        if (found) _lenderExtendOne(loanId, grantSeed % 4 != 0, grantSeed >> 8);
+        if (found) _strangerExtendOne(loanId, legSeed);
         _tail();
     }
 
-    /// @dev One operator extension, straddled as the holder's is; the fee is funded to the lender, and only the lender's wallet may pay it.
+    /// @dev What the non-holder rule reads before the stranger's call: the record, the price, the band's level and the quarter.
+    struct StrangerLegs {
+        uint256 cap;
+        uint256 price;
+        uint256 bandLevel;
+        bool early;
+        uint256 payerHad;
+        uint256 holderHad;
+    }
+
+    /// @dev One stranger extension, straddled as the holder's is; the fee is funded to the stranger, and only its wallet may pay it.
     /// @return landed Whether the verb extended the loan.
-    function _lenderExtendOne(uint256 loanId, bool granted, uint256 whenSeed) internal returns (bool landed) {
+    function _strangerExtendOne(uint256 loanId, uint256 legSeed) internal returns (bool landed) {
         uint256 mi = _marketIndexOf(loanId);
         address holder = ace.borrowerOf(loanId);
-        address lender = ace.idToMarketParams(mids[mi]).lender;
-        if (holder == lender) return false; // the lender's own loan is the holder's path, not this one
-        _warpIntoTerm(loanId, whenSeed);
+        _warpForStranger(loanId, legSeed >> 2);
         _healRecord(records[mi]);
-        vm.prank(holder);
-        ace.setCreditOperator(lender, granted);
-        operatorTries++;
-        ExtendPre memory s = _extendView(loanId, mi, lender);
-        _fundQuote(lender, mi, s.vFee);
+        StrangerLegs memory g = _strangerLegs(loanId, mi, legSeed % 4);
+        strangerTries++;
+        ExtendPre memory s = _extendView(loanId, mi, extStranger);
+        _fundQuote(extStranger, mi, s.vFee);
         s.hubQuote = MockERC20(_quoteAt(mi)).balanceOf(address(ace));
-        (uint256 lenderHad, uint256 holderHad) = (_quoteBal(lender, mi), _quoteBal(holder, mi));
-        vm.prank(lender);
+        (g.payerHad, g.holderHad) = (_quoteBal(extStranger, mi), _quoteBal(holder, mi));
+        vm.prank(extStranger);
         try ace.extend(loanId, 0, "") returns (uint256 fee) {
             landed = true;
-            operatorLanded++;
+            strangerLanded++;
             _viewVsExtended(s.vOk, s.vSel, s.vFee, loanId, fee, 1);
             _checkExtendInPlace(loanId, mi, s, fee);
-            if (!granted) _latchOperator(1, loanId);
-            else if (_quoteBal(lender, mi) + fee != lenderHad || _quoteBal(holder, mi) != holderHad) _latchOperator(3, loanId);
+            _judgeStrangerLanding(g, loanId, mi, holder, fee);
         } catch (bytes memory err) {
             bytes4 got = _revertSelector(err);
             _viewVsRefusedExtension(s.vOk, s.vSel, loanId, got, 1);
-            if (granted) return false;
-            if (got == NotBorrower.selector) operatorRefusedByName++;
-            else _latchOperator(2, loanId);
+            _judgeStrangerRefusal(g, loanId, got);
+        }
+        _healRecord(records[mi]);
+    }
+
+    /// @dev Bit 0 of `seed` warps into the last quarter, at or after `expiry - tenor / 4`, where the rule's clock admits; else anywhere in the term.
+    function _warpForStranger(uint256 loanId, uint256 seed) internal {
+        if (seed & 1 == 0) {
+            _warpIntoTerm(loanId, seed >> 1);
+            return;
+        }
+        Loan memory l = read.loan(loanId);
+        uint256 q = uint256(l.expiry) - l.tenor / 4;
+        uint256 t = _later();
+        _warpAtLeastTo(bound(seed >> 1, t > q ? t : q, uint256(l.expiry) - 1));
+    }
+
+    /// @dev Set the record the seed names, then read the rule's legs as the hub will: the record, the price, the band's level and the clock.
+    function _strangerLegs(uint256 loanId, uint256 mi, uint256 kind) internal returns (StrangerLegs memory g) {
+        Loan memory l = read.loan(loanId);
+        MarketParams memory p = ace.idToMarketParams(mids[mi]);
+        uint256 trig = LoanMath.triggerPrice(l.debt, l.collateralUnits, p.minCoverageWad, unitScales[mi]);
+        g.price = p.price;
+        g.bandLevel = FullMath.mulDivRoundingUp(trig, 1e18, 1e18 - uint256(p.deleverageBandBps) * 1e14);
+        if (kind == 1) records[mi].setMinPrice(g.price - 1);
+        else if (kind == 2 && g.bandLevel > g.price) records[mi].setMinPrice(g.bandLevel - 1);
+        g.cap = records[mi].windowMin();
+        g.early = uint256(l.expiry) - _later() > l.tenor / 4;
+    }
+
+    /// @dev A landing must have met all three legs, and the stranger alone paid the fee.
+    function _judgeStrangerLanding(StrangerLegs memory g, uint256 loanId, uint256 mi, address holder, uint256 fee) internal {
+        uint8 code;
+        if (g.cap < g.price) code = 1;
+        else if (g.cap < g.bandLevel) code = 2;
+        else if (g.early) code = 3;
+        else if (g.payerHad - _quoteBal(extStranger, mi) != fee || _quoteBal(holder, mi) != g.holderHad) code = 4;
+        if (code != 0 && strangerCode == 0) (strangerCode, strangerLoanId) = (code, loanId);
+    }
+
+    /// @dev Tally the rule's refusals by name; each latches when its own leg held: `UnderPrice`, `ExtensionTooEarly`, and the band's `BufferBelowMin`.
+    /// @dev The caller's buffer is zero here, so admission never raises `BufferBelowMin`: one at or over the band's level is the band leg's error.
+    function _judgeStrangerRefusal(StrangerLegs memory g, uint256 loanId, bytes4 got) internal {
+        uint8 code;
+        if (got == ExtensionTooEarly.selector) {
+            strangerRefusedEarly++;
+            if (!g.early) code = 6;
+        } else if (got == UnderPrice.selector) {
+            strangerRefusedUnderPrice++;
+            if (g.cap >= g.price) code = 5;
+        } else if (got == BufferBelowMin.selector) {
+            strangerRefusedInBand++;
+            if (g.cap >= g.bandLevel) code = 7;
+        }
+        if (code != 0 && strangerCode == 0) (strangerCode, strangerLoanId) = (code, loanId);
+    }
+
+    /// @notice THE TOP-UP: the holder draws more on a loan within reach from its market's resting cash; one ask in four is a stranger's.
+    /// @notice `tryDrawMore` is asked for the same caller immediately before; a landing must move the debt and the claim by the amount alone.
+    /// @dev Bit 1 of `whoSeed` has the holder extend first, as `extend` does: a loan here runs `minTenor`, so only a fresh term clears the top-up's floor.
+    function drawMore(uint256 loanSeed, uint256 amtSeed, uint256 whoSeed) external {
+        _bump("drawMore");
+        (bool found, uint256 loanId) = _reachableLoan(loanSeed);
+        if (found) {
+            if (whoSeed & 2 != 0) _extendOne(loanId, whoSeed >> 2);
+            _drawMoreOne(loanId, amtSeed, whoSeed % 4 == 0 ? extStranger : ace.borrowerOf(loanId));
+        }
+        _tail();
+    }
+
+    /// @dev What a top-up must leave as it was, or move by exactly its amount, and the view's answer for the same caller.
+    struct DrawPre {
+        Loan l;
+        uint256 claim;
+        uint256 holderHad;
+        bool vOk;
+        bytes4 vSel;
+        uint256 vFee;
+    }
+
+    function _drawMoreOne(uint256 loanId, uint256 amtSeed, address caller) internal {
+        uint256 mi = _marketIndexOf(loanId);
+        uint256 amt = bound(amtSeed, ace.idToMarketParams(mids[mi]).minPrincipal, 4_000e6);
+        DrawPre memory s;
+        s.l = read.loan(loanId);
+        s.claim = read.claimOf(mids[mi], loanId);
+        s.holderHad = _quoteBal(s.l.borrower, mi);
+        (s.vOk, s.vSel, s.vFee,) = ace.tryDrawMore(loanId, amt, OpenBounds(0, 0, 0), caller);
+        drawMoreTries++;
+        vm.prank(caller);
+        try ace.drawMore(loanId, amt, OpenBounds(0, 0, 0)) returns (uint256 fee) {
+            drawMoreLanded++;
+            _latchDrawMore(_drawMoreLaw(s, loanId, mi, caller, amt, fee), loanId);
+        } catch (bytes memory err) {
+            if (!s.vOk) drawMoreBothRefuse++;
+            _latchDrawMore(s.vOk || s.vSel != _revertSelector(err) ? 4 : 0, loanId);
         }
     }
 
+    /// @dev The first law a landed top-up broke, zero when none.
+    function _drawMoreLaw(DrawPre memory s, uint256 loanId, uint256 mi, address caller, uint256 amt, uint256 fee) internal view returns (uint8) {
+        Loan memory l = read.loan(loanId);
+        if (caller != s.l.borrower) return 1;
+        if (!s.vOk) return 2;
+        if (s.vFee != fee) return 3;
+        if (l.debt != s.l.debt + amt || read.claimOf(mids[mi], loanId) != s.claim + amt) return 5;
+        if (l.expiry != s.l.expiry || l.tenor != s.l.tenor || l.collateralUnits != s.l.collateralUnits) return 6;
+        if (_quoteBal(s.l.borrower, mi) != s.holderHad + amt - fee) return 7;
+        return 0;
+    }
+
     /// @dev First violation only, like every other latch here.
-    function _latchOperator(uint8 code, uint256 loanId) internal {
-        if (operatorCode == 0) (operatorCode, operatorLoanId) = (code, loanId);
+    function _latchDrawMore(uint8 code, uint256 loanId) internal {
+        if (code != 0 && drawMoreCode == 0) (drawMoreCode, drawMoreLoanId) = (code, loanId);
+    }
+
+    /// @notice THE ADDED LOT: the holder, or a stranger one ask in two, adds units to a loan within reach; anyone may, and only the lot moves.
+    function addCollateral(uint256 loanSeed, uint256 unitSeed, uint256 whoSeed) external {
+        _bump("addCollateral");
+        (bool found, uint256 loanId) = _reachableLoan(loanSeed);
+        if (found) _addOne(loanId, bound(unitSeed, 1, COLL), whoSeed % 2 == 0 ? ace.borrowerOf(loanId) : extStranger);
+        _tail();
+    }
+
+    /// @dev What an add must leave as it was: the loan before it, its claim and escrow, and the payer's units.
+    struct AddPre {
+        Loan l;
+        uint256 claim;
+        uint256 escrow;
+        uint256 had;
+    }
+
+    function _addOne(uint256 loanId, uint256 units, address payer) internal {
+        uint256 mi = _marketIndexOf(loanId);
+        MockStakeVault v = MockStakeVault(_collAt(mi));
+        v.mint(payer, units);
+        vm.prank(payer);
+        v.approve(address(positionManager), units);
+        AddPre memory s = AddPre(read.loan(loanId), read.claimOf(mids[mi], loanId), read.feeEscrowOf(loanId), v.balanceOf(payer));
+        addTries++;
+        vm.prank(payer);
+        try ace.addCollateral(loanId, units, "") {
+            addLanded++;
+            if (payer == extStranger) addByStranger++;
+            uint8 code = _addLaw(s, loanId, mi, units, v.balanceOf(payer));
+            if (code != 0 && addCode == 0) (addCode, addLoanId) = (code, loanId);
+        } catch {
+            if (addCode == 0) (addCode, addLoanId) = (4, loanId); // a live loan, before expiry, units in range, minted and approved: none may refuse
+        }
+    }
+
+    /// @dev The first law a landed add broke, zero when none.
+    function _addLaw(AddPre memory s, uint256 loanId, uint256 mi, uint256 units, uint256 hasNow) internal view returns (uint8) {
+        Loan memory l = read.loan(loanId);
+        if (l.collateralUnits != s.l.collateralUnits + units) return 1;
+        if (l.debt != s.l.debt || read.claimOf(mids[mi], loanId) != s.claim || read.feeEscrowOf(loanId) != s.escrow) return 2;
+        if (l.expiry != s.l.expiry || l.openTime != s.l.openTime || l.tenor != s.l.tenor) return 2;
+        if (s.had - hasNow != units) return 3;
+        return 0;
     }
 
     /// @dev What an extension must leave as it was, or move by exactly its own terms.
@@ -1924,7 +2098,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
         uint256 resting;
         uint256 hubQuote;
         uint64 tenor; // the loan's own, which an extension runs again from now
-        bool vOk; // the view's answer, asked for the holder before the verb
+        bool vOk; // the view's answer, asked for the caller before the verb
         bytes4 vSel;
         uint256 vFee;
         uint256 draws; // the market's draw counter: an extension bumps it once

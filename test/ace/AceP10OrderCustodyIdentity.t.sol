@@ -199,7 +199,7 @@ contract AceP10OrderCustodyIdentityTest is WarpClock {
         MarketParams memory p2 = AceFixtures.marketParams(address(usdc), address(coll));
         p2.record = address(rec);
         p2.price = price; // the sibling bids where the rig does, or the migration lands under its own floor
-        p2.baseBps = 60; // forks the id: same pair, same quote, a sibling the migration may land in
+        p2.lenderAprBps = 60; // forks the id: same pair, same quote, a sibling the migration may land in
         mid2 = ace.createMarket(p2);
         usdc.mint(lender, 5 * P);
         vm.startPrank(lender);

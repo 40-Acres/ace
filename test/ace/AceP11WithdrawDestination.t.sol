@@ -16,7 +16,7 @@ import {AceReader} from "../utils/AceReader.sol";
 /// @notice FIXED: `withdraw` and the now lender-only `collect` both pay a `to` the lender names.
 /// @notice The ported rows, on the pooled surface with a refusing quote, are `AceP2CollectDestinationTest`'s `test_381_*`.
 /// @dev Variant of #179/#196's fixed-destination shape, on the quote side the #196 sweep did not reach.
-/// @dev Findings: docs/ai/audit/runs/2026-08-31-fab1e1/phase11-variants.md
+/// @dev Findings: the internal record
 contract AceP11WithdrawDestinationTest is WarpClock {
     Ace internal ace;
     AceReader internal read;

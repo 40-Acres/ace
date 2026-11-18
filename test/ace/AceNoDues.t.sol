@@ -114,7 +114,8 @@ contract AceNoDuesTest is ExtendRig {
         _assertSolvent();
     }
 
-    /// @notice O10 across extensions, partial repays and time: the debt is the claim, it never rises, and O1 holds.
+    /// @notice O10 across extensions, partial repays and time: the debt is the claim, none of these raises it, and O1 holds.
+    /// @dev A top-up is the one verb that raises a debt after its open, by its own amount; it is not driven here.
     /// @dev Every run lands an extension: its first step extends, one second into the loan.
     function testFuzz_DebtIsTheClaimAcrossExtensionsRepaysAndTime(uint256[8] memory seeds) public {
         uint256 loanId = _open(P, TEN7, 5000);

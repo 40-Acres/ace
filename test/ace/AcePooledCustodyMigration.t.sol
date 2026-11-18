@@ -119,7 +119,7 @@ contract AcePooledCustodyMigrationTest is WarpClock {
     /// @dev The shortfall a same-principal roll always leaves, since the new fee exceeds the old refund.
     function _gap(bytes32 dst, uint256 oldId, uint256 principal, uint64 tenor) internal view returns (uint256) {
         MarketParams memory p = ace.idToMarketParams(dst);
-        uint256 credit = principal - LoanMath.originationFee(principal, tenor, p.baseBps, p.minTenor) + read.earlyExitRefund(oldId);
+        uint256 credit = principal - LoanMath.originationFee(principal, tenor, p.lenderAprBps) + read.earlyExitRefund(oldId);
         uint256 debtOld = read.loan(oldId).debt;
         return credit >= debtOld ? 0 : debtOld - credit;
     }

@@ -20,14 +20,14 @@ library LoanMath {
     }
 
     /// @notice The borrower's ALL-IN origination cost: the lender's rate with ACE's share charged on top.
-    /// @notice Priced for `tenor`, normalized against the market's SHORTEST term.
-    /// @notice `baseBps` is the LENDER's rate; the borrower pays it plus the protocol share.
+    /// @notice Priced for `tenor` at `lenderAprBps`, bps per `SECONDS_PER_YEAR`; no market's term range enters it.
+    /// @notice `lenderAprBps` is the LENDER's rate; the borrower pays it plus the protocol share.
     /// @dev ACE has no accrual: duration is priced here explicitly, a term booked up front or the time an extension adds.
     /// @dev ONE ceil, on the FUSED product, and that single rounding is what bounds the fee by the principal.
     /// @dev Ceiling the lender leg and flooring ACE's on top instead would overshoot the principal by a wei.
-    function originationFee(uint256 principal, uint64 tenor, uint256 baseBps, uint64 minTenor) internal pure returns (uint256) {
-        uint256 n = baseBps * uint256(tenor) * (10000 + Constants.PROTOCOL_SHARE_BPS);
-        return FullMath.mulDivRoundingUp(principal, n, 10000 * 10000 * uint256(minTenor));
+    function originationFee(uint256 principal, uint64 tenor, uint256 lenderAprBps) internal pure returns (uint256) {
+        uint256 n = lenderAprBps * uint256(tenor) * (10000 + Constants.PROTOCOL_SHARE_BPS);
+        return FullMath.mulDivRoundingUp(principal, n, 10000 * 10000 * Constants.SECONDS_PER_YEAR);
     }
 
     /// @notice ACE's slice, recovered from the fused all-in by the INVERSE ratio.
@@ -53,12 +53,14 @@ library LoanMath {
         return lenderCut(fee) - escrowCut(fee);
     }
 
-    /// @notice Whether a term's all-in fee stays inside `MAX_FEE_SHARE_BPS` of the draw it prices.
+    /// @notice Whether a `tenor` priced at `lenderAprBps` keeps its all-in fee inside `MAX_FEE_SHARE_BPS` of the draw.
     /// @notice At maxTenor it bounds every shorter term too, because the fee is monotone in tenor.
     /// @notice THE rail the payout subtraction rests on, so genesis checks it once.
-    /// @dev It bounds the PRODUCT of rate and term multiple; neither dial alone can bound the fee.
-    function feeFundable(uint256 baseBps, uint64 tenor, uint64 minTenor) internal pure returns (bool) {
-        return 10000 * baseBps * uint256(tenor) * (10000 + Constants.PROTOCOL_SHARE_BPS) <= Constants.MAX_FEE_SHARE_BPS * 10000 * 10000 * uint256(minTenor);
+    /// @dev It bounds the PRODUCT of rate and term; neither dial alone can bound the fee.
+    /// @dev Division form, exact for integers: `r <= floor(A / B)` iff `r * B <= A`, and it never multiplies the rate, so no rate panics.
+    function feeFundable(uint256 lenderAprBps, uint64 tenor) internal pure returns (bool) {
+        if (tenor == 0) return false;
+        return lenderAprBps <= Constants.MAX_FEE_SHARE_BPS * 10000 * Constants.SECONDS_PER_YEAR / (uint256(tenor) * (10000 + Constants.PROTOCOL_SHARE_BPS));
     }
 
     /// @notice The live debt floor: no repay leaves a live loan under it, and a crank that would closes the loan.

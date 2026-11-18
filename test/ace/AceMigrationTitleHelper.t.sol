@@ -83,10 +83,10 @@ contract AceMigrationTitleHelperTest is WarpClock {
     uint256 internal constant COLL = 100_000e18;
     uint256 internal constant TOP_CASH = 400_000e6;
 
-    /// @dev fee(P,30d) at 40 bps per 7d is 1,200; the escrow is half of what the protocol cut leaves.
+    /// @dev fee(P,30d) at 2190 bps a year is 1,260 to the lender; the escrow is half of what the protocol cut leaves.
     /// @dev At t+15d of a 30d term exactly half that escrow is unearned, and the netting refunds it.
-    uint256 internal constant FEE30 = 1_320e6; // the borrower's ALL-IN at the 30d rung
-    uint256 internal constant REFUND30_AT15 = 300e6;
+    uint256 internal constant FEE30 = 1_386e6; // the borrower's ALL-IN at the 30d rung
+    uint256 internal constant REFUND30_AT15 = 315e6;
     uint256 internal constant TOP_UP = FEE30 - REFUND30_AT15;
 
     OpenBounds internal OFF = OpenBounds(0, 0, 0);
@@ -114,7 +114,7 @@ contract AceMigrationTitleHelperTest is WarpClock {
     function _params(uint256 k) internal returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(new MockPersistenceRecord(address(usdc), address(vault)));
-        p.baseBps = 40;
+        p.lenderAprBps = 2190; // bps a year: 6 a day, so every figure here is exact
         p.minCoverageWad = k;
         p.minTenor = TEN7;
         p.maxTenor = TEN30;
@@ -143,7 +143,7 @@ contract AceMigrationTitleHelperTest is WarpClock {
     /// @dev The shortfall the helper repays before the migration: the destination's fee less the old refund.
     function _gap(uint256 oldId) internal view returns (uint256) {
         MarketParams memory p = ace.idToMarketParams(idA2);
-        uint256 credit = P - LoanMath.originationFee(P, TEN30, p.baseBps, p.minTenor) + read.earlyExitRefund(oldId);
+        uint256 credit = P - LoanMath.originationFee(P, TEN30, p.lenderAprBps) + read.earlyExitRefund(oldId);
         return credit >= P ? 0 : P - credit;
     }
 

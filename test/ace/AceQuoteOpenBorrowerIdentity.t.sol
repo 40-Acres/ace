@@ -62,7 +62,7 @@ contract AceQuoteOpenBorrowerIdentityTest is Test {
         p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(record);
         p.borrower = borrower_; // the id differentiator, and the whole admission rule
-        p.baseBps = 40;
+        p.lenderAprBps = 40;
     }
 
     function _market(address borrower_) internal returns (bytes32 mid) {

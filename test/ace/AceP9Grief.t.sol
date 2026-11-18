@@ -76,7 +76,7 @@ contract SelfSickeningRecord is IPersistenceRecord {
 /// @notice G1c: a third party's repay, and what it costs the party holding it.
 /// @notice G2: one wei of custody shortfall bricks every collateral-moving verb on that TOKEN, in every market.
 /// @notice G3: the sizing #235 asks for -- what the unbudgeted watermark retighten costs at the genesis spacing floor.
-/// @dev Findings: docs/ai/audit/runs/2026-08-31-23b79e/phase9-griefer.md
+/// @dev Findings: the internal record
 contract AceP9GriefTest is WarpClock {
     Ace internal ace;
     AceReader internal read;

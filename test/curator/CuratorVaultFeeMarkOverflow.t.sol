@@ -2,14 +2,15 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @title CuratorVaultFeeMarkOverflow
 /// @notice Repeated near-total exits under the fee mark, with a small holder staying, must never brick the exit.
 /// @notice A per-share mark raised at each such exit by `b' = b + (b - r) q / (s - q)` grew about `s / (s - q)` times over.
 /// @notice An entry that left that mark where it stood let the factor compound across exits until the arithmetic overflowed.
-/// @notice The high-water is in assets now: an entry adds its cash and a burn takes its pay, so the gap `H - NAV` moves only by real loss.
+/// @notice The high-water is stored in assets and carried per virtual share in one frame: an entry at its own price, a burn by the shares left.
+/// @notice So the gap per share moves only by real loss, and no factor compounds across exits.
 /// @dev Under the compounding per-share mark each overflow row panicked an exit, and every later exit, request and claim, at the cycle it names.
 /// @dev The first cycle's exit is a claim at the trough under the mark, after a loss; each later cycle is a fresh deposit asked out whole.
 contract CuratorVaultFeeMarkOverflowTest is CuratorVaultBase {
@@ -23,7 +24,7 @@ contract CuratorVaultFeeMarkOverflowTest is CuratorVaultBase {
     uint256 internal exit; // what each cycle's LP brings and asks back out
 
     /// @dev `who` claims `shares` of its request, the cycle named if the claim reverts; returns the cash paid.
-    function _claimOrFail(CuratorVault v, address who, uint256 shares, uint256 cycle) internal returns (uint256 paid) {
+    function _claimOrFail(AceVault v, address who, uint256 shares, uint256 cycle) internal returns (uint256 paid) {
         vm.prank(who);
         try v.claimExit(shares, who, 0) returns (uint256 got) {
             paid = got;
@@ -34,13 +35,13 @@ contract CuratorVaultFeeMarkOverflowTest is CuratorVaultBase {
         }
     }
 
-    function _request(CuratorVault v, address who, uint256 shares) internal {
+    function _request(AceVault v, address who, uint256 shares) internal {
         vm.prank(who);
         v.requestExit(shares);
     }
 
     /// @dev The stayer's shares in, the mark stamped at the entry price, then a loss under it and the first exit claimed at the trough.
-    function _firstCycle(uint256 stayerShares) internal returns (CuratorVault v) {
+    function _firstCycle(uint256 stayerShares) internal returns (AceVault v) {
         v = _newVault(FEE);
         uint256 cost = v.previewMint(stayerShares);
         usdc.mint(stayer, cost);
@@ -60,11 +61,11 @@ contract CuratorVaultFeeMarkOverflowTest is CuratorVaultBase {
         _waivePots(v); // the loss stays standing under the mark, and each later cycle may still enter
         _crankAll(v);
         _claimOrFail(v, lp, shares, 1); // the claim at the trough, under the mark
-        assertEq(v.balanceOf(address(v)), 0, "PREMISE: the LP left whole, and only the stayer holds shares");
+        assertEq(v.balanceOf(address(v)), v.SEED_SHARES(), "PREMISE: the LP left whole, and only the stayer holds live shares");
     }
 
     /// @dev One later cycle: the LP deposits and asks it all straight back; its claim is under the mark.
-    function _cycle(CuratorVault v, uint256 cycle) internal returns (uint256 paid) {
+    function _cycle(AceVault v, uint256 cycle) internal returns (uint256 paid) {
         uint256 shares = _lpDeposit(v, lp, exit);
         _request(v, lp, shares);
         paid = _claimOrFail(v, lp, shares, cycle);
@@ -73,7 +74,7 @@ contract CuratorVaultFeeMarkOverflowTest is CuratorVaultBase {
     /// @dev Run the cycles, each asserted live and paid its deposit back, the mark emitted as it climbs; then the fee must be alive.
     function _cycles(uint256 stayerShares, uint256 exitAssets, uint256 cycles) internal {
         exit = exitAssets;
-        CuratorVault v = _firstCycle(stayerShares);
+        AceVault v = _firstCycle(stayerShares);
         emit log_named_uint("the mark after cycle 1", v.feeHighWater());
         for (uint256 i = 2; i <= cycles; i++) {
             uint256 paid = _cycle(v, i);
@@ -85,7 +86,7 @@ contract CuratorVaultFeeMarkOverflowTest is CuratorVaultBase {
 
     /// @dev A fresh cohort comes in and the book gains a tenth of it: the curator must be paid on the gain past the loss's gap.
     /// @dev The gap is about `LOSS` in assets, so the fee on `gain - LOSS` is the floor, and the fee on the whole gain the ceiling.
-    function _assertTheFeeIsAlive(CuratorVault v) internal {
+    function _assertTheFeeIsAlive(AceVault v) internal {
         _lpDeposit(v, lp, exit);
         uint256 gain = exit / 10;
         _gift(v, gain);
@@ -129,7 +130,7 @@ contract CuratorVaultFeeMarkOverflowTest is CuratorVaultBase {
 
     /// @dev One cycle through a dip: a small loan defaults under the LP's standing request, which it claims at the trough.
     /// @dev A second LP asks after that claim, half the loss comes back, and its claim is priced net of what still vests.
-    function _dipCycle(CuratorVault v, uint256 cycle) internal {
+    function _dipCycle(AceVault v, uint256 cycle) internal {
         uint256 shares = _lpDeposit(v, lp, exit);
         uint256 shares2 = _lpDeposit(v, lp2, exit / 10);
         uint256 doomed = _open(DIP_LOSS);
@@ -143,7 +144,7 @@ contract CuratorVaultFeeMarkOverflowTest is CuratorVaultBase {
         _gift(v, DIP_LOSS / 2);
         v.crank(); // half the loss comes back, vesting
         _claimOrFail(v, lp2, shares2, cycle); // the second LP's claim, net of the pile
-        assertEq(v.balanceOf(address(v)), 0, "PREMISE: both LPs left whole");
+        assertEq(v.balanceOf(address(v)), v.SEED_SHARES(), "PREMISE: both LPs left whole, the seed alone at the vault");
         _warpBy(VEST_W); // the returned half vests to the stayer, else the next cycle's entry meets the pile gate
     }
 
@@ -152,7 +153,7 @@ contract CuratorVaultFeeMarkOverflowTest is CuratorVaultBase {
     /// @dev The per-share mark an entry left standing overflowed here at cycle 17, as in the plain cycles.
     function test_FeeMark_RepeatedDipCyclesUnderTheMarkNeverBrickTheExit() public {
         exit = 10_000e6;
-        CuratorVault v = _firstCycle(1e12);
+        AceVault v = _firstCycle(1e12);
         for (uint256 i = 2; i <= CYCLES; i++) {
             _dipCycle(v, i);
             emit log_named_uint("the mark after the next dip cycle", v.feeHighWater());
@@ -164,15 +165,17 @@ contract CuratorVaultFeeMarkOverflowTest is CuratorVaultBase {
 
     /// @notice MEASURE, F1: a FREE dust holder carries a real loss's gap into the vault's next life; the fee waits for that life to earn it.
     /// @notice One share-wei held by an account, not donated, keeps the supply off zero at the last out, so the gap rides on it.
-    /// @dev Recorded, not fixed: curator-adverse and bounded by the fee on that gap; no funds at risk and no brick.
-    /// @dev Under the per-share mark the dust holder's own entry price killed the fee outright, so nothing was paid even past the gap.
+    /// @dev Accepted, not fixed: curator-adverse, the fee on the per-share gap over the new life's capital, `f x new capital x (h / p - 1)`; no brick.
+    /// @dev Under the old compounding per-share mark the dust holder's own entry price killed the fee outright, so nothing was paid even past the gap.
     function test_FeeMark_AFreeDustHolderCarriesTheGapIntoANewLife() public {
         exit = 10_000e6;
-        CuratorVault v = _firstCycle(1);
-        uint256 gap = Math.saturatingSub(v.feeHighWater(), v.totalAssets());
-        emit log_named_uint("the gap the dust holder carries, in assets", gap);
-        assertGt(gap, LOSS / 2, "PREMISE: the old life's loss is the gap");
+        AceVault v = _firstCycle(1);
+        (uint256 h, uint256 a) = (v.feeHighWater(), v.totalAssets());
+        emit log_named_uint("the gap the dust holder carries, in bps of its NAV", Math.mulDiv(Math.saturatingSub(h, a), 10_000, a));
+        assertGt(Math.saturatingSub(h, a) * exit * 2, a * LOSS, "PREMISE: the old life's loss is the gap per share");
         _lpDeposit(v, lp, 50_000e6); // the new life
+        uint256 gap = Math.saturatingSub(v.feeHighWater(), v.totalAssets()); // the per-share gap on the new life's shares, in assets
+        emit log_named_uint("the gap the new life carries, in assets", gap);
         uint256 held = v.balanceOf(curator);
         _gift(v, gap / 2);
         v.crank();

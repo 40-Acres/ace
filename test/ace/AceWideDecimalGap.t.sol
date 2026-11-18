@@ -113,8 +113,8 @@ contract AceWideDecimalGapTest is WarpClock {
         MockERC20 q = new MockERC20("Quote", "Q", 0);
         MockERC20 c = new MockERC20("Collateral", "COLL", 18);
         uint64 t = ProtocolPolicy.MIN_TENOR;
-        assertEq(LoanMath.originationFee(1, t, PocDeployConfig.BASE_BPS, t), 1, "premise: a one-token ticket is consumed whole by its own fee");
-        assertEq(LoanMath.originationFee(2, t, PocDeployConfig.BASE_BPS, t), 1, "premise: two leaves one over, so two is the first workable ticket");
+        assertEq(LoanMath.originationFee(1, t, PocDeployConfig.LENDER_APR_BPS), 1, "premise: a one-token ticket is consumed whole by its own fee");
+        assertEq(LoanMath.originationFee(2, t, PocDeployConfig.LENDER_APR_BPS), 1, "premise: two leaves one over, so two is the first workable ticket");
 
         MarketParams memory one = _params(q, c, 1);
         vm.expectRevert("debt floor zero");
@@ -165,7 +165,7 @@ contract AceWideDecimalGapTest is WarpClock {
         assertGt(par, 0, "fixture: gap-18 par is a live price, not one the frame floors to zero");
 
         uint256 loanId = _openLoan();
-        uint256 fee = LoanMath.originationFee(PRINCIPAL, ProtocolPolicy.MIN_TENOR, PocDeployConfig.BASE_BPS, ProtocolPolicy.MIN_TENOR);
+        uint256 fee = LoanMath.originationFee(PRINCIPAL, ProtocolPolicy.MIN_TENOR, PocDeployConfig.LENDER_APR_BPS);
         assertEq(read.loan(loanId).debt, PRINCIPAL, "the draw booked five thousand whole quote tokens of debt");
         assertEq(quote.balanceOf(borrower), PRINCIPAL - fee, "and paid the borrower the draw less its origination fee");
         assertGt(read.claimOf(id, loanId), 0, "funded from the market's resting cash");

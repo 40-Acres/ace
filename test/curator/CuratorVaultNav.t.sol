@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {AceInventoryLens} from "../../src/ace/lens/AceInventoryLens.sol";
 import {PriceFrame} from "../utils/PriceFrame.sol";
@@ -18,7 +18,7 @@ contract CuratorVaultNavTest is CuratorVaultBase {
     /// @dev T1: gross NAV is the vault's balance plus the hub's aggregates after every verb, read by a second path.
     /// @dev Nothing the vault funds rests between calls, so the market's cash is zero after every verb.
     function test_Nav_IsTheHubsAggregatesAndNothingElse() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _assertModel(v, "fresh");
 
         _lpDeposit(v, alice, SEED);
@@ -43,7 +43,7 @@ contract CuratorVaultNavTest is CuratorVaultBase {
     /// @dev Under aggregate NAV the origination credit is income the instant it lands, so gross rises with it.
     /// @dev The rise is pinned to spendable cash by cranking it home: a phantom credit could not survive that.
     function test_Nav_ADrawDoesNotMoveIt() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 grossBefore = v.grossNav();
         uint256 cash0 = v.idle();
@@ -76,7 +76,7 @@ contract CuratorVaultNavTest is CuratorVaultBase {
     /// @dev No crank, no write-off verb, no memo -- the aggregate simply falls and NAV falls with it.
     /// @dev Was `test_BadDebt_IsNotAValuationTerm`, then the cost-book write-off; both mechanisms are gone.
     function test_Nav_ASettlementLandsAtomicallyWithNoCrankAtAll() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(DRAW);
         record.setMinPrice(T2); // after the door, which prices its market off the record
@@ -96,7 +96,7 @@ contract CuratorVaultNavTest is CuratorVaultBase {
     /// @dev The trough monitor is armed beside the singular mark because the vault header claims NEITHER
     /// @dev is read, and a two-part claim with one-part coverage is the half a later edit gets wrong.
     function test_Vault_ReadsNoPriceAnywhere() public {
-        CuratorVault v = _newVault(2000);
+        AceVault v = _newVault(2000);
         _lpDeposit(v, alice, SEED);
         _lpDeposit(v, bob, SEED);
         uint256 loanId = _open(DRAW);
@@ -125,7 +125,7 @@ contract CuratorVaultNavTest is CuratorVaultBase {
 
     /// @dev The vault marks at or BELOW hub truth: an observed rise is deferred, never counted early.
     function test_Nav_NeverExceedsHubTruth() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         _lpDeposit(v, alice, SEED);
         uint256 loanId = _open(DRAW);
         _crank(v, loanId, T2, 0);
@@ -139,7 +139,7 @@ contract CuratorVaultNavTest is CuratorVaultBase {
 
     /// @dev The model, by a SECOND read path: gross is the hub's aggregates plus the balance, and `totalAssets`
     /// @dev is that less whatever is still deferred. Never above hub truth, ever; and nothing rests in the market.
-    function _assertModel(CuratorVault v, string memory where) internal view {
+    function _assertModel(AceVault v, string memory where) internal view {
         assertEq(v.grossNav(), _hubTruthNav(v), where);
         assertLe(v.totalAssets(), v.grossNav(), where);
         assertEq(ace.restingOf(mid), 0, where);

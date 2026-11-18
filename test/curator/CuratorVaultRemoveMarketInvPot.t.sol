@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {AceVaultFlows} from "../../src/curator/AceVaultFlows.sol";
 
 /// @title CuratorVaultRemoveMarketInvPot
@@ -21,7 +21,7 @@ contract CuratorVaultRemoveMarketInvPotTest is CuratorVaultBase {
     uint256 internal constant DRAW = 6_000e6;
 
     /// @dev One loan, cranked, settled, cranked again: the trough is open and the pot is full.
-    function _settled(CuratorVault v) internal returns (uint256 loanId) {
+    function _settled(AceVault v) internal returns (uint256 loanId) {
         _lpDeposit(v, alice, SEED);
         loanId = _open(DRAW);
         _crank(v, loanId, T2, 0);
@@ -31,7 +31,7 @@ contract CuratorVaultRemoveMarketInvPotTest is CuratorVaultBase {
 
     /// @notice ROW 1, THE PREMISE: a settled market reads empty on the aggregates while holding real inventory.
     function test_Premise_ASettledMarketReadsEmptyWhileHoldingTheWholeRecovery() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _settled(v);
 
         uint256 la = ace.lenderAssets(address(v), v.asset());
@@ -51,7 +51,7 @@ contract CuratorVaultRemoveMarketInvPotTest is CuratorVaultBase {
     /// @dev It signals nothing still, and that is harmless: the recovery comes home through the crank, into the vault's own balance.
     /// @dev Only NEW LENDING stays shut, which is the whole of what removal ends.
     function test_Recovery_RemovalIsSilentButTheRecoveryStillComesHome() public {
-        CuratorVault v = _newVault(0);
+        AceVault v = _newVault(0);
         uint256 loanId = _settled(v);
         uint256 mark = lens.inventoryMark(mid, loanId);
         uint256 navBefore = v.grossNav();
@@ -59,7 +59,7 @@ contract CuratorVaultRemoveMarketInvPotTest is CuratorVaultBase {
         vm.prank(curator);
         v.submitCap(address(collateral), 0);
 
-        assertEq(v.rowOf(address(collateral)).cap, 0, "the row is capped at zero at once");
+        assertEq(_cap(v, address(collateral)), 0, "the row is capped at zero at once");
         assertEq(v.grossNav(), navBefore, "and took not a cent of NAV with it: removal is a zero-NAV event");
         emit log_named_uint("value uncounted   ", mark);
 

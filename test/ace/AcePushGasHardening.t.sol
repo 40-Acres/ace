@@ -272,7 +272,7 @@ contract AcePushGasInertSweepTest is PushGasProbeRig {
 /// @dev About 320-360 gas of the gap is the keeper-sliver credit `forceClose` makes inside the delegatecall; the rest predates that credit.
 /// @dev The slack therefore caps the settle body: at 3,000 the row goes red near (3,000 + 501) x 63, about 220k gas of library work.
 contract AcePushGasDemandTest is PushGasProbeRig {
-    uint256 internal constant DUST = 9_000; // atoms: at baseBps 1 and tenor == minTenor the fee is 1 and its lender escrow 0
+    uint256 internal constant DUST = 9_000; // atoms: at lenderAprBps 1 and tenor == minTenor the fee is 1 and its lender escrow 0
     uint256 internal constant EDGE_SLACK = 3_000; // the hub's 1/64 kept at the Settlement delegatecall, less B's pre-gate work: measured 2,026 under the floor
     bytes32 internal dustMid;
 
@@ -287,7 +287,7 @@ contract AcePushGasDemandTest is PushGasProbeRig {
         p.lender = alice;
         p.minTenor = 7 days;
         p.maxTenor = TEN30;
-        p.baseBps = 1;
+        p.lenderAprBps = 1;
         p.minPrincipal = 2;
         dustMid = ace.createMarket(p);
         IRigQuote(quote).mint(alice, DEPOSIT);

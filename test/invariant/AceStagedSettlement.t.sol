@@ -34,7 +34,7 @@ contract AceStagedSettlementTest is StdInvariant, Test {
         (ace, read, lens, pm) = (handler.ace(), handler.read(), handler.lens(), handler.pm());
         (usdc, vault) = (handler.usdc(), handler.vault());
 
-        bytes4[] memory sel = new bytes4[](18);
+        bytes4[] memory sel = new bytes4[](20);
         sel[0] = AceStagedSettlementHandler.deposit.selector;
         sel[1] = AceStagedSettlementHandler.withdraw.selector;
         sel[2] = AceStagedSettlementHandler.collect.selector;
@@ -53,6 +53,8 @@ contract AceStagedSettlementTest is StdInvariant, Test {
         sel[15] = AceStagedSettlementHandler.open.selector; // twice: every settle door needs a live loan to land on
         sel[16] = AceStagedSettlementHandler.stageThenSettle.selector;
         sel[17] = AceStagedSettlementHandler.stageThenSettle.selector; // twice: at one draw in 19, a sequence missed it 1 time in 3
+        sel[18] = AceStagedSettlementHandler.overPledgeThenSettle.selector; // the recorded take: in the term it follows the trigger
+        sel[19] = AceStagedSettlementHandler.overPledgeThenSettle.selector; // twice: its four clock arms split each draw
         targetSelector(FuzzSelector({addr: address(handler), selectors: sel}));
         targetContract(address(handler));
     }
@@ -93,6 +95,7 @@ contract AceStagedSettlementTest is StdInvariant, Test {
 
     /// @notice A settle conserves the lot, retires the claim, and records exactly what the claim did not get.
     /// @dev Codes are the handler's: 1 units, 2 claim, 3 lent, 4 record, 5 loss total, 6 defaulted borrower paid, 7 forceClose failed to settle.
+    /// @dev 8 an in-term recorded take off its bounds, 9 a recorded take from expiry that was not the need.
     function _invariant_settleChecksHold() public view {
         if (handler.settleCode() != 0) {
             console2.log("settle code", handler.settleCode());
@@ -259,11 +262,34 @@ contract AceStagedSettlementTest is StdInvariant, Test {
         invariant_all();
     }
 
+    /// @notice The baseline landed a recorded in-term spread on both arms, and none of them counted as a recordless forfeit.
+    function test_Coverage_TheBaselineLandedARecordedSpreadOnBothArms() public view {
+        assertGt(handler.recordedCapArm(), 0, "no in-term recorded take the coverage line capped");
+        assertGt(handler.recordedTriggerArm(), 0, "no in-term recorded take at the claim at the trigger");
+        assertEq(handler.recordedSpreads(), handler.recordedCapArm() + handler.recordedTriggerArm(), "the spread tally is its two arms");
+        assertEq(handler.forfeits(), 1, "the recorded spreads leaked into the recordless forfeit tally, which the baseline's one forfeit must be");
+    }
+
+    /// @dev The recorded take through every clock arm the action names: two in the term, two from the expiry second, each keeping every law.
+    function test_Coverage_OverPledgeThenSettleHoldsTheTakeAtEveryClockArm() public {
+        for (uint256 mode; mode < 4; mode++) {
+            uint256 spreads = handler.recordedSpreads();
+            uint256 atTenor = handler.recordedAtTenor();
+            handler.overPledgeThenSettle(2_000e6, 25_000, 1, mode);
+            uint256[] memory ids = handler.loanIds();
+            assertTrue(ace.isClosed(ids[ids.length - 1]), "PREMISE: the action's loan settled");
+            assertEq(handler.settleCode(), 0, "and the settle kept every law, the take's included");
+            if (mode < 2) assertEq(handler.recordedSpreads(), spreads + 1, "an in-term settle took past the need");
+            else assertEq(handler.recordedAtTenor(), atTenor + 1, "a settle from the expiry second took exactly the need");
+        }
+        invariant_all();
+    }
+
     // ---- the run report ----
 
     function afterInvariant() public view {
         console2.log("=== AceStagedSettlementHandler verb hits (LAST sequence only) ===");
-        string[15] memory tags = [
+        string[16] memory tags = [
             "deposit",
             "withdraw",
             "collect",
@@ -278,7 +304,8 @@ contract AceStagedSettlementTest is StdInvariant, Test {
             "heal",
             "finalize",
             "forceClose",
-            "stageThenSettle"
+            "stageThenSettle",
+            "overPledgeThenSettle"
         ];
         for (uint256 i; i < tags.length; i++) {
             console2.log(tags[i], handler.callCount(tags[i]));
@@ -290,7 +317,11 @@ contract AceStagedSettlementTest is StdInvariant, Test {
         console2.log("  of which the fuzzer's", shortAll - handler.baselineShort());
         console2.log("covered fin/forceClose", handler.settlesCovered(0), handler.settlesCovered(1));
         console2.log("recordless forfeits   ", handler.forfeits());
+        console2.log("recorded spreads      ", handler.recordedSpreads());
+        console2.log("  cap arm/trigger arm ", handler.recordedCapArm(), handler.recordedTriggerArm());
+        console2.log("recorded at tenor     ", handler.recordedAtTenor());
         /// @dev STRUCTURAL, satisfied in setUp and re-checked here: a red is a broken baseline, never a starved seed.
         assertGt(shortAll, 0, "STRUCTURAL: no short settle survived setUp");
+        assertGt(handler.recordedSpreads(), 0, "STRUCTURAL: no recorded in-term spread survived setUp");
     }
 }

@@ -3,8 +3,10 @@ pragma solidity 0.8.36;
 
 import {Test} from "forge-std/Test.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
-import {CuratorVault, Listing} from "../../src/curator/CuratorVault.sol";
-import {VaultConfig} from "../../src/curator/AceVault.sol";
+import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
+import {Listing} from "../../src/entities/curated/CuratorTerms.sol";
+import {CuratedVaults} from "../utils/CuratedVaults.sol";
+import {VaultSeed} from "../utils/VaultSeed.sol";
 
 /// @notice The sender hook an ERC-777 `tokensToSend` gives an attacker: it fires BEFORE balances move.
 /// @dev That timing is the point: OZ transfers before it mints so this instant sees neither side.
@@ -72,17 +74,22 @@ contract MockLenderOps {
 
     /// @dev The vault's constructor names itself its own roll policy; this mock lends nothing, so it records nothing.
     function setRollPolicy(address) external pure {}
+
+    /// @dev The vault's constructor probes the hub's rate unit and refuses one that is not a year.
+    function RATE_PERIOD() external pure returns (uint256) {
+        return 365 days;
+    }
 }
 
 /// @notice The attacker: it deposits, and prices the vault from inside its own send hook.
 contract HookedDepositor is ISender {
-    CuratorVault public vault;
+    AceVault public vault;
     PreHookERC20 public token;
     uint256 public navInside;
     uint256 public supplyInside;
     uint256 public priceInside; // assets per 1e12 shares, so the figure is readable
 
-    constructor(CuratorVault v, PreHookERC20 t) {
+    constructor(AceVault v, PreHookERC20 t) {
         vault = v;
         token = t;
     }
@@ -105,7 +112,7 @@ contract HookedDepositor is ISender {
 /// @dev The OPPOSITE partial DOES move the price, via `g < m`, and the live-vest row above is what catches it.
 /// @dev `idle()` and `grossNav()` carry no such absorber, so they are what holds the pair together.
 contract SurfaceDepositor is ISender {
-    CuratorVault public vault;
+    AceVault public vault;
     PreHookERC20 public token;
     uint256 public idleInside;
     uint256 public grossInside;
@@ -113,7 +120,7 @@ contract SurfaceDepositor is ISender {
     uint256 public supplyInside;
     uint256 public priceInside;
 
-    constructor(CuratorVault v, PreHookERC20 t) {
+    constructor(AceVault v, PreHookERC20 t) {
         vault = v;
         token = t;
     }
@@ -180,7 +187,7 @@ contract PayHookERC20 {
 
 /// @notice A holder that prices the vault from inside the payout it is being sent.
 contract PayObserver is IPayee {
-    CuratorVault public vault;
+    AceVault public vault;
     PayHookERC20 public token;
     uint256 public idleInside;
     uint256 public grossInside;
@@ -188,7 +195,7 @@ contract PayObserver is IPayee {
     uint256 public supplyInside;
     uint256 public priceInside;
 
-    constructor(CuratorVault v, PayHookERC20 t) {
+    constructor(AceVault v, PayHookERC20 t) {
         vault = v;
         token = t;
     }
@@ -229,21 +236,28 @@ contract PayObserver is IPayee {
 /// @dev That isolates the window from the hub, and from the guard already covering the hub direction.
 contract CuratorVaultDepositWindowTest is WarpClock {
     PreHookERC20 internal token;
-    CuratorVault internal v;
+    AceVault internal v;
     address internal curator = address(0xC0A11);
     address internal alice = address(0xA11CE);
 
     /// @dev A vault over the hub mock, listing nothing.
-    function _vault(VaultConfig memory cfg) internal returns (CuratorVault) {
-        return new CuratorVault(cfg, 10e6, 1.4e18, 1 days, new Listing[](0), "Curator", "cVLT");
+    function _vault(VaultConfig memory cfg) internal returns (AceVault) {
+        return CuratedVaults.make(cfg, 10e6, 1.4e18, 1 days, new Listing[](0), "Curator", "cVLT");
     }
 
     function setUp() public {
         token = new PreHookERC20();
         /// @dev A REAL MOCK RATHER THAN `address(0xACE)`: `grossNav` reads the hub's pooled figure on every
         /// @dev call, so a bare address is a call to a non-contract. The mock answers zero, which isolates the window.
-        VaultConfig memory cfg =
-            VaultConfig({ace: address(new MockLenderOps()), asset: address(token), curator: curator, guardian: address(0), perfFeeBps: 0, vestWindow: 1 days});
+        VaultConfig memory cfg = VaultConfig({
+            ace: address(new MockLenderOps()),
+            asset: address(token),
+            curator: curator,
+            guardian: address(0),
+            perfFeeBps: 0,
+            vestWindow: 1 days,
+            seed: VaultSeed.SEED
+        });
         v = _vault(cfg);
     }
 
@@ -282,9 +296,10 @@ contract CuratorVaultDepositWindowTest is WarpClock {
     /// @dev Same corruption, opposite sign, and it heals the instant the transfer returns -- so only this row sees it.
     function test_Deposit_DoesNotInflateTheSharePriceMidTransfer_WithALiveVest() public {
         MockLenderOps hub = new MockLenderOps();
-        VaultConfig memory cfg =
-            VaultConfig({ace: address(hub), asset: address(token), curator: curator, guardian: address(0), perfFeeBps: 0, vestWindow: 1 days});
-        CuratorVault vv = _vault(cfg);
+        VaultConfig memory cfg = VaultConfig({
+            ace: address(hub), asset: address(token), curator: curator, guardian: address(0), perfFeeBps: 0, vestWindow: 1 days, seed: VaultSeed.SEED
+        });
+        AceVault vv = _vault(cfg);
 
         token.mint(alice, 1_001e6);
         vm.startPrank(alice);
@@ -354,13 +369,13 @@ contract CuratorVaultDepositWindowTest is WarpClock {
         token.approve(address(v), 2_000e6);
 
         v.deposit(1_000e6, alice);
-        assertEq(v.totalAssets(), 1_000e6, "the deposit is NAV in full and at once, never a deferred gain");
+        assertEq(v.totalAssets(), 1_000e6 + VaultSeed.SEED, "the deposit is NAV in full and at once beside the seed, never a deferred gain");
         assertEq(v.unvested(), 0, "and none of it is growth, so none of it defers");
 
         v.deposit(1_000e6, alice);
         vm.stopPrank();
 
-        assertEq(v.totalAssets(), 2_000e6, "the second lands the same way, with no sync stamping the first as a gain");
+        assertEq(v.totalAssets(), 2_000e6 + VaultSeed.SEED, "the second lands the same way, with no sync stamping the first as a gain");
         assertEq(v.unvested(), 0, "the mark kept pace, so the sync that verb ran still saw no growth");
     }
 
@@ -370,9 +385,16 @@ contract CuratorVaultDepositWindowTest is WarpClock {
     /// @dev The vault's header requires a hookless asset for exactly this reason; the cash views are defined only for a hookless one.
     function test_Exit_AHookedAssetShowsAMidPayoutReaderThePrePayoutCash() public {
         PayHookERC20 t2 = new PayHookERC20();
-        VaultConfig memory cfg =
-            VaultConfig({ace: address(new MockLenderOps()), asset: address(t2), curator: curator, guardian: address(0), perfFeeBps: 0, vestWindow: 1 days});
-        CuratorVault vv = _vault(cfg);
+        VaultConfig memory cfg = VaultConfig({
+            ace: address(new MockLenderOps()),
+            asset: address(t2),
+            curator: curator,
+            guardian: address(0),
+            perfFeeBps: 0,
+            vestWindow: 1 days,
+            seed: VaultSeed.SEED
+        });
+        AceVault vv = _vault(cfg);
 
         t2.mint(alice, 1_000e6);
         vm.startPrank(alice);

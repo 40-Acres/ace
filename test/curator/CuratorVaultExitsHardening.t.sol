@@ -2,9 +2,11 @@
 pragma solidity 0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
 import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
+import {IAceVaultDoor} from "../../src/interfaces/IAceVaultDoor.sol";
 import {CuratorVaultExitsRig, ICuratorVaultExits} from "./CuratorVaultExitsRig.sol";
+import {VaultSeed} from "../utils/VaultSeed.sol";
 
 /// @title CuratorVaultExitsHardening
 /// @notice The exit surface where its branches meet: `maxClaim` against the claim wherever exitable binds beside a fee or a donation.
@@ -12,13 +14,13 @@ import {CuratorVaultExitsRig, ICuratorVaultExits} from "./CuratorVaultExitsRig.s
 contract CuratorVaultExitsHardeningTest is CuratorVaultExitsRig {
     uint256 internal constant GIFT = 1_000e6;
 
-    function _drain(CuratorVault v, address by, bool on) internal {
+    function _drain(AceVault v, address by, bool on) internal {
         vm.prank(by);
         _x(v).setDrain(on);
     }
 
     /// @dev A fee vault: two LPs, `lent` drawn, the open's fee collected, then a gift vested unsynced, so a fee is pending.
-    function _feeLent(uint256 lent) internal returns (CuratorVault v, uint256 loanId) {
+    function _feeLent(uint256 lent) internal returns (AceVault v, uint256 loanId) {
         v = _vault(2000);
         _lpDeposit(v, alice, SEED);
         _lpDeposit(v, bob, SEED);
@@ -36,7 +38,7 @@ contract CuratorVaultExitsHardeningTest is CuratorVaultExitsRig {
 
     /// @notice A DONATION DOES NOT STOP THE REPLAY WHERE EXITABLE BINDS: the last requester's answer prices the release and takes all of exitable.
     function test_MaxClaim_ADonationStandingTheLastRequestersAnswerTakesTheWholePot() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, alice, SEED);
         _crank(v, _open(6_000e6), T2, 0);
         _warpBy(VEST_W);
@@ -57,7 +59,7 @@ contract CuratorVaultExitsHardeningTest is CuratorVaultExitsRig {
 
     /// @notice A PENDING FEE PRICES `maxClaim` AS THE CLAIM PAYS: its answer, over the supply the claim's own fee leaves, takes all of exitable.
     function test_MaxClaim_APendingFeeWhereThePotBindsItsAnswerTakesTheWholePot() public {
-        (CuratorVault v,) = _feeLent(15_000e6);
+        (AceVault v,) = _feeLent(15_000e6);
         uint256 own = v.balanceOf(bob);
         _request(v, bob, own);
         uint256 pot = _exitable(v);
@@ -69,7 +71,7 @@ contract CuratorVaultExitsHardeningTest is CuratorVaultExitsRig {
 
     /// @notice THE CLAIM'S OWN FEE SHARES NO LONGER STOP THE RELEASE WHERE EXITABLE BINDS: the sole requester's `maxClaim` prices it and takes it all.
     function test_MaxClaim_ASoleRequesterUnderAPendingFeeReleasesAndTakesTheWholePot() public {
-        CuratorVault v = _vault(2000);
+        AceVault v = _vault(2000);
         _lpDeposit(v, alice, 2 * SEED);
         _crank(v, _open(12_000e6), T2, 0);
         _warpBy(VEST_W);
@@ -83,7 +85,7 @@ contract CuratorVaultExitsHardeningTest is CuratorVaultExitsRig {
         assertGt(v.pendingFeeShares(), 0, "PREMISE: a fee is pending on the vested half");
         assertGt(v.unvested(), 0, "PREMISE: the other half still vests");
         uint256 all = v.balanceOf(alice);
-        assertEq(all, v.totalSupply(), "PREMISE: alice holds every share");
+        assertEq(all, v.totalSupply() - v.SEED_SHARES(), "PREMISE: alice holds every live share");
         _request(v, alice, all);
         uint256 pot = _exitable(v);
         uint256 m = _x(v).maxClaim(alice);
@@ -95,7 +97,7 @@ contract CuratorVaultExitsHardeningTest is CuratorVaultExitsRig {
 
     /// @notice FOR ANY FEE, DONATION, LENT BOOK, GAIN AND HOLDER MIX, a claim of `maxClaim` lands and takes either the whole request or all of exitable.
     function testFuzz_MaxClaim_ItsAnswerPaysAndTakesTheWholeRequestOrThePot(uint256 seed) public {
-        CuratorVault v = _vault(seed % 2 == 0 ? 0 : 2000);
+        AceVault v = _vault(seed % 2 == 0 ? 0 : 2000);
         _lpDeposit(v, alice, SEED);
         _lpDeposit(v, bob, SEED);
         uint256 lent = bound(uint256(keccak256(abi.encode(seed, 1))), 0, 19_000e6);
@@ -133,7 +135,7 @@ contract CuratorVaultExitsHardeningTest is CuratorVaultExitsRig {
 
     /// @notice A REQUEST HOLDS ITS WORTH AT THE FEE-INCLUSIVE PRICE, capped by exitable: the fee its claim mints first is already priced in.
     function test_Demand_UnderAPendingFeeIsTheFeeInclusiveWorth() public {
-        (CuratorVault v,) = _feeLent(15_000e6);
+        (AceVault v,) = _feeLent(15_000e6);
         uint256 sh = v.balanceOf(bob) / 2;
         _request(v, bob, sh);
         uint256 naive = Math.mulDiv(sh, v.totalAssets() + 1, v.totalSupply() + V_OFF);
@@ -143,7 +145,7 @@ contract CuratorVaultExitsHardeningTest is CuratorVaultExitsRig {
 
     /// @notice A CLAIM RE-PRICES THE HOLD TO WHAT THE REQUESTS STILL WANT, so a later repayment is held only for the shares left.
     function test_Demand_AClaimRePricesItToTheSharesLeft() public {
-        (CuratorVault v, uint256 loanId) = _lent(15_000e6);
+        (AceVault v, uint256 loanId) = _lent(15_000e6);
         uint256 sh = v.balanceOf(bob);
         _request(v, bob, sh);
         _repay(loanId, 2_000e6);
@@ -162,7 +164,7 @@ contract CuratorVaultExitsHardeningTest is CuratorVaultExitsRig {
 
     /// @notice THE GUARDIAN'S DRAIN REFUSES A BORROW BY NAME, the guardian cannot lift it, and the curator's lift lets the door lend again.
     function test_Drain_ABorrowIsRefusedUnderTheGuardiansDrainUntilTheCuratorLiftsIt() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, alice, SEED);
         _drain(v, guardian, true);
         assertEq(v.lendable(), 0, "lendable is not zero under the drain");
@@ -173,7 +175,7 @@ contract CuratorVaultExitsHardeningTest is CuratorVaultExitsRig {
         v.borrow(_request(address(collateral), COLL, 1_000e6), "", "");
         vm.stopPrank();
         vm.prank(guardian);
-        vm.expectRevert(AceVault.NotCurator.selector);
+        vm.expectRevert(IAceVaultDoor.NotCurator.selector);
         v.setDrain(false);
         _drain(v, curator, false);
         uint256 loanId = _borrow(v, 1_000e6);
@@ -185,7 +187,7 @@ contract CuratorVaultExitsHardeningTest is CuratorVaultExitsRig {
 
     /// @notice A CLAIM NAMING ANOTHER RECEIVER AT EXACTLY ITS PAYOUT, under a pending fee: the floor binds to the wei, and only the receiver is paid.
     function test_Claim_AnotherReceiverAtExactlyTheFeeInclusivePayout() public {
-        (CuratorVault v, uint256 loanId) = _feeLent(15_000e6);
+        (AceVault v, uint256 loanId) = _feeLent(15_000e6);
         uint256 sh = v.balanceOf(bob) / 4;
         _request(v, bob, sh);
         _repay(loanId, 1_000e6);
@@ -210,7 +212,7 @@ contract CuratorVaultExitsHardeningTest is CuratorVaultExitsRig {
     /// @notice EVERY HOLDER LEAVES AND THE PILE REACHES THEM, even under the entry gate's share: the last free holder is refused at once and claims it.
     /// @notice Nothing is left for an entrant to buy: the vault empties to the wei, and a later entry holds no more than it brought.
     function test_LastOut_EveryHolderLeavesAndThePileReachesThem() public {
-        CuratorVault v = _vault(0);
+        AceVault v = _vault(0);
         _lpDeposit(v, alice, SEED);
         _lpDeposit(v, bob, SEED);
         _gift(v, 100e6); // half a percent of NAV: a pile under the entry gate's share
@@ -225,9 +227,9 @@ contract CuratorVaultExitsHardeningTest is CuratorVaultExitsRig {
         v.redeem(bAll, bob, bob);
         _request(v, bob, bAll);
         uint256 bPaid = _claim(v, bob, bAll);
-        assertEq(v.totalSupply(), 0, "a share outlived the last holder");
-        assertLe(v.grossNav(), 2, "a pile was stranded behind the last holder");
-        assertApproxEqAbs(aPaid + bPaid, 2 * SEED + 100e6, 3, "the holders were not paid every wei");
+        assertEq(v.totalSupply(), v.SEED_SHARES(), "a live share outlived the last holder");
+        assertLe(v.grossNav(), VaultSeed.SEED + 200, "a pile was stranded behind the last holder: only the seed and its sliver of the pile stay");
+        assertApproxEqAbs(aPaid + bPaid + v.grossNav(), 2 * SEED + 100e6 + VaultSeed.SEED, 3, "the holders were not paid every wei the seed does not hold");
         assertGt(bPaid, aPaid, "the stayer did not keep the leaver's share of the pile");
         uint256 d = _lpDeposit(v, carol, 1_000e6);
         _warpBy(VEST_W);

@@ -12,7 +12,7 @@ import {MarketParams, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol
 import {Permits} from "../../src/ace/hub/libraries/Permits.sol";
 import {GateRefused, InsufficientCash, NotBorrower} from "../../src/ace/hub/Borrower.sol";
 import {Bid} from "../../src/interfaces/ILaunchAuction.sol";
-import {IAllowanceTransfer, LaunchVault} from "../../src/curator/LaunchVault.sol";
+import {IAllowanceTransfer, LaunchVault} from "../../src/entities/launch/LaunchVault.sol";
 import {LaunchOpsBudget} from "../../src/entities/launch/LaunchOpsBudget.sol";
 import {LaunchTokenFactory} from "../../src/entities/launch/LaunchTokenFactory.sol";
 import {LockAccount} from "../../src/entities/launch/LockAccount.sol";
@@ -66,7 +66,7 @@ abstract contract LaunchVaultBase is LaunchVaultFixture {
     /// @dev The params the vault builds for `acct` at `price`, by name, as a stranger would to front-run its market.
     function _paramsFor(address acct, uint256 price) internal view returns (MarketParams memory p) {
         (p.quote, p.collateral, p.borrower, p.price, p.lender) = (address(usdc), m.token, acct, price, address(vault));
-        (p.minCoverageWad, p.baseBps, p.minTenor, p.maxTenor, p.minPrincipal) = (1.25e18, BASE, 7 days, 30 days, 10e6);
+        (p.minCoverageWad, p.lenderAprBps, p.minTenor, p.maxTenor, p.minPrincipal) = (1.25e18, BASE, 7 days, 30 days, 10e6);
     }
 
     /// @dev The vault's current terms, field by field, for an equality against what it was created with.
@@ -87,7 +87,7 @@ contract LaunchVaultCreationTest is LaunchVaultBase {
         vm.prank(stranger);
         assertEq(impl.vaultFor(m.token, curator, D, BASE), address(vault), "a second call made another vault");
         LaunchVault.Terms memory t = vault.terms();
-        assertEq(abi.encode(t.token, t.curator, t.dTicks, t.baseBps), abi.encode(m.token, curator, D, BASE), "the terms");
+        assertEq(abi.encode(t.token, t.curator, t.dTicks, t.lenderAprBps), abi.encode(m.token, curator, D, BASE), "the terms");
         assertEq(abi.encode(t.lock, t.auction, t.budget), abi.encode(m.lock, m.auction, m.budget), "the launch");
         assertEq(abi.encode(t.pool, t.launchBy, t.tokenIs0), abi.encode(m.key.toId(), m.launchBy, m.token < address(usdc)), "the pool and the clock");
         assertTrue(impl.vaultFor(m.token, stranger, D, BASE) != address(vault), "another curator shares the vault");
@@ -95,10 +95,10 @@ contract LaunchVaultCreationTest is LaunchVaultBase {
         assertTrue(impl.vaultFor(m.token, curator, D, BASE + 1) != address(vault), "another rate shares the vault");
     }
 
-    /// @notice The rate's edges are genesis's: 0 and 531 are refused, 1 and 530 accepted, at 30 days over 7.
+    /// @notice The rate's edges are genesis's, bps a year at the 30-day term: 0 and 27652 are refused, 1 and 27651 accepted.
     /// @notice The discount's edges are 10% and 50%: 1053 and 6933 ticks are refused, 1054 and 6932 accepted.
     function test_TheTermsAreGenesissAtTheirEdges() public {
-        uint16[2] memory badRate = [uint16(0), 531];
+        uint16[2] memory badRate = [uint16(0), 27_652];
         uint24[2] memory badD = [uint24(1053), 6933];
         for (uint256 i; i < 2; ++i) {
             vm.expectRevert(LaunchVault.BadTerms.selector);
@@ -109,14 +109,14 @@ contract LaunchVaultCreationTest is LaunchVaultBase {
             impl.vaultFor(m.token, curator, badD[i], BASE);
         }
         assertGt(impl.vaultFor(m.token, curator, D, 1).code.length, 0, "a rate of 1 was refused");
-        assertGt(impl.vaultFor(m.token, curator, D, 530).code.length, 0, "a rate of 530 was refused");
+        assertGt(impl.vaultFor(m.token, curator, D, 27_651).code.length, 0, "a rate of 27651 was refused");
         assertGt(impl.vaultFor(m.token, curator, 1054, BASE).code.length, 0, "a 10% discount was refused");
         assertGt(impl.vaultFor(m.token, curator, 6932, BASE).code.length, 0, "a 50% discount was refused");
     }
 
-    /// @notice A vault at the top rate, 530, creates its market at genesis and rests: the rate rail is genesis's own.
-    function test_AVaultAt530CanReserve() public {
-        LaunchVault v = LaunchVault(impl.vaultFor(m.token, curator, D, 530));
+    /// @notice A vault at 27,651 bps a year, the top its 30-day term funds, creates its market at genesis and rests: the rate rail is genesis's own.
+    function test_AVaultAtTheTopRateCanReserve() public {
+        LaunchVault v = LaunchVault(impl.vaultFor(m.token, curator, D, 27_651));
         uint256 bidId = _bid(m, alice, SPEND);
         strat.send(m.token, m.lock.predict(alice, 0), _filled(SPEND));
         v.credit(bidId, 0, 0);
@@ -124,7 +124,7 @@ contract LaunchVaultCreationTest is LaunchVaultBase {
         _goLive(m);
         _warpTo(_openAt(m));
         (bytes32 id, uint256 got) = _reserve(v, alice, type(uint256).max);
-        assertEq(ace.idToMarketParams(id).baseBps, 530, "the market's rate");
+        assertEq(ace.idToMarketParams(id).lenderAprBps, 27_651, "the market's rate");
         assertEq(ace.restingOf(id), got, "nothing rested");
         assertGt(got, v.MIN_PRINCIPAL(), "fixture: a real reservation");
     }

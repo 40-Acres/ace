@@ -67,7 +67,7 @@ abstract contract AceP4Base is WarpClock {
 
     /// @dev An extension's fee a second before expiry: the origination formula on the debt, for the tenor less that second.
     function _feeAtExpiryMinusOne() internal view returns (uint256) {
-        return LoanMath.originationFee(PRINCIPAL, params.minTenor - 1, params.baseBps, params.minTenor);
+        return LoanMath.originationFee(PRINCIPAL, params.minTenor - 1, params.lenderAprBps);
     }
 }
 

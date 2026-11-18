@@ -17,7 +17,7 @@ import {AceReader} from "../utils/AceReader.sol";
 /// @notice None, cap == max -- the fill prices at BOOK. The max sentinel is not read as an infinite floor.
 /// @notice Two arms because they are different claims: a floor that always reads `cap` bricks every recordless market.
 /// @dev ONE hub, TWO markets differing ONLY in `record`, so the differential has a single cause.
-/// @dev `Settlement._collateralNeeded` prices per funded tick off `Ladder.priceAt` alone, so both pots settle equal.
+/// @dev `LoanAccounting.collateralNeeded` prices the claim off the market's own price, never the record; the recordless pot adds its forfeited coverage.
 /// @dev Anchored to a real `buyInventory`: the hub's own bytecode, never a lens read or a re-derived preview.
 /// @dev Coverage for issue #350, and the sole home of the recordless ask after the #370 ruling.
 contract AceInventoryAskFloorTest is WarpClock {

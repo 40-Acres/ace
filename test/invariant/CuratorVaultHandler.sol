@@ -6,7 +6,7 @@ import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.so
 import {CuratorVaultBase} from "../curator/CuratorVaultBase.sol";
 import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
 import {BorrowRequest} from "../../src/curator/AceVaultFlows.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {Loan} from "../../src/ace/hub/Types.sol";
 
 /// @title CuratorVaultHandler
@@ -26,8 +26,9 @@ contract CuratorVaultHandler is CuratorVaultBase {
     uint64 internal constant LEASE = 30 days; // the vault's REQUEST_LEASE
     uint256 internal constant WHOLE_SALE = 1_000_000e6; // offered to empty a pot; the hub pulls only what the fill takes
     uint256 internal constant RECOVERY_ENTRY = 100e6; // the entry a whole recovery is judged by
+    uint256 internal constant LOSS_SCALE = 1e36; // a loss per virtual share is kept at this scale, so its carry rounds off under an atom
 
-    CuratorVault public vault;
+    AceVault public vault;
     address public guardian = address(0x6A2D);
     address public stranger = address(0x57A1);
 
@@ -88,7 +89,7 @@ contract CuratorVaultHandler is CuratorVaultBase {
     bool public emptyLapseLanded; // a lapse of an empty record landed
     bool public dueLapseRefused; // a lapse past the lease of a standing request was refused
     bool public renewMissed; // a request left the lease other than a full lease from now
-    bool public strandBroken; // the last holders out left more behind than the virtual-share offset and the donations
+    bool public strandBroken; // the last holders out left more behind than the virtual-share offset, the seed and the donations
     uint256 public lastOutStrand; // what was left when every exit-capable share last left
     uint256 public lastOutCeiling; // and what those exits could never have paid out
     int256 public worstStrandMargin; // the closest any last pay came to leaving more than it could not take
@@ -102,21 +103,29 @@ contract CuratorVaultHandler is CuratorVaultBase {
     uint256 public entryPile; // and the pile and NAV it read, so a report names the break
     uint256 public entryNav;
     bool public entrySeamSplit; // maxDeposit or maxMint disagreed with the verb's outcome
-    bool public gapGrew; // the fee-free gap in assets rose past the action's real loss and its rounding allowance
-    uint256 public gapRise; // and by how much, against what was allowed, so a report names the break
+    bool public gapGrew; // the fee-free gap per virtual share rose past the action's real loss per share and its rounding allowance
+    uint256 public gapRise; // the gap after the breaking action, in assets, against the bound it was allowed, so a report names the break
     uint256 public gapAllowed;
+    uint256 public gapEntries; // entries that landed on shares already out while a fee-free gap stood, the state the gap bound is about
     string public gapTag; // the action that raised it
     bool public verbPanicked; // a vault verb reverted with a panic
     bytes public panicData; // and the panic, so a report names it
+    bool public usedRose; // an action that opened no loan raised what the total counts, lent plus the drawdown, past the hub's rounding
+    uint256 public usedRise; // and by how much, so a report names the break
+    string public usedTag; // and the action that raised it
 
     string public lastTag; // the action that just ran
 
     bool internal _dipPending; // a settlement landed and no claim has paid since
     uint256 internal _preGap; // the fee-free gap in assets before the action
+    uint256 internal _preSv; // the virtual supply before the action, the frame the gap is carried in
     uint256 internal _pays; // exits and claims the action landed
-    uint256 internal _actionLoss; // the real loss the action's settlements wrote off
+    uint256 internal _entries; // entries the action landed
+    uint256 internal _lossPerShare; // the real loss the action's settlements wrote off, each over the virtual supply it landed on, at LOSS_SCALE
     uint256 internal _clampForgiven; // the cash the action's pays took past the high-water standing before them
-    bool internal _crossedZero; // the action started, passed through or ended at zero supply
+    bool internal _crossedZero; // the action started, passed through or ended at zero live supply
+    uint256 internal _preUsed; // what the total counted before the action
+    uint256 internal _preOpened; // the loans opened before the action
 
     mapping(bytes32 => uint256) public calls;
 
@@ -131,11 +140,13 @@ contract CuratorVaultHandler is CuratorVaultBase {
 
     /// @dev Snapshot before the action, weigh every watermark after it.
     modifier watched() {
-        (_preGap, _pays, _actionLoss, _clampForgiven) = (_gap(), 0, 0, 0);
-        _crossedZero = vault.totalSupply() == 0;
+        (_preGap, _preSv, _pays, _entries, _lossPerShare, _clampForgiven) = (_gap(), _sv(), 0, 0, 0, 0);
+        _crossedZero = _noLive();
+        (_preUsed, _preOpened) = (used(), loansOpened);
         _;
         _judge();
         _judgeGap();
+        _judgeUsed();
     }
 
     constructor() {
@@ -155,7 +166,7 @@ contract CuratorVaultHandler is CuratorVaultBase {
     function baselineExits() external {
         address a = actors[0];
         require(_doRequest(a, vault.balanceOf(a) / 2), "BASELINE: the request did not stand");
-        (uint256 exitable, uint256 held) = vault.holds();
+        (uint256 exitable, uint256 held) = vlens.holds(address(vault));
         require(held != 0, "BASELINE: the request held none of the exitable cash it found -- the hold is inert");
         require(vault.lendable() == exitable - held, "BASELINE: lending reaches the cash the request holds");
         uint256 id = _loanIds[0];
@@ -178,7 +189,7 @@ contract CuratorVaultHandler is CuratorVaultBase {
         _warpBy(LEASE);
         vm.prank(stranger);
         vault.lapseExit(a);
-        (uint256 left,) = vault.requestOf(a);
+        (uint256 left,) = vlens.requestOf(address(vault), a);
         require(left == 0, "BASELINE: the lapse did not send the request home");
         vm.revertToState(root);
         _judge();
@@ -189,32 +200,59 @@ contract CuratorVaultHandler is CuratorVaultBase {
     /// @dev Every per-step measurement, taken once the action has finished and its state has settled: the holds nest.
     /// @dev The requests hold at most their worth, a wei of rounding over; lending takes exitable less that hold, and nothing while draining.
     function _judge() internal {
-        (uint256 exitable, uint256 held) = vault.holds();
+        (uint256 exitable, uint256 held) = vlens.holds(address(vault));
         if (held != 0) heldReads++;
-        uint256 worth = vault.convertToAssets(vault.requestedShares());
+        uint256 worth = vault.convertToAssets(vlens.requestedShares(address(vault)));
         bool draining = vault.draining();
         bool nested = held <= exitable && exitable <= vault.idle() && held <= worth + 1;
         nested = nested && vault.lendable() == (draining ? 0 : exitable - held) && (!draining || held == 0);
         if (!nested && !holdsBroke) (holdsBroke, holdsTag) = (true, lastTag);
     }
 
-    /// @dev The fee-free gap in assets, `feeHighWater - totalAssets()`, floored at zero: what the curator must earn back first.
+    /// @dev The fee-free gap in assets, `feeHighWater - totalAssets()`, floored at zero: per virtual share, what the curator must earn back first.
     function _gap() internal view returns (uint256) {
         return Math.saturatingSub(vault.feeHighWater(), vault.totalAssets());
     }
 
-    /// @dev THE BOUND THE FEE MARK'S SAFETY RESTS ON: across an action the gap rises by at most the real loss it wrote off.
-    /// @dev Plus two atoms a pay for its rounding, and the cash a clamp forgave the curator.
+    /// @dev The vault's supply plus the virtual offset: the frame the high-water is carried in.
+    function _sv() internal view returns (uint256) {
+        return vault.totalSupply() + VIRT;
+    }
+
+    /// @dev No live share is out: only the genesis seed's, which the vault holds itself, so the vault reads as empty.
+    function _noLive() internal view returns (bool) {
+        return vault.totalSupply() == vault.SEED_SHARES();
+    }
+
+    /// @dev THE BOUND THE FEE MARK'S SAFETY RESTS ON, PER VIRTUAL SHARE: across an action the gap per share rises by at most the real loss per share.
+    /// @dev Each write-off counts over the virtual supply it landed on; the gap before and the losses are carried to the supply after.
+    /// @dev Plus two atoms a pay or an entry for its rounding, and the cash a clamp forgave the curator.
     /// @dev And a CONSTANT two atoms an action, not booked as loss: the hub's position reads round, so an open or a sale moves NAV by a wei.
-    /// @dev EXEMPT across zero supply: an empty vault restamps the high-water at NAV, which no flow of cash describes.
+    /// @dev EXEMPT across zero live supply: an empty vault restamps the high-water at NAV, which no flow of cash describes.
     function _judgeGap() internal {
-        if (_crossedZero || vault.totalSupply() == 0) return;
-        uint256 allowed = _actionLoss + 2 * (_pays + 1) + _clampForgiven;
+        if (_crossedZero || _noLive()) return;
+        uint256 sv = _sv();
+        uint256 carried = Math.mulDiv(_preGap, sv, _preSv, Math.Rounding.Ceil) + Math.mulDiv(_lossPerShare, sv, LOSS_SCALE, Math.Rounding.Ceil);
+        uint256 bound_ = carried + 2 * (_pays + _entries + 1) + _clampForgiven;
         uint256 gap = _gap();
-        if (gap > _preGap + allowed && !gapGrew) {
+        if (gap > bound_ && !gapGrew) {
             gapGrew = true;
-            (gapRise, gapAllowed, gapTag) = (gap - _preGap, allowed, lastTag);
+            (gapRise, gapAllowed, gapTag) = (gap, bound_, lastTag);
         }
+    }
+
+    /// @notice What the vault's total counts: what is lent at the hub, the assets it holds less what it owes, plus gross NAV's drawdown from its high-water.
+    function used() public view returns (uint256) {
+        return ace.lenderAssets(address(vault), address(usdc)) - ace.lenderOwed(address(vault), address(usdc)) + vlens.drawdown(address(vault));
+    }
+
+    /// @dev THE TOTAL'S PREMISE: only a placement raises lent plus the drawdown, so a default or a fall frees no room under the total.
+    /// @dev A placement is admitted under the total, so with this the sum never passes the total in force when it last rose.
+    /// @dev Two atoms an action for the hub's rounding, as the gap allows.
+    function _judgeUsed() internal {
+        if (loansOpened != _preOpened) return;
+        uint256 u = used();
+        if (u > _preUsed + 2 && !usedRose) (usedRose, usedRise, usedTag) = (true, u - _preUsed, lastTag);
     }
 
     /// @dev Latch a PANIC out of a verb that must never panic; a custom error is a refusal and stays unlatched.
@@ -228,7 +266,7 @@ contract CuratorVaultHandler is CuratorVaultBase {
 
     /// @dev One request; zero only renews. It must renew the whole lease.
     function _doRequest(address who, uint256 shares) internal returns (bool) {
-        (uint256 had,) = vault.requestOf(who);
+        (uint256 had,) = vlens.requestOf(address(vault), who);
         vm.prank(who);
         try vault.requestExit(shares) {
             ghostEscrow[who] += shares;
@@ -238,7 +276,7 @@ contract CuratorVaultHandler is CuratorVaultBase {
                 requestsStood++;
                 if (had != 0) topUps++;
             }
-            (, uint64 exp) = vault.requestOf(who);
+            (, uint64 exp) = vlens.requestOf(address(vault), who);
             if (exp != uint64(vm.getBlockTimestamp()) + LEASE) renewMissed = true;
             return true;
         } catch (bytes memory err) {
@@ -249,7 +287,7 @@ contract CuratorVaultHandler is CuratorVaultBase {
 
     /// @dev The state a pay is judged against: exitable cash, the gross and supply it prices from, and the high-water its own collection leaves.
     function _prePay() internal view returns (Pay memory p) {
-        (p.exitable,) = vault.holds();
+        (p.exitable,) = vlens.holds(address(vault));
         (p.gross, p.supply) = (vault.grossNav(), vault.totalSupply());
         p.draining = vault.draining();
         uint256 nav = vault.totalAssets();
@@ -257,11 +295,11 @@ contract CuratorVaultHandler is CuratorVaultBase {
         if (p.supply != 0 && nav > p.h) p.h = nav; // the verb's collection lifts it first
     }
 
-    /// @dev Book a pay: the gap allowance, a clamp the high-water forgave, zero supply, and the last holders out.
+    /// @dev Book a pay: the gap allowance, a clamp the high-water forgave, zero live supply, and the last holders out.
     function _notePay(Pay memory p, uint256 paid, uint256 burned) internal {
         _pays++;
         if (paid > p.h) _clampForgiven += paid - p.h;
-        if (vault.totalSupply() == 0) _crossedZero = true;
+        if (_noLive()) _crossedZero = true;
         if (_allExitCapableSharesGone() && burned != 0) _noteLastOut(p.gross, p.supply);
     }
 
@@ -292,8 +330,8 @@ contract CuratorVaultHandler is CuratorVaultBase {
         if (p.draining) {
             drainedExits++;
         } else {
-            (uint256 exitable,) = vault.holds();
-            uint256 owed = Math.min(p.exitable, vault.convertToAssets(vault.requestedShares()));
+            (uint256 exitable,) = vlens.holds(address(vault));
+            uint256 owed = Math.min(p.exitable, vault.convertToAssets(vlens.requestedShares(address(vault))));
             if (exitable + 2 < owed) heldTakenByAnExit = true;
         }
         _notePay(p, paid, burned);
@@ -428,7 +466,7 @@ contract CuratorVaultHandler is CuratorVaultBase {
     /// @dev Has every share that CAN leave left? That is the last-holders-out state, and it is NOT a zero supply.
     /// @dev A donated share is unburnable, and a holding too small to price cannot be paid at all.
     function _allExitCapableSharesGone() internal view returns (bool) {
-        if (vault.requestedShares() != 0) return false;
+        if (vlens.requestedShares(address(vault)) != 0) return false;
         for (uint256 i; i < actors.length + 1; i++) {
             if (vault.convertToAssets(vault.balanceOf(participantAt(i))) != 0) return false;
         }
@@ -436,13 +474,14 @@ contract CuratorVaultHandler is CuratorVaultBase {
     }
 
     /// @dev Weigh what the last pay left behind against what no exit could ever have paid.
-    /// @dev Dead capital by construction: the virtual offset's slice and the donated shares' slice of the NAV it priced at.
+    /// @dev Dead capital by construction: the virtual offset's, the genesis seed's and the donated shares' slice of the NAV it priced at.
     /// @param preGross The vault's gross NAV before the pay.
     /// @param preSupply The share supply before it.
     function _noteLastOut(uint256 preGross, uint256 preSupply) internal {
         lastOuts++;
         uint256 left = vault.grossNav(); // GROSS, never `totalAssets`: a deferral left standing is stranded too
-        uint256 ceiling = Math.mulDiv(preGross, VIRT + donatedShares, preSupply + VIRT, Math.Rounding.Ceil) + actors.length + 3;
+        uint256 dead = VIRT + donatedShares + vault.SEED_SHARES();
+        uint256 ceiling = Math.mulDiv(preGross, dead, preSupply + VIRT, Math.Rounding.Ceil) + actors.length + 3;
         int256 margin = int256(left) - int256(ceiling);
         if (margin > 0) strandBroken = true;
         if (_marginSeen && margin <= worstStrandMargin) return;
@@ -479,7 +518,7 @@ contract CuratorVaultHandler is CuratorVaultBase {
         usdc.mint(a, amt);
         vm.startPrank(a);
         usdc.approve(address(vault), amt);
-        (bool open, bool virgin) = (vault.maxDeposit(a) != 0, vault.totalSupply() == 0);
+        (bool open, bool virgin) = (vault.maxDeposit(a) != 0, _noLive());
         try vault.deposit(amt, a) {
             _judgeEntry(open, virgin, true, "", amt);
         } catch (bytes memory err) {
@@ -504,7 +543,7 @@ contract CuratorVaultHandler is CuratorVaultBase {
         usdc.mint(a, cost);
         vm.startPrank(a);
         usdc.approve(address(vault), cost);
-        (bool open, bool virgin) = (vault.maxMint(a) != 0, vault.totalSupply() == 0);
+        (bool open, bool virgin) = (vault.maxMint(a) != 0, _noLive());
         try vault.mint(shares, a) returns (uint256 paid) {
             _judgeEntry(open, virgin, true, "", paid);
         } catch (bytes memory err) {
@@ -518,8 +557,10 @@ contract CuratorVaultHandler is CuratorVaultBase {
     /// @dev The verb's NAV is read back as NAV after it less its own cash; the entry stamps no pile, so the pile after is the one it read.
     /// @dev An empty vault admits whatever stands, by rule: a new life takes what nobody holds, so its entry is not judged against the pile.
     function _judgeEntry(bool open, bool virgin, bool ok, bytes memory err, uint256 assets) internal {
+        if (ok) _entries++;
         bytes4 sel = err.length >= 4 ? bytes4(err) : bytes4(0);
-        bool refused = sel == AceVault.GainVesting.selector || sel == AceVault.EndOfLife.selector || sel == AceVault.InventoryUnsold.selector;
+        bool refused = sel == AceVault.GainVesting.selector || sel == AceVault.EndOfLife.selector || sel == AceVault.InventoryUnsold.selector
+            || sel == AceVault.RecoveryVesting.selector;
         if ((ok && !open) || (refused && open)) entrySeamSplit = true;
         if (!ok || virgin) return;
         uint256 u = vault.unvested();
@@ -557,11 +598,11 @@ contract CuratorVaultHandler is CuratorVaultBase {
         _bump("requestZero");
         address c = _holder(holderSeed);
         zeroCalls++;
-        (uint256 s0,) = vault.requestOf(c);
-        (uint256 bal, uint256 req) = (vault.balanceOf(c), vault.requestedShares());
+        (uint256 s0,) = vlens.requestOf(address(vault), c);
+        (uint256 bal, uint256 req) = (vault.balanceOf(c), vlens.requestedShares(address(vault)));
         _doRequest(c, 0);
-        (uint256 s1,) = vault.requestOf(c);
-        if (s1 != s0 || vault.balanceOf(c) != bal || vault.requestedShares() != req) zeroMovedAnOrder = true;
+        (uint256 s1,) = vlens.requestOf(address(vault), c);
+        if (s1 != s0 || vault.balanceOf(c) != bal || vlens.requestedShares(address(vault)) != req) zeroMovedAnOrder = true;
     }
 
     /// @notice Claim the whole request, which exitable cash may not cover: a shortfall is the vault's refusal, counted.
@@ -616,7 +657,7 @@ contract CuratorVaultHandler is CuratorVaultBase {
     function lapseDue(uint256 holderSeed) external watched {
         _bump("lapseDue");
         address c = _holder(holderSeed);
-        (uint256 s, uint64 exp) = vault.requestOf(c);
+        (uint256 s, uint64 exp) = vlens.requestOf(address(vault), c);
         if (s == 0) return;
         _warpAtLeastTo(exp);
         lapseTries++;
@@ -634,7 +675,7 @@ contract CuratorVaultHandler is CuratorVaultBase {
     function lapseEarly(uint256 holderSeed) external watched {
         _bump("lapseEarly");
         address c = _holder(holderSeed);
-        (uint256 s, uint64 exp) = vault.requestOf(c);
+        (uint256 s, uint64 exp) = vlens.requestOf(address(vault), c);
         if (s != 0 && vm.getBlockTimestamp() >= exp) return;
         vm.prank(stranger);
         try vault.lapseExit(c) {
@@ -676,8 +717,8 @@ contract CuratorVaultHandler is CuratorVaultBase {
         _bump("claimZero");
         address c = _holder(holderSeed);
         zeroCalls++;
-        (uint256 s0,) = vault.requestOf(c);
-        (uint256 bal, uint256 req, uint256 pot) = (vault.balanceOf(c), vault.requestedShares(), vault.idle());
+        (uint256 s0,) = vlens.requestOf(address(vault), c);
+        (uint256 bal, uint256 req, uint256 pot) = (vault.balanceOf(c), vlens.requestedShares(address(vault)), vault.idle());
         vm.startPrank(c);
         try vault.redeem(0, c, c) {}
         catch (bytes memory err) {
@@ -696,8 +737,8 @@ contract CuratorVaultHandler is CuratorVaultBase {
             _notePanic(err);
         }
         vm.stopPrank();
-        (uint256 s1,) = vault.requestOf(c);
-        if (s1 != s0 || vault.balanceOf(c) != bal || vault.requestedShares() != req || vault.idle() != pot) zeroMovedAnOrder = true;
+        (uint256 s1,) = vlens.requestOf(address(vault), c);
+        if (s1 != s0 || vault.balanceOf(c) != bal || vlens.requestedShares(address(vault)) != req || vault.idle() != pot) zeroMovedAnOrder = true;
     }
 
     /// @notice THE WIND-DOWN: every borrower repays, every holder requests, and the claims alone empty the vault.
@@ -907,7 +948,8 @@ contract CuratorVaultHandler is CuratorVaultBase {
             _dipPending = true;
         } catch {}
         record.setBelow(false);
-        _actionLoss += Math.saturatingSub(g, vault.grossNav()); // the write-off: the one real loss an action makes
+        uint256 loss = Math.saturatingSub(g, vault.grossNav()); // the write-off: the one real loss an action makes
+        _lossPerShare += Math.mulDiv(loss, LOSS_SCALE, _sv(), Math.Rounding.Ceil); // over the virtual supply it landed on
     }
 
     /// @notice A RECOVERY: some of a settled loan's inventory sells, a vesting rise that goes to whoever holds as it vests.
@@ -945,7 +987,7 @@ contract CuratorVaultHandler is CuratorVaultBase {
         } catch {}
         vm.stopPrank();
         _crankJudged();
-        if (read.invPotOf(mid, loanId) != 0 || vault.totalSupply() == 0) return;
+        if (read.invPotOf(mid, loanId) != 0 || _noLive()) return;
         address a = actors[actorSeed % actors.length];
         _enterJudged(a);
         recoveryEntriesJudged++;
@@ -961,10 +1003,39 @@ contract CuratorVaultHandler is CuratorVaultBase {
         usdc.mint(a, RECOVERY_ENTRY);
         vm.startPrank(a);
         usdc.approve(address(vault), RECOVERY_ENTRY);
-        (bool open, bool virgin) = (vault.maxDeposit(a) != 0, vault.totalSupply() == 0);
+        (bool open, bool virgin) = (vault.maxDeposit(a) != 0, _noLive());
         try vault.deposit(RECOVERY_ENTRY, a) {
             _judgeEntry(open, virgin, true, "", RECOVERY_ENTRY);
             landed = !virgin;
+        } catch (bytes memory err) {
+            _notePanic(err);
+            _judgeEntry(open, virgin, false, err, 0);
+        }
+        vm.stopPrank();
+    }
+
+    /// @notice AN ENTRY UNDER A STANDING GAP: a loan settles if no pot stands, the guardian exempts every pot, and an actor enters at the trough.
+    /// @dev The one path on which an entrant meets the fee-free gap: a pot shuts entry until it sells, and a sale recovers about its claim.
+    function exemptAndEnter(uint256 loanSeed, uint256 actorSeed, uint256 amtSeed) external watched {
+        _bump("exemptAndEnter");
+        (uint256 unsold,) = ace.lenderUnresolved(address(vault), address(usdc));
+        if (unsold == 0) _settle(loanSeed);
+        (, uint256 settled) = ace.lenderUnresolved(address(vault), address(usdc));
+        vm.prank(guardian);
+        try vault.exemptDeadPots(settled) {}
+        catch (bytes memory err) {
+            _notePanic(err);
+        }
+        address a = actors[actorSeed % actors.length];
+        uint256 amt = bound(amtSeed, MIN_DEP, 400e6);
+        bool underGap = _gap() != 0;
+        usdc.mint(a, amt);
+        vm.startPrank(a);
+        usdc.approve(address(vault), amt);
+        (bool open, bool virgin) = (vault.maxDeposit(a) != 0, _noLive());
+        try vault.deposit(amt, a) {
+            _judgeEntry(open, virgin, true, "", amt);
+            if (underGap && !virgin) gapEntries++;
         } catch (bytes memory err) {
             _notePanic(err);
             _judgeEntry(open, virgin, false, err, 0);
@@ -1005,7 +1076,7 @@ contract CuratorVaultHandler is CuratorVaultBase {
     function vaultDoors() external watched {
         _bump("vaultDoors");
         address v = address(vault);
-        (uint256 held, uint256 req) = (vault.balanceOf(v), vault.requestedShares());
+        (uint256 held, uint256 req) = (vault.balanceOf(v), vlens.requestedShares(address(vault)));
         vm.startPrank(stranger);
         try vault.redeem(1, stranger, v) {
             vaultDoorOpened = true;
@@ -1026,6 +1097,6 @@ contract CuratorVaultHandler is CuratorVaultBase {
             _notePanic(err);
         }
         vm.stopPrank();
-        if (vault.balanceOf(v) != held || vault.requestedShares() != req) vaultMovedEscrow = true;
+        if (vault.balanceOf(v) != held || vlens.requestedShares(address(vault)) != req) vaultMovedEscrow = true;
     }
 }

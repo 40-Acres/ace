@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import {ExtensionAddsNoTime, GateRefused, LoanClosed, LoanMatured, NotBorrower, PolicyRefused} from "../../src/ace/hub/Borrower.sol";
+import {ExtensionAddsNoTime, ExtensionTooEarly, GateRefused, LoanClosed, LoanMatured, PolicyRefused} from "../../src/ace/hub/Borrower.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {Loan, MarketParams} from "../../src/ace/hub/Types.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
@@ -14,7 +14,7 @@ import {MatchingPolicy, YesPolicy} from "../utils/RollPolicyMocks.sol";
 
 /// @title AceExtendCashTest
 /// @notice MANUAL RENEWAL'S ONE DOOR: `extend` takes no mode, the caller pays the fee in cash, and the debt never moves.
-/// @notice The borrower extends; so does the market lender holding the borrower's credit grant, in cash it pays itself.
+/// @notice Anyone may extend, in cash it pays itself; a caller who is not the holder or its title operator only in the term's last quarter.
 /// @notice `extendWithPermit2` is the sibling door; every extension runs the loan's own tenor from now, and only inside its term.
 /// @dev Reasoning: the design record,,.
 contract AceExtendCashTest is ExtendRig {
@@ -193,21 +193,20 @@ contract AceExtendCashTest is ExtendRig {
         assertEq(ace.restingOf(id), 0, "and rests nothing");
     }
 
-    /* ============================== callers (review E-3) ============================== */
+    /* ============================== callers (anyone may extend) ============================== */
 
-    /// @notice E-3: the market lender holding the borrower's grant extends in cash it pays itself; the holder pays and owes nothing more.
-    function test_E3_TheGrantedLenderPaysAndTheHolderOwesNothingMore() public {
+    /// @notice The market lender extends in its last quarter as anyone may, in cash it pays itself; the holder pays and owes nothing more.
+    function test_TheLenderPaysAndTheHolderOwesNothingMore() public {
         uint256 loanId = _open(P, TEN7, 5000);
-        vm.prank(borrower);
-        ace.setCreditOperator(alice, true);
-        _warpBy(1 days);
+        uint64 x = read.loan(loanId).expiry;
+        _warpTo(uint256(x) - TEN7 / 4);
         uint256 debt = read.debtOf(loanId);
         uint256 fee = _feeNow(loanId);
         _fund(alice, fee);
         uint256 lenderBal = usdc.balanceOf(alice);
         uint256 borrowerBal = usdc.balanceOf(borrower);
         vm.expectEmit(true, true, false, true, address(ace));
-        emit Extended(loanId, 1 days, uint64(_now()) + TEN7, fee, alice);
+        emit Extended(loanId, uint64(_now()) + TEN7 - x, uint64(_now()) + TEN7, fee, alice);
         vm.prank(alice);
         ace.extend(loanId, 0, "");
         assertEq(read.loan(loanId).expiry, _now() + TEN7, "the lender's extension landed");
@@ -216,12 +215,10 @@ contract AceExtendCashTest is ExtendRig {
         assertEq(read.debtOf(loanId), debt, "and owes nothing more");
     }
 
-    /// @notice E-3: the escrow the lender funded is the holder's at close: a full repay refunds it to the holder, never to the payer.
-    function test_E3_TheEscrowTheLenderFundedRefundsToTheHolder() public {
+    /// @notice The escrow another caller funded is the holder's at close: a full repay refunds it to the holder, never to the payer.
+    function test_TheEscrowAnotherCallerFundedRefundsToTheHolder() public {
         uint256 loanId = _open(P, TEN7, 5000);
-        vm.prank(borrower);
-        ace.setCreditOperator(alice, true);
-        _warpBy(1 days);
+        _warpTo(uint256(read.loan(loanId).expiry) - TEN7 / 4);
         _ext(alice, loanId);
         uint256 refund = _unearned(loanId, read.feeEscrowOf(loanId));
         assertGt(refund, 0, "PREMISE: an unearned escrow to refund");
@@ -234,58 +231,58 @@ contract AceExtendCashTest is ExtendRig {
         assertEq(read.quoteOwedOf(loanId, alice), 0, "and the payer takes none of it");
     }
 
-    /// @notice Nobody else extends: a stranger, a keeper, the lender without the grant, and a granted operator who is not the lender.
-    function test_E3_EveryOtherCallerIsRefusedNotBorrower() public {
+    /// @notice Every other caller is a non-holder: a stranger, a keeper, the lender and a granted operator are refused a day in, `ExtensionTooEarly`.
+    /// @notice In the last quarter the first of them to call extends.
+    function test_EveryOtherCallerExtendsOnlyInTheLastQuarter() public {
         uint256 loanId = _open(P, TEN7, 5000);
-        _assertRefused(stranger, loanId, NotBorrower.selector);
-        _assertRefused(keeper, loanId, NotBorrower.selector);
-        _assertRefused(alice, loanId, NotBorrower.selector);
         address router = address(0x2077E2);
         vm.prank(borrower);
         ace.setCreditOperator(router, true);
-        _assertRefused(router, loanId, NotBorrower.selector);
+        _warpBy(1 days);
+        _assertRefused(stranger, loanId, ExtensionTooEarly.selector);
+        _assertRefused(keeper, loanId, ExtensionTooEarly.selector);
+        _assertRefused(alice, loanId, ExtensionTooEarly.selector);
+        _assertRefused(router, loanId, ExtensionTooEarly.selector);
+        _warpTo(uint256(read.loan(loanId).expiry) - TEN7 / 4);
+        _ext(stranger, loanId);
+        assertEq(read.loan(loanId).expiry, _now() + TEN7, "in the last quarter a stranger extends");
     }
 
-    /// @notice The grant read is the lender's own and live: a grant to another operator, or one the holder revoked, admits no lender.
-    /// @dev A gate asking only whether the holder ever granted anyone passes both refusals here; the control lands on the live grant.
-    function test_E3_AGrantToAnotherOperatorOrARevokedGrantAdmitsNoLender() public {
+    /// @notice A credit grant changes nothing for the lender: granted, revoked or given to another, it is refused a day in and extends late.
+    /// @dev A gate still reading the grant would admit the granted lender a day in; the preview and the verb both refuse it.
+    function test_AGrantChangesNothingForTheLender() public {
         uint256 loanId = _open(P, TEN7, 5000);
         vm.prank(borrower);
         ace.setCreditOperator(address(0x2077E2), true);
-        _assertRefused(alice, loanId, NotBorrower.selector);
-        (bool ok, bytes4 why,) = ace.tryExtend(loanId, 0, "", alice);
-        assertFalse(ok, "a grant to another operator admits no lender at the preview");
-        assertEq(why, NotBorrower.selector, "refused by the caller leg");
-        vm.startPrank(borrower);
-        ace.setCreditOperator(alice, true);
-        ace.setCreditOperator(alice, false);
-        vm.stopPrank();
-        _assertRefused(alice, loanId, NotBorrower.selector);
+        _warpBy(1 days);
+        _assertRefused(alice, loanId, ExtensionTooEarly.selector);
         vm.prank(borrower);
         ace.setCreditOperator(alice, true);
-        _warpBy(1 days);
+        (bool ok, bytes4 why,) = ace.tryExtend(loanId, 0, "", alice);
+        assertFalse(ok, "a live grant admits the lender no earlier at the preview");
+        assertEq(why, ExtensionTooEarly.selector, "refused by the non-holder rule's time leg");
+        _assertRefused(alice, loanId, ExtensionTooEarly.selector);
+        vm.prank(borrower);
+        ace.setCreditOperator(alice, false);
+        _warpTo(uint256(read.loan(loanId).expiry) - TEN7 / 4);
         _ext(alice, loanId);
-        assertEq(read.loan(loanId).expiry, _now() + TEN7, "CONTROL: the live grant admits the lender");
+        assertEq(read.loan(loanId).expiry, _now() + TEN7, "CONTROL: revoked, the lender still extends in the last quarter");
     }
 
-    /// @notice The borrower rule judges the HOLDER, never the caller: in a market naming its borrower, the granted lender extends for that holder.
-    /// @dev Once the title moves to a holder the market does not name, the same lender on that holder's grant is refused `GateRefused`.
+    /// @notice The borrower rule judges the HOLDER, never the caller: in a market naming its borrower, the lender extends for that holder late.
+    /// @dev Once the title moves to a holder the market does not name, the same lender in the same last quarter is refused `GateRefused`.
     function test_E3_TheBorrowerRuleJudgesTheHolderNotTheLender() public {
         MarketParams memory p = _params(alice);
         p.borrower = borrower;
         bytes32 named = ace.createMarket(p);
         _deposit(named, alice, 2 * P);
         uint256 loanId = _openIn(named, borrower, P, TEN7, 5000);
-        vm.prank(borrower);
-        ace.setCreditOperator(alice, true);
-        _warpBy(1 days);
+        _warpTo(uint256(read.loan(loanId).expiry) - TEN7 / 4);
         _ext(alice, loanId);
-        assertEq(read.loan(loanId).expiry, _now() + TEN7, "the granted lender extends for the holder the market names");
+        assertEq(read.loan(loanId).expiry, _now() + TEN7, "the lender extends for the holder the market names");
         address buyer = address(0xB0E2);
         _moveTitle(loanId, borrower, buyer);
-        vm.prank(buyer);
-        ace.setCreditOperator(alice, true);
-        _warpBy(1 days);
+        _warpTo(uint256(read.loan(loanId).expiry) - TEN7 / 4);
         _assertRefused(alice, loanId, GateRefused.selector);
     }
 
@@ -332,8 +329,8 @@ contract AceExtendCashTest is ExtendRig {
         assertEq(usdc.balanceOf(pbor), bal - fee, "only the fee moved");
     }
 
-    /// @notice E-3 on the permit door: the granted lender spends its OWN permit, and the holder pays nothing.
-    function test_Permit2_TheGrantedLenderSpendsItsOwnPermit() public {
+    /// @notice E-3 on the permit door: the lender, in the term's last quarter, spends its OWN permit, and the holder pays nothing.
+    function test_Permit2_TheLenderSpendsItsOwnPermit() public {
         (bytes32 mid, uint256 loanId) = _keyedLenderLoan();
         uint256 fee = _feeNow(loanId);
         _permitFund(plend, fee);
@@ -389,17 +386,15 @@ contract AceExtendCashTest is ExtendRig {
         ace.extendWithPermit2(loanId, 0, "", blob);
     }
 
-    /// @dev A market lent by the keyed lender, its policy a yes, holding a loan of the keyed borrower who granted the lender.
+    /// @dev A market lent by the keyed lender, its policy a yes, holding a loan of the keyed borrower, warped to the term's last quarter.
     function _keyedLenderLoan() internal returns (bytes32 mid, uint256 loanId) {
         mid = ace.createMarket(_params(plend));
         _setPolicy(plend, address(yes));
         _deposit(mid, plend, 3 * P);
         loanId = _openIn(mid, pbor, P, TEN7, 5000);
-        vm.startPrank(pbor);
+        vm.prank(pbor);
         usdc.approve(address(ace), 0);
-        ace.setCreditOperator(plend, true);
-        vm.stopPrank();
-        _warpBy(1 days);
+        _warpTo(uint256(read.loan(loanId).expiry) - TEN7 / 4);
     }
 
     /* ============================== the single-term market (review R-1) ============================== */

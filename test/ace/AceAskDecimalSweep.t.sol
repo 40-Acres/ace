@@ -81,7 +81,7 @@ contract AceAskDecimalSweepTest is WarpClock {
         rec.setMinPrice(type(uint256).max); // sentinel: leaves the ask floor at zero, as a missing record does
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(coll));
         p.record = address(rec); // for the SETTLEMENT rule alone: recordless forfeits the coverage into the pots
-        p.baseBps = 1;
+        p.lenderAprBps = 1;
         p.settleBountyBps = 0; // no sliver, so every unit reaches the claim conversion
         p.price = p_;
         AceFixtures.Deployment memory d = AceFixtures.deploy(p);

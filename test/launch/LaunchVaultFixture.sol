@@ -15,8 +15,8 @@ import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/Pool
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {Permits} from "../../src/ace/hub/libraries/Permits.sol";
 import {Bid, Checkpoint} from "../../src/interfaces/ILaunchAuction.sol";
-import {LaunchVault} from "../../src/curator/LaunchVault.sol";
-import {SetValue} from "../../src/curator/sets/SetValue.sol";
+import {LaunchVault} from "../../src/entities/launch/LaunchVault.sol";
+import {PriceGrid} from "../../src/curator/PriceGrid.sol";
 import {LockAccount} from "../../src/entities/launch/LockAccount.sol";
 import {RunwayHook} from "../../src/entities/launch/RunwayHook.sol";
 import {MockPermit2Allowance} from "../mocks/MockPermit2Allowance.sol";
@@ -32,7 +32,7 @@ abstract contract LaunchVaultFixture is RunwayFixture {
     using StateLibrary for IPoolManager;
 
     uint24 internal constant D = 2232; // 40acres' published discount, 20%
-    uint16 internal constant BASE = 150; // 40acres' published rate per 7 days
+    uint16 internal constant BASE = 150; // the vault's lender rate, bps a year
     uint256 internal constant CLEAR = 7_200 << 40; // the final clearing price, about $0.10 a token, Q96 USDC atoms per token atom
     uint24 internal constant MPS = 1e7;
     uint256 internal constant Q = 1 << 96;
@@ -123,7 +123,7 @@ abstract contract LaunchVaultFixture is RunwayFixture {
 
     /// @dev The pool sqrt price at which the token trades at `priceQ96` USDC atoms per token atom, in `x`'s pool orientation.
     function _sqrtAt(Made memory x, uint256 priceQ96) internal view returns (uint160) {
-        return SetValue.sqrtPriceX96(priceQ96, address(usdc) < x.token);
+        return PriceGrid.sqrtPriceX96(priceQ96, address(usdc) < x.token);
     }
 
     // ---- buyers ----
@@ -243,7 +243,7 @@ abstract contract LaunchVaultFixture is RunwayFixture {
 
     /// @dev The clearing tick by PriceGrid's floor path, as a token price.
     function _clearTick() internal pure returns (int24) {
-        return TickMath.getTickAtSqrtPrice(SetValue.sqrtPriceX96(CLEAR, false));
+        return TickMath.getTickAtSqrtPrice(PriceGrid.sqrtPriceX96(CLEAR, false));
     }
 
     /// @dev The price at token tick `t`, Q96 USDC atoms per token atom, floored as the vault floors it.

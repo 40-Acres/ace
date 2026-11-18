@@ -86,6 +86,14 @@ if [ ! -f "$CERTORA/emv.jar" ]; then
   exit 1
 fi
 
+# THE JAR MUST BE THE PINNED PROVER. A home built before the pin moved still runs, and on the hub 8.19.2 returns
+# spurious FAILs (unlocated internals, raw storage addresses), so a stale build is refused, never quietly used.
+PIN="$(grep -m 1 -E '^PROVER_COMMIT=' "$ROOT/scripts/certora-setup.sh" | cut -d'"' -f2)"
+BUILT="$(cat "$CERTORA/.built-commit" 2>/dev/null || true)"
+[ -n "$PIN" ] || die "could not read PROVER_COMMIT from scripts/certora-setup.sh."
+[ "$BUILT" = "$PIN" ] ||
+  die "the prover at $CERTORA is built at '${BUILT:-unknown}', not the pinned $PIN -- run scripts/certora-setup.sh to rebuild it."
+
 JDK="$(find "$TOOLS" -maxdepth 1 -type d -name 'jdk-21*' | sort | tail -n 1)"
 [ -n "$JDK" ] || die "no JDK under $TOOLS -- run scripts/certora-setup.sh (or set ACE_CERTORA_HOME to where it installed)."
 
@@ -105,9 +113,25 @@ unset CERTORAKEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_P
 export AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_CONFIG_FILE=/dev/null AWS_EC2_METADATA_DISABLED=true
 export CERTORA JAVA_HOME="$JDK"
 export PATH="$TOOLS/venv/bin:$JDK/bin:$CERTORA:$TOOLS/bin:$PATH"
+# no browser pop-up of FinalResults.html and no desktop notification at a run's end (the prover reads both switches);
+# a verdict is read from emv-*/Reports/output.json anyway, never from a page
+export CERTORA_DISABLE_POPUP=1 CERTORA_DISABLE_NOTIFICATION=1
 
-# a conf over the munged hub (libraries inlined) gets that tree rebuilt from src first, so it never goes stale
-if grep -q "verify/certora/munged" "$CONF"; then
+# a conf over the munged hub (libraries inlined) gets that tree rebuilt from src first, so it never goes stale;
+# a conf over the munged vault (forwarded verbs inlined), the munged receipt (clone args from storage), the munged
+# factory (its clone call a recorded hook) or the munged pure harness gets its own the same way
+if grep -q "verify/certora/munged-vault/" "$CONF"; then
+  "$ROOT/scripts/certora-munge-vault.sh"
+elif PINNED="$(grep -oE 'verify/certora/munged-vault-pin-[A-Za-z]+/' "$CONF" | sort -u)" && [ -n "$PINNED" ]; then
+  [ "$(printf '%s\n' "$PINNED" | wc -l)" -eq 1 ] || die "refusing $CONF: it names more than one pinned vault copy."
+  "$ROOT/scripts/certora-munge-vault.sh" "$ROOT/${PINNED%/}"
+elif grep -q "verify/certora/munged-receipt/" "$CONF"; then
+  "$ROOT/scripts/certora-munge-receipt.sh"
+elif grep -q "verify/certora/munged-factory/" "$CONF"; then
+  "$ROOT/scripts/certora-munge-factory.sh"
+elif grep -q "verify/certora/munged-pure/" "$CONF"; then
+  "$ROOT/scripts/certora-munge-pure.sh"
+elif grep -q "verify/certora/munged/" "$CONF"; then
   "$ROOT/scripts/certora-munge.sh"
 fi
 
@@ -142,7 +166,18 @@ if [ "$MEM" != "off" ]; then
   LIMIT=(systemd-run --user --scope --quiet -p "MemoryMax=$MEM" -p MemorySwapMax=0 -p Delegate=yes -- "${LIMIT[@]}")
 fi
 
+# THE JVM'S HEAP IS SET FROM THE CAP, because its default is a QUARTER of the cgroup's memory: CERTORA_MEM=20G left it
+# 5 GiB (jcmd read MaxHeapSize=5368709120 on a live prover, 2026-11-12), and that, not the cap, was this tree's "heap"
+# wall. A cap given in whole G gets -Xmx at 60% of it, leaving the rest to the solvers; a caller's own --java_args wins.
+JAVA_HEAP=()
+case " $* " in *" --java_args "*) ;; *)
+  if [[ "$MEM" =~ ^([0-9]+)[Gg]$ ]] && [ $((BASH_REMATCH[1] * 6 / 10)) -ge 1 ]; then
+    JAVA_HEAP=(--java_args "-Xmx$((BASH_REMATCH[1] * 6 / 10))g")
+  fi
+  ;;
+esac
+
 cd "$ROOT"
-"${LIMIT[@]}" python3 "$CERTORA/certoraRun.py" "$CONF" "$@" \
+"${LIMIT[@]}" python3 "$CERTORA/certoraRun.py" "$CONF" "$@" "${JAVA_HEAP[@]+"${JAVA_HEAP[@]}"}" \
   --solc "$SOLC" "${PIPELINE[@]+"${PIPELINE[@]}"}" --solc_optimize "$RUNS" --solc_evm_version "$EVM" \
   --jar "$CERTORA/emv.jar"

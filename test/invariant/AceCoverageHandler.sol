@@ -215,7 +215,7 @@ contract AceCoverageHandler is WarpClock, DeleverageCrank {
         vm.stopPrank();
     }
 
-    /// @dev Is this loan's coverage margin AT ITS OWN LINE inside the slack a settlement's ceilings can spend?
+    /// @dev Is this loan's line within `THIN_SLACK_UNITS` of settlement's need, so its coverage margin is thin?
     /// @dev Measured at the line, never at the holding: a loan that never withdrew is loose whatever its debt.
     /// @dev The line is what a borrower may legally stand on, so it is where the margin has to be counted.
     /// @dev From the expiry second `withdrawableUnits` reads zero, so on a matured loan this figure is the whole holding, not the line.
@@ -327,7 +327,7 @@ contract AceCoverageHandler is WarpClock, DeleverageCrank {
     }
 
     /// @notice THE EROSION PROBE: stand a loan on its line, then sell out from under it.
-    /// @dev The gate's slack is what settlement's own ceilings are paid out of, and a sale spends it.
+    /// @dev A sale may spend the gate's slack over settlement's need and the keeper's sliver, and no more.
     /// @dev The band has to be armed first, so a lottery sequence needs three specific actions on one loan.
     /// @dev So it is ONE action, exactly as `AceHandler.depositThenExit` compounds its own two-step probe.
     /// @dev Picks among LIVE, UNEXPIRED loans only: a closed or matured loan refuses both legs, and the catches would hide it.

@@ -81,6 +81,7 @@ contract AceGenesisDriveHandler is WarpClock {
     uint256 public genesisAttempted; // createMarket actions that reached the hub
     uint256 public genesisCreated; // ones the rails admitted
     uint256 public genesisRefused; // ones a rail turned away: the frontier, and a counted result
+    uint256 public genesisRefusedByFeeRail; // of those, the ones the share rail refused by name, `fee bps too high`
     uint256 public genesisCappedOut; // ones skipped because the registry was full, so the tally cannot read as a refusal
     bool public genesisIdNotItsParams; // an id stopped re-hashing to the params it resolves to
     uint256 public loansOpened;
@@ -217,7 +218,7 @@ contract AceGenesisDriveHandler is WarpClock {
     /// @notice Seeding is part of genesis on purpose: an unfunded market is a config that never reaches a draw.
     /// @dev A refusal is a RESULT, not a failure -- the rails are a frontier and finding it is half the point.
     /// @dev The dials left fixed are the ones whose variation only produces refusals: the tenor grid and the band.
-    /// @dev `minCoverageWad`, `baseBps`, `minPrincipal`, the price, the bounty and the deleverage cut all vary.
+    /// @dev `minCoverageWad`, `lenderAprBps`, `minPrincipal`, the price, the bounty and the deleverage cut all vary.
     /// @dev `minPrincipal` reaches ONE ATOM and the price reaches both ends of the menu: the degenerate NEIGHBOURHOODS.
     function createMarket(uint256 seed) external {
         _bump("createMarket");
@@ -253,8 +254,9 @@ contract AceGenesisDriveHandler is WarpClock {
             rec.setMinPrice(AceFixtures.px(REF_PRICE_WAD, address(q), address(c)));
             _mkts.push(Mkt(id, qi, ci, li, rec));
             _seedMarket(_mkts.length - 1);
-        } catch {
+        } catch (bytes memory err) {
             genesisRefused++;
+            if (keccak256(err) == keccak256(abi.encodeWithSignature("Error(string)", "fee bps too high"))) genesisRefusedByFeeRail++;
         }
     }
 
@@ -263,15 +265,15 @@ contract AceGenesisDriveHandler is WarpClock {
     /// @dev Scale comes from the HELD decimals, so a 2-dec market is not a thousandth of an 18-dec one.
     /// @dev THE PRICE IS A DIAL NOW, taking the place of the spacing the grid used to fuzz.
     /// @dev The lender is a dial too, and it is in the id preimage, so two markets differing only by it fork.
-    /// @dev `baseBps` sweeps to the REPRESENTATIONAL ceiling, past the rail that actually decides: the fixture is a
-    /// @dev flat 7d/7d market, where `feeFundable` binds at 2272, so the top tenth of the sweep is refused by name.
+    /// @dev `lenderAprBps` sweeps a tenth past the share rail's per-year top at `maxTenor`, 118506 on this 7d/7d fixture, so that tenth is refused by name.
     function _fuzzParams(uint256 seed, uint8 qi, uint8 ci, uint8 li, MockPersistenceRecord rec) internal view returns (MarketParams memory p) {
         p = AceFixtures.marketParams(address(quoteTokens[qi]), address(collTokens[ci]));
         p.record = address(rec);
         p.lender = lenders[li];
         p.price = PriceFrame.priceAt(address(quoteTokens[qi]), address(collTokens[ci]), PRICE_OFFSETS[(seed >> 16) % 6]);
         p.minCoverageWad = bound(seed >> 24, 1.05e18, 20e18);
-        p.baseBps = bound(seed >> 32, 1, Constants.MAX_FEE_SHARE_BPS);
+        uint256 top = (Constants.MAX_FEE_SHARE_BPS * 10000 * Constants.SECONDS_PER_YEAR) / (uint256(p.maxTenor) * (10000 + Constants.PROTOCOL_SHARE_BPS));
+        p.lenderAprBps = bound(seed >> 32, 1, top + top / 10);
         p.minPrincipal = bound(seed >> 40, 1, 50 * quoteUnit(qi));
         p.settleBountyBps = bound(seed >> 72, 0, 200);
         p.deleverageFloorEpsBps = ProtocolPolicy.DELEVERAGE_FLOOR_EPS_BPS;

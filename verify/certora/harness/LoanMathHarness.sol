@@ -11,8 +11,8 @@ contract LoanMathHarness {
         return LoanMath.triggerPrice(debt, units, minCoverageWad, unitScale);
     }
 
-    function originationFee(uint256 principal, uint64 tenor, uint256 baseBps, uint64 minTenor) external pure returns (uint256) {
-        return LoanMath.originationFee(principal, tenor, baseBps, minTenor);
+    function originationFee(uint256 principal, uint64 tenor, uint256 lenderAprBps) external pure returns (uint256) {
+        return LoanMath.originationFee(principal, tenor, lenderAprBps);
     }
 
     function protocolCut(uint256 fee) external pure returns (uint256) {
@@ -31,7 +31,7 @@ contract LoanMathHarness {
         return LoanMath.tickCut(fee);
     }
 
-    function feeFundable(uint256 baseBps, uint64 tenor, uint64 minTenor) external pure returns (bool) {
-        return LoanMath.feeFundable(baseBps, tenor, minTenor);
+    function feeFundable(uint256 lenderAprBps, uint64 tenor) external pure returns (bool) {
+        return LoanMath.feeFundable(lenderAprBps, tenor);
     }
 }

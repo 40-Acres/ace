@@ -5,10 +5,10 @@ import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.so
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
 
-/// @notice The instant-exit rig: a production CuratorVault, which exits at once by default, with a guardian key.
+/// @notice The instant-exit rig: a production AceVault, which exits at once by default, with a guardian key.
 abstract contract InstantExitRig is CuratorVaultBase {
     uint256 internal constant V_OFF = 1e6; // the vault's virtual-share offset
     uint16 internal constant FEE = 1000; // a live performance fee, so a fee row prices against a supply the verb itself grows
@@ -18,14 +18,14 @@ abstract contract InstantExitRig is CuratorVaultBase {
     event Withdraw(address indexed sender, address indexed receiver, address indexed owner, uint256 assets, uint256 shares);
 
     /// @dev A production vault, instant by default, with the rig collateral listed; `mid` is its door market.
-    function _instantVault(uint16 fee) internal returns (CuratorVault v) {
+    function _instantVault(uint16 fee) internal returns (AceVault v) {
         VaultConfig memory c = _cfg(fee);
         c.guardian = guardian;
         v = _deploy(c, "Instant", "cINST");
     }
 
     /// @dev The quote supply a verb prices against: the supply, the fee it would mint first, and the virtual offset.
-    function _quoteSupply(CuratorVault v) internal view returns (uint256) {
+    function _quoteSupply(AceVault v) internal view returns (uint256) {
         return v.totalSupply() + v.pendingFeeShares() + V_OFF;
     }
 
@@ -41,18 +41,18 @@ abstract contract InstantExitRig is CuratorVaultBase {
         return x <= y + q0 + q1 && y <= x + q0 + q1;
     }
 
-    function _redeem(CuratorVault v, address who, uint256 shares) internal returns (uint256) {
+    function _redeem(AceVault v, address who, uint256 shares) internal returns (uint256) {
         vm.prank(who);
         return v.redeem(shares, who, who);
     }
 
-    function _request(CuratorVault v, address who, uint256 shares) internal {
+    function _request(AceVault v, address who, uint256 shares) internal {
         vm.prank(who);
         v.requestExit(shares);
     }
 
     /// @dev Two LPs at par, a vested gain over the fee's high-water, so a collection is owed when the next verb runs.
-    function _grownFeeVault() internal returns (CuratorVault v) {
+    function _grownFeeVault() internal returns (AceVault v) {
         v = _instantVault(FEE);
         _lpDeposit(v, alice, 10_000e6);
         _lpDeposit(v, bob, 10_000e6);
@@ -74,7 +74,7 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
     /// @notice A REDEEM PAYS THE PREVIEW AT ONCE, priced over the supply the verb's own fee collection leaves.
     /// @notice The stayers' price, read after that collection, does not fall; the curator is paid the fee and nothing more.
     function test_Instant_RedeemPaysThePreviewAtTheFeeInclusivePrice() public {
-        CuratorVault v = _grownFeeVault();
+        AceVault v = _grownFeeVault();
         uint256 sh = v.balanceOf(alice) / 2;
         uint256 quote = v.previewRedeem(sh);
         uint256 fee = v.pendingFeeShares();
@@ -94,7 +94,7 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
 
     /// @notice A WITHDRAW BURNS ITS PREVIEW, rounded UP, and pays exactly the asked cash to the named receiver.
     function test_Instant_WithdrawBurnsThePreviewAndPaysTheReceiver() public {
-        CuratorVault v = _grownFeeVault();
+        AceVault v = _grownFeeVault();
         uint256 want = 3_333_333_333;
         uint256 burn = v.previewWithdraw(want);
         (uint256 a0, uint256 q0) = (v.totalAssets(), _quoteSupply(v));
@@ -110,10 +110,10 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
         assertTrue(_notCheaper(a0, q0, v.totalAssets(), _quoteSupply(v)), "the withdraw lowered the stayers' price");
     }
 
-    /// @notice THE FEE-FREE GAP STAYS PUT ACROSS AN EXIT: below the high-water the exit's cash leaves both NAV and the mark.
-    /// @dev Measured after the verb's own collection, which below the mark is none: the gap is the curator's loss to earn back.
-    function test_Instant_TheFeeGapBelowTheHighWaterStaysPut() public {
-        CuratorVault v = _instantVault(FEE);
+    /// @notice THE FEE-FREE GAP STAYS PUT PER SHARE ACROSS AN EXIT: below the high-water the exit carries the mark down by the shares it burns.
+    /// @dev Measured after the verb's own collection, which below the mark is none: the gap per share is the curator's loss to earn back.
+    function test_Instant_TheFeeGapBelowTheHighWaterStaysPutPerShare() public {
+        AceVault v = _instantVault(FEE);
         _lpDeposit(v, alice, 10_000e6);
         _lpDeposit(v, bob, 10_000e6);
         uint256 doomed = _open(2_000e6);
@@ -123,13 +123,15 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
         uint256 gap0 = v.feeHighWater() - v.totalAssets();
         assertGt(gap0, 0, "PREMISE: the loss sits the vault under its high-water");
         assertEq(v.pendingFeeShares(), 0, "PREMISE: under the mark no fee is owed");
+        uint256 sv0 = v.totalSupply() + 1e6;
         _redeem(v, alice, v.balanceOf(alice) / 3);
-        assertEq(v.feeHighWater() - v.totalAssets(), gap0, "the exit moved the fee-free gap");
+        uint256 sv1 = v.totalSupply() + 1e6;
+        assertApproxEqAbs(v.feeHighWater() - v.totalAssets(), Math.mulDiv(gap0, sv1, sv0), 2, "the exit moved the fee-free gap per virtual share");
     }
 
     /// @notice OVER THE HIGH-WATER, AN EXIT IS NOT GROWTH: after the verb collects, a second collection mints nothing.
     function test_Instant_AnExitOverTheHighWaterChargesNoSecondFee() public {
-        CuratorVault v = _grownFeeVault();
+        AceVault v = _grownFeeVault();
         _redeem(v, alice, v.balanceOf(alice) / 2);
         assertEq(v.feeHighWater(), v.totalAssets(), "the mark did not follow NAV down by the exit's cash");
         uint256 cur = v.balanceOf(curator);
@@ -139,7 +141,7 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
 
     /// @notice AN EXIT LEAVES A VESTING PILE WHOLE: the mark falls with the cash, so the next sync reads no fall to burn the pile by.
     function test_Instant_AnExitLeavesTheVestingPileWhole() public {
-        CuratorVault v = _instantVault(0);
+        AceVault v = _instantVault(0);
         _lpDeposit(v, alice, 10_000e6);
         _lpDeposit(v, bob, 10_000e6);
         _gift(v, 500e6);
@@ -157,7 +159,7 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
     /// @notice A REDEEM WORTH NOTHING IS REFUSED `ZeroAssets`, as a claim is, and burns no share.
     /// @notice A withdraw of one wei still burns at least one share, so it pays.
     function test_Instant_ARedeemThatFloorsToNothingIsRefused() public {
-        CuratorVault v = _instantVault(0);
+        AceVault v = _instantVault(0);
         _lpDeposit(v, alice, 1_000e6);
         _lpDeposit(v, bob, 1_000e6);
         assertEq(v.previewRedeem(1), 0, "PREMISE: one share-wei is worth nothing at par");
@@ -173,7 +175,7 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
 
     /// @notice A HOLDER WHOSE SHARES PAY NOTHING IS OFFERED NOTHING, so `redeem(maxRedeem)` never asks for a refused zero payout.
     function test_Instant_MaxRedeemOffersNoZeroPayout() public {
-        CuratorVault v = _instantVault(0);
+        AceVault v = _instantVault(0);
         _lpDeposit(v, alice, 1_000e6);
         _lpDeposit(v, bob, 1_000e6);
         vm.prank(alice);
@@ -185,7 +187,7 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
 
     /// @notice A ZERO ASK IS A NO-OP, checked before anything else: it returns zero and moves nothing, the drain standing or not.
     function test_Instant_AZeroAskReturnsZeroEvenWhileDraining() public {
-        CuratorVault v = _instantVault(0);
+        AceVault v = _instantVault(0);
         _lpDeposit(v, alice, 1_000e6);
         vm.prank(curator);
         v.setDrain(true);
@@ -198,7 +200,7 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
 
     /// @notice THE CALLER NEEDS THE OWNER or an allowance it then spends; there is no operator surface.
     function test_Instant_AuthIsTheOwnerOrAnAllowance() public {
-        CuratorVault v = _instantVault(0);
+        AceVault v = _instantVault(0);
         _lpDeposit(v, alice, 10_000e6);
         _lpDeposit(v, bob, 10_000e6);
         uint256 sh = 1_000e12;
@@ -223,12 +225,12 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
     /// @notice EXITABLE CASH THE REQUESTS DO NOT HOLD BOUNDS AN EXIT: the max views stop there, the max asks pay, and one wei past refuses.
     /// @dev No request stands, so the bound is the whole of idle.
     function test_Instant_TheFreePotBoundsTheExitAndTheMaxViewsAreExact() public {
-        CuratorVault v = _instantVault(FEE);
+        AceVault v = _instantVault(FEE);
         _lpDeposit(v, alice, 10_000e6);
         _lpDeposit(v, bob, 10_000e6);
         _open(15_000e6);
         v.crank();
-        (uint256 exitable, uint256 heldReq) = v.holds();
+        (uint256 exitable, uint256 heldReq) = vlens.holds(address(v));
         uint256 free = exitable - heldReq;
         assertEq(heldReq, 0, "PREMISE: no request holds cash");
         assertEq(free, v.idle(), "PREMISE: with no request the bound is all of idle");
@@ -256,7 +258,7 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
 
     /// @notice WITH CASH TO SPARE THE MAX VIEWS ARE THE HOLDING, at the fee-inclusive price, and both max asks land.
     function test_Instant_MaxViewsAreTheHoldingWhenThePotCovers() public {
-        CuratorVault v = _grownFeeVault();
+        AceVault v = _grownFeeVault();
         uint256 bal = v.balanceOf(alice);
         assertEq(v.maxRedeem(alice), bal, "maxRedeem is not the holding");
         assertEq(v.maxWithdraw(alice), v.previewRedeem(bal), "maxWithdraw is not the holding at the fee-inclusive price");
@@ -273,7 +275,7 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
 
     /// @notice THE VAULT ITSELF CAN EXIT NOTHING: its balance is escrow and donations, and its max views read zero.
     function test_Instant_TheVaultItselfReadsZero() public {
-        CuratorVault v = _instantVault(0);
+        AceVault v = _instantVault(0);
         _lpDeposit(v, alice, 10_000e6);
         _lpDeposit(v, bob, 10_000e6);
         _request(v, bob, 1_000e12);
@@ -287,7 +289,7 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
     /// @notice AN EXIT NEVER TAKES THE REQUESTS' HOLD OR WRITES A REQUEST: it pays at most exitable less the hold, and the hold stands.
     /// @dev The hold is bob's request's worth capped by exitable, computed at read time; the exit moves its price by at most a wei.
     function test_Instant_AnExitWritesNoRequestState() public {
-        CuratorVault v = _instantVault(0);
+        AceVault v = _instantVault(0);
         _lpDeposit(v, alice, 10_000e6);
         _lpDeposit(v, bob, 10_000e6);
         uint256 loanId = _open(5_000e6);
@@ -295,15 +297,15 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
         _request(v, bob, 5_000e12);
         _repay(loanId, 1_000e6);
         v.crank(); // the repayment reaches idle at the crank
-        (uint256 e0, uint256 h0) = v.holds();
-        uint256 q0 = v.requestedShares();
+        (uint256 e0, uint256 h0) = vlens.holds(address(v));
+        uint256 q0 = vlens.requestedShares(address(v));
         assertGt(h0, 0, "PREMISE: bob's request holds cash");
         uint256 paid = _redeem(v, alice, 2_000e12);
         assertLe(paid, e0 - h0, "the exit paid past exitable less the requests' hold");
-        (, uint256 h1) = v.holds();
+        (, uint256 h1) = vlens.holds(address(v));
         assertApproxEqAbs(h1, h0, 1, "the exit moved the requests' hold");
-        assertEq(v.requestedShares(), q0, "the exit moved the requests");
-        (uint256 esc,) = v.requestOf(bob);
+        assertEq(vlens.requestedShares(address(v)), q0, "the exit moved the requests");
+        (uint256 esc,) = vlens.requestOf(address(v), bob);
         assertEq(esc, 5_000e12, "the exit moved bob's request");
     }
 
@@ -312,7 +314,7 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
     /// @notice THE LAST FREE HOLDER REQUESTS WHILE A GAIN VESTS: escrow and donated shares on the vault do not count as holders.
     /// @notice The refusal is keyed on the FREE supply, so a vault-held share does not let the last holder take the pile.
     function test_LastOut_TheLastFreeHolderIsRefusedWithEscrowAndDonationsPresent() public {
-        CuratorVault v = _instantVault(0);
+        AceVault v = _instantVault(0);
         _lpDeposit(v, alice, 10_000e6);
         _lpDeposit(v, bob, 10_000e6);
         _request(v, bob, v.balanceOf(bob) - 1e12); // bob requests all but one unit's worth
@@ -338,7 +340,7 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
 
     /// @notice ONCE THE GAIN HAS VESTED THE LAST HOLDER LEAVES AT ONCE, with nothing deferred left to take.
     function test_LastOut_OnceVestedTheLastHolderLeaves() public {
-        CuratorVault v = _instantVault(0);
+        AceVault v = _instantVault(0);
         _lpDeposit(v, alice, 10_000e6);
         _gift(v, 500e6);
         v.crank();
@@ -348,14 +350,16 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
         v.redeem(all, alice, alice);
         _warpBy(VEST_W);
         uint256 got = _redeem(v, alice, v.balanceOf(alice));
-        assertApproxEqAbs(got, 10_500e6, 2, "the vested last holder was not paid the whole vault");
+        uint256 seedWorth = v.totalAssets(); // the seed's pro-rata worth, all that stays
+        assertApproxEqAbs(got + seedWorth, 10_500e6 + v.MIN_SEED(), 2, "the vested last holder was not paid the whole vault but the seed's worth");
+        assertLe(seedWorth, v.MIN_SEED() + Math.mulDiv(500e6, v.SEED_SHARES(), all) + 1, "the seed took more than its sliver of the gain");
     }
 
     // ---- in a dip ----
 
     /// @notice AN EXIT IN A DIP TAKES THE DIP'S PRICE AND LEAVES IT: the stayers' price stands.
     function test_Instant_AnExitInADipTakesTheDipPriceAndLeavesIt() public {
-        CuratorVault v = _dipRig();
+        AceVault v = _dipRig();
         (uint256 a0, uint256 q0) = (v.totalAssets(), _quoteSupply(v));
         uint256 sh = v.balanceOf(bob) / 4;
         uint256 quote = v.previewRedeem(sh);
@@ -364,7 +368,7 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
     }
 
     /// @dev Two LPs and a loan, which then settles, so NAV sits in the dip with cash still free to exit against.
-    function _dipRig() internal returns (CuratorVault v) {
+    function _dipRig() internal returns (AceVault v) {
         v = _instantVault(0);
         _lpDeposit(v, alice, 5_000e6);
         _lpDeposit(v, bob, 5_000e6);
@@ -380,7 +384,7 @@ contract CuratorVaultInstantExitTest is InstantExitRig {
 
     /// @notice AN INSTANT VAULT'S PREVIEWS QUOTE, at the fee-inclusive price, and a quote is what the verb pays.
     function test_Previews_AnInstantVaultQuotesBothExits() public {
-        CuratorVault v = _grownFeeVault();
+        AceVault v = _grownFeeVault();
         uint256 a = v.totalAssets();
         uint256 q = _quoteSupply(v);
         assertEq(v.previewRedeem(1e12), Math.mulDiv(1e12, a + 1, q), "previewRedeem is not the floor at the fee-inclusive price");

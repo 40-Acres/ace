@@ -2,8 +2,10 @@
 pragma solidity 0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {CuratorVault, Listing} from "../../src/curator/CuratorVault.sol";
 import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
+import {CapListing, ProductConfig} from "../../src/curator/AceVaultCaps.sol";
+import {CuratorTerms, Listing} from "../../src/entities/curated/CuratorTerms.sol";
+import {CuratedVaults} from "../utils/CuratedVaults.sol";
 import {PocDeployConfig} from "../../src/config/Defaults.sol";
 import {CuratorVaultExitsRig, ICuratorVaultExits} from "./CuratorVaultExitsRig.sol";
 
@@ -18,7 +20,7 @@ contract CuratorVaultLastOutUnderAFeeTest is CuratorVaultExitsRig {
     uint256 internal constant LENT = 6_000e6; // drawn in the binding rig, so exitable covers less than the last request
 
     /// @dev A fee vault: alice its one LP, bob a second when `second`, the curator holding the fee on a vested gain, and a pile a quarter vested.
-    function _rig(bool lend, bool second) internal returns (CuratorVault v) {
+    function _rig(bool lend, bool second) internal returns (AceVault v) {
         v = _vault(BPS);
         _lpDeposit(v, alice, SEED);
         if (second) _lpDeposit(v, bob, SEED); // before the pile: the gate shuts entry while it vests
@@ -36,14 +38,14 @@ contract CuratorVaultLastOutUnderAFeeTest is CuratorVaultExitsRig {
     }
 
     /// @dev The fee on the whole rise past the high-water at the gross book, the pile included.
-    function _feeOnRise(CuratorVault v) internal view returns (uint256) {
+    function _feeOnRise(AceVault v) internal view returns (uint256) {
         return Math.mulDiv(v.grossNav() - v.feeHighWater(), BPS, 10_000);
     }
 
     /// @notice REPRO: THE LAST LP'S INSTANT FULL EXIT IS REFUSED UNDER A FEE, and both max views read zero for it.
     /// @dev RED before: the curator's fee shares were free supply, so alice's shares were never all of it and she left at net.
     function test_LastOutUnderAFee_TheLastLpsInstantFullExitIsRefused() public {
-        CuratorVault v = _rig(false, false);
+        AceVault v = _rig(false, false);
         uint256 all = v.balanceOf(alice);
         vm.prank(alice);
         vm.expectRevert(ICuratorVaultExits.LastOutVesting.selector);
@@ -55,7 +57,7 @@ contract CuratorVaultLastOutUnderAFeeTest is CuratorVaultExitsRig {
     /// @notice REPRO: THE LAST LP'S CLAIM RELEASES THE PILE UNDER A FEE: alice is paid her share of the book, and the curator keeps only its own.
     /// @dev RED before: the claim's fee mint made the curator a free holder, no release ran, and the pile vested to the fee shares.
     function test_LastOutUnderAFee_TheLastLpsClaimReleasesThePileAndTheCuratorKeepsItsShare() public {
-        CuratorVault v = _rig(false, false);
+        AceVault v = _rig(false, false);
         uint256 book = v.grossNav();
         uint256 cut = Math.mulDiv(v.balanceOf(curator), book, v.totalSupply()) + _feeOnRise(v); // its shares' cut of the book, plus the fee
         uint256 all = v.balanceOf(alice);
@@ -64,17 +66,19 @@ contract CuratorVaultLastOutUnderAFeeTest is CuratorVaultExitsRig {
         assertEq(v.unvested(), 0, "the last LP's claim did not release the pile beside the curator's fee shares");
         _warpBy(VEST_W);
         uint256 curatorWorth = v.convertToAssets(v.balanceOf(curator));
+        uint256 seedWorth = v.convertToAssets(v.SEED_SHARES());
         emit log_named_uint("the book", book);
         emit log_named_uint("alice paid", paid);
         emit log_named_uint("the curator's worth a window later", curatorWorth);
         assertLe(curatorWorth, cut + 2, "the curator's fee shares kept more than their cut of the book and the fee");
-        assertApproxEqAbs(paid + curatorWorth, book, 3, "the book was not split between the leaving LP and the curator");
+        assertLe(seedWorth, 2 * v.MIN_SEED(), "the seed kept more than its own worth");
+        assertApproxEqAbs(paid + curatorWorth + seedWorth, book, 3, "the book was not split between the leaving LP, the curator and the seed");
     }
 
     /// @notice A SECOND LP KEEPS THE RELEASE SHUT: alice's claim beside bob's free shares is paid net, and her share of the pile stays with him.
     /// @dev The sandwich guard: only the last holder besides the curator releases. A CONTROL, green before the fix as after it.
     function test_LastOutUnderAFee_ASecondLpKeepsTheReleaseShut() public {
-        CuratorVault v = _rig(false, true);
+        AceVault v = _rig(false, true);
         uint256 all = v.balanceOf(alice);
         uint256 net = _worth(v, all);
         _request(v, alice, all);
@@ -87,7 +91,7 @@ contract CuratorVaultLastOutUnderAFeeTest is CuratorVaultExitsRig {
     /// @notice REPRO: `maxClaim` IS WHAT THE CLAIM PAYS WHERE EXITABLE BINDS: it replays the release and the fee on the pile, and takes it all.
     /// @dev RED before: neither the view nor the verb released beside the curator's fee shares.
     function test_LastOutUnderAFee_MaxClaimReplaysTheReleaseAndTheFeeOnIt() public {
-        CuratorVault v = _rig(true, false);
+        AceVault v = _rig(true, false);
         uint256 all = v.balanceOf(alice);
         _request(v, alice, all);
         uint256 pot = _exitable(v);
@@ -102,7 +106,7 @@ contract CuratorVaultLastOutUnderAFeeTest is CuratorVaultExitsRig {
     /// @notice THE RELEASING CLAIM CHARGES THE FEE ON THE PILE: the release runs before the claim's collection, so the leaver pays the fee on it.
     /// @dev The fee shares the claim mints are worth the fee on the whole rise past the high-water, the unvested pile included.
     function test_LastOutUnderAFee_TheReleasingClaimChargesTheFeeOnThePile() public {
-        CuratorVault v = _rig(false, false);
+        AceVault v = _rig(false, false);
         uint256 fee = _feeOnRise(v);
         uint256 held = v.balanceOf(curator);
         _request(v, alice, v.balanceOf(alice));
@@ -118,17 +122,18 @@ contract CuratorVaultLastOutUnderAFeeTest is CuratorVaultExitsRig {
     /// @dev RED before: only a zero curator was refused, so the deploy landed, and an LP's count then lost the vault's balance twice.
     /// @dev That count is wrong at any escrow, and it underflows every LP exit and claim once escrow and donations pass half the supply.
     function test_LastOutUnderAFee_AVaultNamingItselfCuratorIsRefused() public {
-        Listing[] memory l = _listing(); // FIRST: building the row's record spends a nonce
         VaultConfig memory c = _cfg(BPS);
+        // FIRST: the row's record and the terms each spend a nonce, so the next create is the vault's own
+        (ProductConfig memory pc, CapListing[] memory caps) = CuratedVaults.prepared(c, _curated(), _listing());
         c.curator = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
         vm.expectRevert(AceVault.ZeroCurator.selector);
-        new CuratorVault(c, RIG_MIN_PRINCIPAL, PocDeployConfig.MIN_COVERAGE_WAD, RIG_TIMELOCK, l, "Self", "cSELF");
+        new AceVault(c, pc, caps, "Self", "cSELF");
     }
 
     /// @notice THE CURATOR'S OWN FREE SHARES KEEP ITS CLAIM FROM RELEASING: as the last requester it is paid net, and `maxClaim` takes all of exitable.
     /// @dev A CONTROL, green before the fix as after it: the curator's release test counts its own free shares, the view's as the verb's.
     function test_LastOutUnderAFee_TheCuratorsOwnFreeSharesKeepItsClaimFromReleasing() public {
-        CuratorVault v = _vault(BPS);
+        AceVault v = _vault(BPS);
         _lpDeposit(v, curator, SEED); // the curator is the vault's one LP
         _crank(v, _open(LENT), T2, 0);
         _gift(v, EARNED);
@@ -153,7 +158,7 @@ contract CuratorVaultLastOutUnderAFeeTest is CuratorVaultExitsRig {
     /// @notice With a fee pending it may leave its balance, as the exit's own mint leaves fresh fee shares free; both views say which.
     /// @dev A CONTROL, green before the fix as after it: the curator's own exit keeps the whole-free-supply test, its pending fee counted.
     function test_LastOutUnderAFee_TheCuratorHoldingTheWholeFreeSupplyIsRefused() public {
-        CuratorVault v = _rig(false, false);
+        AceVault v = _rig(false, false);
         _request(v, alice, v.balanceOf(alice));
         uint256 snap = vm.snapshotState();
         uint256 held = v.balanceOf(curator);
@@ -174,7 +179,7 @@ contract CuratorVaultLastOutUnderAFeeTest is CuratorVaultExitsRig {
     /// @notice THE CURATOR'S OWN EXIT IS TESTED AGAINST THE WHOLE FREE SUPPLY: at a balance equal to the last LP's it exits whole, as its views say.
     /// @dev An LP's test leaves the curator's shares out, so set against it the curator's own shares could match only by coincidence.
     function test_LastOutUnderAFee_TheCuratorsExitIsTestedAgainstTheWholeFreeSupply() public {
-        CuratorVault v = _rig(false, false);
+        AceVault v = _rig(false, false);
         uint256 a = v.balanceOf(alice);
         uint256 c = v.balanceOf(curator);
         if ((a - c) % 2 == 1) {

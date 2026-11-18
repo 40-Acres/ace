@@ -162,6 +162,22 @@ contract AceUnknownIdFailsClosedTest is WarpClock {
         vm.stopPrank();
     }
 
+    /// @notice The top-up, its preview and the add resolve the loan's market first too, so a ghost id refuses before any leg, a zero amount included.
+    function test_UnknownId_TopUpAndAdd_Refuse() public {
+        vm.startPrank(mallory);
+        vm.expectRevert(NoMarket.selector);
+        ace.drawMore(ghost, PRINCIPAL, _bounds());
+        vm.expectRevert(NoMarket.selector);
+        ace.tryDrawMore(ghost, PRINCIPAL, _bounds(), mallory);
+        vm.expectRevert(NoMarket.selector);
+        ace.addCollateral(ghost, 1, "");
+        vm.expectRevert(NoMarket.selector);
+        ace.addCollateral(ghost, 0, "");
+        vm.expectRevert(NoMarket.selector);
+        ace.addCollateral(FAR_ID, 1, "");
+        vm.stopPrank();
+    }
+
     /// @notice `refinanceTo` names a REAL destination market, so only the source id is unknown.
     /// @dev Both caches are built in one argument list; the source's is the one that cannot resolve.
     function test_UnknownId_RefinanceTo_RefusesEvenIntoALiveMarket() public {

@@ -168,7 +168,7 @@ abstract contract AceRefinanceWithdrawFixture is WarpClock {
         return FullMath.mulDivRoundingUp(n, read.marketState(mid).unitScale, price * 1e18);
     }
 
-    /// @dev The withdrawal line: admissibility plus the market's tick cap, which settlement's per-tick ceiling needs.
+    /// @dev The withdrawal line: admissibility plus one atom of margin, as `Borrower.coverageLine` spells it.
     function _line(bytes32 mid, uint256 debt, uint256 price) internal view returns (uint256) {
         return _requiredAt(mid, debt, price) + 1;
     }
@@ -420,8 +420,7 @@ contract AceRefinanceWithdrawDestinationTest is AceRefinanceWithdrawFixture {
         assertEq(read.loan(newId).collateralUnits, rest, "and the loan holds exactly the rest");
     }
 
-    /// @notice The tick-cap term of the line is the destination's too, pinned at the wei where the two caps disagree.
-    /// @dev Coverage is IDENTICAL in both markets here, so only `maxClaimTicks` can decide, and it decides by 28 wei.
+    // DELETED with `maxClaimTicks`: the row pinning the line's tick-cap term to the destination; the line's atom is the same in every market.
 }
 
 /// @notice The extension's path, which takes no `MigrateArgs` at all, and so can never carry a caller's withdrawal.

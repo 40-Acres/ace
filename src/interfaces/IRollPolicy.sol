@@ -5,15 +5,15 @@ import {MarketParams} from "../ace/hub/Types.sol";
 
 /// @notice One extension, whole, as the hub hands it to the lender's roll policy.
 /// @dev STATIC BY DESIGN, with `caller` at word 0: an echo of the first word equals the yes only for a caller whose top 16 bytes are zero.
-/// @dev The hub never asks for such a caller: an extension's caller is the holder or the market lender, and a refinance's the holder.
+/// @dev No verb asks for such a caller: each passes its own `msg.sender`, which no one can grind to 128 zero top bits; `tryExtend` may name one.
 /// @dev `dst` equals `src` on every ask: an extension stays in place, and only a refinance into the loan's own market reuses its claim.
 /// @dev An extension never moves the debt, so `newDebt` is `debt`; a refinance's ask carries the successor's `units`, `newDebt` and `newExpiry`.
 /// @dev An extension's `newExpiry` is now plus the loan's own tenor, so `newExpiry - expiry` is exactly the time it adds and is charged for.
 struct Extension {
-    address caller; // the external caller: the holder, or the market lender holding the holder's grant and paying the fee
+    address caller; // the external caller: anyone on an extension, paying its fee; the holder on a refinance
     uint256 loanId;
     address borrower; // the loan's title holder
-    uint256 units; // the collateral the extended loan keeps
+    uint256 units; // the lot at the ask; a withdrawal to the coverage line may follow, so a lot condition above the line is advisory
     uint256 debt; // the loan's debt before the extension
     uint256 newDebt; // the debt the extension leaves: `debt` itself, or a refinanced successor's principal
     uint64 expiry; // the loan's expiry before the extension

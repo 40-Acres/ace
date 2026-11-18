@@ -11,7 +11,7 @@ contract AceVaultNavTest is AceVaultRig {
     /// @notice An idle vault's gross is exactly its asset balance: the cash sits on the vault, not in a market.
     function test_IdleGrossIsTheBalance() public view {
         assertEq(vault.grossNav(), usdc.balanceOf(address(vault)), "gross is the balance before any loan");
-        assertEq(vault.idle(), LP_CASH, "idle is the LP's cash");
+        assertEq(vault.idle(), LP_CASH + vault.MIN_SEED(), "idle is the LP's cash and the genesis seed");
         assertEq(ace.lenderAssets(address(vault), address(usdc)), 0, "nothing at the hub yet");
     }
 
@@ -24,7 +24,7 @@ contract AceVaultNavTest is AceVaultRig {
         uint256 pool = ace.lenderAssets(address(vault), address(usdc));
         assertEq(vault.grossNav(), bal + pool, "gross = balance + lenderAssets");
         assertEq(vault.grossNav() - g0, ace.lenderOwed(address(vault), address(usdc)) - owed0, "a draw moves gross by the credited fee alone");
-        assertEq(bal, LP_CASH - PRINCIPAL, "the principal left idle and the payout passed through");
+        assertEq(bal, LP_CASH + vault.MIN_SEED() - PRINCIPAL, "the principal left idle and the payout passed through");
         _assertNothingRests(_mid(loanId));
     }
 
@@ -39,7 +39,7 @@ contract AceVaultNavTest is AceVaultRig {
         uint256 owed1 = ace.lenderOwed(address(vault), address(usdc));
         uint256 claim1 = read.claimOf(mid, loanId);
         uint64 added = uint64(_now()) + MAX_TENOR - read.loan(loanId).expiry; // re-anchored at now plus the loan's own tenor
-        uint256 fee = LoanMath.originationFee(ace.debtOf(loanId), added, RATE_BPS, MIN_TENOR);
+        uint256 fee = LoanMath.originationFee(ace.debtOf(loanId), added, RATE_BPS);
         usdc.mint(borrower, fee);
         vm.startPrank(borrower);
         usdc.approve(address(ace), fee);

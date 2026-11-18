@@ -38,7 +38,7 @@ contract AceAskBudgetOverpayTest is WarpClock {
     uint256 internal constant UNIT_SCALE = 1 << 96; // the hub's fixed frame, which no decimal pair moves
     uint256 internal constant DEPOSIT = 6000e6;
     uint256 internal constant PRINCIPAL = 5000e6;
-    uint256 internal constant COLL = 36; // the coverage line: requiredAt is 4 whole tokens, plus the 32-tick cap
+    uint256 internal constant COLL = 36; // over the coverage line, which is requiredAt's 4 whole tokens plus one; sized when it carried a 32-tick cap
 
     function setUp() public {
         _warpTo(1_000_000);
@@ -49,7 +49,7 @@ contract AceAskBudgetOverpayTest is WarpClock {
 
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(unitToken));
         p.record = address(0); // record-less leaves the ask floor at zero, and it forfeits the coverage line into the pot
-        p.baseBps = 1;
+        p.lenderAprBps = 1;
         p.settleBountyBps = 0; // no sliver, so no unit is diverted to a keeper before the market's own bound
         /// @dev THE PRICE IS THE FIXTURE'S SUBJECT, so the market is created AT it rather than lent at it.
         /// @dev It was a tick a lender chose per deposit; it is a market param now, which is why `setUp`
@@ -70,7 +70,7 @@ contract AceAskBudgetOverpayTest is WarpClock {
     }
 
     /// @dev A settled loan whose single claim tick became the class pot; alice funded it whole.
-    /// @dev `COLL` IS the coverage line, so this recordless settlement forfeits the lot: the pot is the claim plus that excess.
+    /// @dev `COLL` sits over the coverage line, so this recordless settlement forfeits the line: the pot is the claim plus its excess.
     /// @dev RESTS PAST THE ASK HOLD, read off the market rather than assumed, so the legs below measure rounding.
     function _settledLoan() internal returns (uint256 loanId, uint256 pot) {
         _lend(alice, DEPOSIT);

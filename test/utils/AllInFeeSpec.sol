@@ -9,12 +9,13 @@ pragma solidity 0.8.36;
 library AllInFeeSpec {
     uint256 internal constant PHI_BPS = 5000; // the shipped rebate share, re-spelled rather than imported
     uint256 internal constant FEE_SHARE_BPS = 2500; // the fee ceiling, re-spelled too: a spec that imports proves nothing
+    uint256 internal constant YEAR = 365 days; // the rate's unit, re-spelled too: a rate is bps a year
 
     /// @notice The borrower's ALL-IN cost: the lender's rate with the protocol's share charged on top.
     /// @dev ONE ceil, taken on the fused product, and that is what bounds the fee by the principal.
-    function feeAllIn(uint256 principal, uint64 tenor, uint256 baseBps, uint64 minTenor, uint256 ps) internal pure returns (uint256) {
-        uint256 n = baseBps * uint256(tenor) * (10000 + ps);
-        uint256 d = 10000 * 10000 * uint256(minTenor);
+    function feeAllIn(uint256 principal, uint64 tenor, uint256 lenderAprBps, uint256 ps) internal pure returns (uint256) {
+        uint256 n = lenderAprBps * uint256(tenor) * (10000 + ps);
+        uint256 d = 10000 * 10000 * YEAR;
         return (principal * n + d - 1) / d;
     }
 
@@ -40,29 +41,28 @@ library AllInFeeSpec {
     }
 
     /// @notice The payout the borrower actually receives.
-    function payout(uint256 principal, uint64 tenor, uint256 baseBps, uint64 minTenor, uint256 ps) internal pure returns (uint256) {
-        return principal - feeAllIn(principal, tenor, baseBps, minTenor, ps);
+    function payout(uint256 principal, uint64 tenor, uint256 lenderAprBps, uint256 ps) internal pure returns (uint256) {
+        return principal - feeAllIn(principal, tenor, lenderAprBps, ps);
     }
 
     /// @notice The inverse: the smallest draw whose payout still clears `owed`.
     /// @dev Ceils, because a floor leaves the continuation a wei short and every migration reverts.
-    function principalForOwed(uint256 owed, uint64 tenor, uint256 baseBps, uint64 minTenor, uint256 ps) internal pure returns (uint256) {
-        uint256 n = baseBps * uint256(tenor) * (10000 + ps);
-        uint256 d = 10000 * 10000 * uint256(minTenor);
+    function principalForOwed(uint256 owed, uint64 tenor, uint256 lenderAprBps, uint256 ps) internal pure returns (uint256) {
+        uint256 n = lenderAprBps * uint256(tenor) * (10000 + ps);
+        uint256 d = 10000 * 10000 * YEAR;
         return (owed * d + (d - n) - 1) / (d - n);
     }
 
     /// @notice The genesis rail: the all-in fee at this term takes at most `FEE_SHARE_BPS` of the draw.
     /// @notice Bounding at maxTenor bounds every rung under it, because the fee is monotone in tenor.
-    /// @dev NOT strict, unlike the bound it replaced. A SHARE cap admits exactly its own bound.
-    /// @dev The old rail was strict only because it existed to keep the inverse's denominator off zero.
-    function fundable(uint256 baseBps, uint64 tenor, uint64 minTenor, uint256 ps) internal pure returns (bool) {
-        return 10000 * baseBps * uint256(tenor) * (10000 + ps) <= FEE_SHARE_BPS * 10000 * 10000 * uint256(minTenor);
+    /// @dev NOT strict. A SHARE cap admits exactly its own bound.
+    function fundable(uint256 lenderAprBps, uint64 tenor, uint256 ps) internal pure returns (bool) {
+        return 10000 * lenderAprBps * uint256(tenor) * (10000 + ps) <= FEE_SHARE_BPS * 10000 * 10000 * YEAR;
     }
 
-    /// @notice The rail's slack `D' - N'`, which is QUANTISED at 1000 and therefore never 1.
-    /// @dev Only meaningful on a market the rail admits; below it this underflows, which is the point.
-    function slack(uint256 baseBps, uint64 tenor, uint64 minTenor, uint256 ps) internal pure returns (uint256) {
-        return 10000 * 10000 * uint256(minTenor) - baseBps * uint256(tenor) * (10000 + ps);
+    /// @notice The fee's slack `D' - N'` against the whole principal, which is QUANTISED: `D'` sits 10000 over a multiple of 11000.
+    /// @dev Only meaningful where the fee is under the principal; past it this underflows, which is the point.
+    function slack(uint256 lenderAprBps, uint64 tenor, uint256 ps) internal pure returns (uint256) {
+        return 10000 * 10000 * YEAR - lenderAprBps * uint256(tenor) * (10000 + ps);
     }
 }

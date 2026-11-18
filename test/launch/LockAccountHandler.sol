@@ -66,7 +66,7 @@ contract LockAccountHandler is WarpClock {
                     token: address(token),
                     lender: alt,
                     price: AceFixtures.px(0.1e18, address(usdc), address(token)),
-                    baseBps: 40,
+                    lenderAprBps: 40,
                     minPrincipal: PRINCIPAL,
                     minCoverageWad: 1.4e18
                 })

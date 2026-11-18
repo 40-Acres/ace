@@ -24,11 +24,11 @@ import {AceReader} from "../utils/AceReader.sol";
 /// @notice So the composite tracks the record downward but never rises above the floor the draw pinned.
 /// @dev `open` enforces the ADMISSIBILITY predicate only, so the withdrawal line sits one atom above it.
 /// @dev The asymmetry is deliberate: `minPrincipal` floors a principal at open and nothing floors debt afterwards.
-/// @dev The verb exists because a live loan draws once (`AlreadyFunded`): without it the surplus needs a close-and-reopen.
+/// @dev The verb exists because units leave a live loan by it alone: a top-up adds debt and `addCollateral` adds units, but neither sheds a surplus.
 /// @dev THE RECORD IS REAL, NOT MOCKED: `MockPersistenceRecord.minPriceOverWindow` ignores its window argument.
 /// @dev Against that mock every draw-cap assertion is VACUOUS, so this fixture writes real observations.
 /// @dev The line is recomputed locally so the fixture is a second opinion on `AceLens.withdrawableUnits`.
-/// @dev `test/CollateralWithdrawal.t.sol` at `27a6187` is the spec.
+/// @dev `test/CollateralWithdrawal.t.sol` is the spec.
 abstract contract AceWithdrawalFixture is WarpClock {
     Ace internal ace;
     AceReader internal read;
@@ -266,7 +266,7 @@ contract AceCollateralWithdrawalTest is AceWithdrawalFixture {
     }
 
     /// @notice The gate never admits a position below the live ADMISSIBILITY line, at any size.
-    /// @notice A weaker claim than the gate makes: the real line is a tick cap above this one.
+    /// @notice A weaker claim than the gate makes: the real line is one atom above this one.
     /// @dev The catch leg pins the REFUSAL to the same predicate, so a gate that refuses everything fails too.
     function testFuzz_GateNeverAdmitsBelowTheAdmissibilityLine(uint256 units) public {
         uint256 loanId = _open(COLL, DEBT);
@@ -320,7 +320,6 @@ contract AceCollateralWithdrawalRoundingTest is AceWithdrawalFixture {
         assertLt((required - 1) * den, claim, "and it is the minimum that does");
 
         /// @dev the hub agrees at the wei: shedding down to the line admits, one more does not
-        /// @dev the GATE sits a tick cap above this, since settlement ceils per funded tick and this ceils once
         uint256 line = required + 1; // the coverage line is requiredAt plus ONE atom
         _withdraw(loanId, COLL - line);
         assertEq(read.loan(loanId).collateralUnits, line, "the position rests exactly on the line");
@@ -481,7 +480,7 @@ contract AceCollateralWithdrawalFailClosedTest is AceWithdrawalFixture {
     }
 
     /// @notice The withdrawal line SATURATES at the sentinel: an unpriced line refuses by name, never wraps to zero or panics.
-    /// @notice Priced, it sits exactly one atom above admissibility, the atom settlement's own ceiling takes.
+    /// @notice Priced, it sits exactly one atom above admissibility, an atom of margin.
     function test_CoverageLine_SaturatesAtTheSentinel_AndIsOneAtomAboveAdmissibility() public pure {
         Cfg memory c;
         c.p.minCoverageWad = 1.4e18;

@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {Vm} from "forge-std/Vm.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {CuratorVault} from "../../src/curator/CuratorVault.sol";
+import {AceVault} from "../../src/curator/AceVault.sol";
 import {AceVault} from "../../src/curator/AceVault.sol";
 import {AceInventoryLens} from "../../src/ace/lens/AceInventoryLens.sol";
 
@@ -12,7 +12,7 @@ import {AceInventoryLens} from "../../src/ace/lens/AceInventoryLens.sol";
 /// @dev Expected values are read off the vault's own state after the verb, never recomputed from the fee formula.
 contract CuratorVaultFeeHighWaterHardeningTest is CuratorVaultBase {
     /// @dev Request `who`'s whole holding and claim all of it.
-    function _exitWhole(CuratorVault v, address who) internal {
+    function _exitWhole(AceVault v, address who) internal {
         uint256 shares = v.balanceOf(who);
         vm.startPrank(who);
         v.requestExit(shares);
@@ -21,7 +21,7 @@ contract CuratorVaultFeeHighWaterHardeningTest is CuratorVaultBase {
     }
 
     /// @dev The `FeeCharged` events the vault emitted since `vm.recordLogs()`, as (shares, high-water) pairs.
-    function _charges(CuratorVault v) internal returns (uint256 n, uint256 shares, uint256 highWater) {
+    function _charges(AceVault v) internal returns (uint256 n, uint256 shares, uint256 highWater) {
         Vm.Log[] memory logs = vm.getRecordedLogs();
         for (uint256 i; i < logs.length; i++) {
             if (logs[i].emitter != address(v) || logs[i].topics[0] != AceVault.FeeCharged.selector) continue;
@@ -34,7 +34,7 @@ contract CuratorVaultFeeHighWaterHardeningTest is CuratorVaultBase {
     /// @notice And the charge LIFTS the high-water: a second collection with no growth since emits nothing and mints nothing.
     /// @dev No row asserted the event, and only an exit or a claim lowers the high-water, so a collection that left it standing re-billed one gain.
     function test_Fee_AChargeReportsItsMintAndLiftsTheHighWaterToNav() public {
-        CuratorVault v = _newVault(1000);
+        AceVault v = _newVault(1000);
         _lpDeposit(v, alice, 10_000e6);
         _gift(v, 1_000e6);
         v.crank(); // syncs the gain into the vest; the fee it collects reads only the vested part, which has not moved
@@ -58,10 +58,10 @@ contract CuratorVaultFeeHighWaterHardeningTest is CuratorVaultBase {
 
     /// @notice A RECOVERY THAT LANDS AFTER THE LAST HOLDER LEFT IS NOT BILLED TO THE NEXT DEPOSITOR.
     /// @notice Every holder exits by a claim at the trough; the settled loan's inventory then sells into the empty vault.
-    /// @notice The collection at zero supply stamps the high-water at that NAV, which is nobody's growth, and the next entrant pays no fee on it.
-    /// @dev The other zero-supply rows leave a residual of a wei or none, where a stamp of zero and a stamp of NAV read alike.
+    /// @notice The collection at zero live supply stamps the high-water at that NAV, which is nobody's growth, and the next entrant pays no fee on it.
+    /// @dev The other zero-live-supply rows leave a residual of a wei or none, where a stamp of zero and a stamp of NAV read alike.
     function test_Fee_ARecoveryIntoTheEmptyVaultIsNotBilledToTheNextDepositor() public {
-        CuratorVault v = _newVault(5000);
+        AceVault v = _newVault(5000);
         _lpDeposit(v, alice, 10_000e6);
         uint256 loanId = _open(1_000e6);
         v.crank();
@@ -71,14 +71,14 @@ contract CuratorVaultFeeHighWaterHardeningTest is CuratorVaultBase {
         _crankAll(v);
         if (v.balanceOf(curator) != 0) _exitWhole(v, curator);
         _exitWhole(v, alice);
-        assertEq(v.totalSupply(), 0, "PREMISE: every holder left");
+        assertEq(v.totalSupply(), v.SEED_SHARES(), "PREMISE: every holder left, the seed alone stays");
         AceInventoryLens inv = new AceInventoryLens(address(ace), address(lens));
         _warpAtLeastTo(read.inventoryAskOpensAt(loanId));
         assertGt(_buyPot(keeper, loanId, inv.clearingBudget(mid, loanId)), 0, "PREMISE: the inventory sold into the empty vault");
         assertEq(read.invPotOf(mid, loanId), 0, "PREMISE: sold whole, so the unsold-pot gate admits the next entrant");
         v.crank();
         _warpBy(VEST_W);
-        v.collectFee(); // at zero supply: the stamp
+        v.collectFee(); // at zero live supply: the stamp
         uint256 nav = v.totalAssets();
         assertGt(nav, 100e6, "PREMISE: the recovery left real NAV with nobody holding a share");
         assertEq(v.feeHighWater(), nav, "the zero-supply collection did not stamp the high-water at the NAV left");

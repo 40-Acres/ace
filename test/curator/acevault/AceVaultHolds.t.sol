@@ -9,7 +9,7 @@ import {AceVaultRig} from "./AceVaultRig.sol";
 contract AceVaultHoldsTest is AceVaultRig {
     /// @notice With nothing lent and nothing requested, the whole idle is exitable and lendable.
     function test_AnEmptyBookHoldsNothing() public view {
-        assertEq(vault.lendable(), LP_CASH, "all idle is lendable");
+        assertEq(vault.lendable(), LP_CASH + vault.MIN_SEED(), "all idle is lendable, the genesis seed's with it");
         assertEq(vault.maxWithdraw(alice), LP_CASH, "and exitable by its holder");
     }
 
@@ -31,7 +31,8 @@ contract AceVaultHoldsTest is AceVaultRig {
         vault.requestExit(bobShares);
         uint256 worth = vault.previewRedeem(bobShares);
         assertApproxEqAbs(vault.lendable(), vault.idle() - worth, 2, "lendable is exitable less the requests' worth");
-        assertApproxEqAbs(vault.maxWithdraw(alice), vault.idle() - worth, 2, "alice's instant exit leaves bob's held cash");
+        uint256 seed = vault.MIN_SEED(); // the genesis seed's cash is idle but no holder's
+        assertApproxEqAbs(vault.maxWithdraw(alice), vault.idle() - worth - seed, 2, "alice's instant exit leaves bob's held cash");
     }
 
     /// @notice A claim takes exitable cash, held cash first.

@@ -4,8 +4,8 @@ pragma solidity 0.8.36;
 import {stdError} from "forge-std/StdError.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {BufferBelowMin, ExtensionAddsNoTime, GateRefused, LoanClosed, LoanMatured} from "../../src/ace/hub/Borrower.sol";
-import {MarketPairMismatch, NoRecordPrice, NotBorrower, PolicyRefused, RecordUnreadable, TriggerAboveFloor} from "../../src/ace/hub/Borrower.sol";
-import {Borrower} from "../../src/ace/hub/Borrower.sol";
+import {ExtensionTooEarly, MarketPairMismatch, NoRecordPrice, PolicyRefused, RecordUnreadable, TriggerAboveFloor} from "../../src/ace/hub/Borrower.sol";
+import {Borrower, UnderPrice} from "../../src/ace/hub/Borrower.sol";
 import {Loan, MarketParams, MigrateArgs, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {HubLoanTerm} from "../../src/interfaces/HubLoanTerm.sol";
@@ -20,8 +20,8 @@ import {MockStakeVault} from "../mocks/MockStakeVault.sol";
 
 /// @title AceExtendFromNowHardeningTest
 /// @notice The term-from-now extension checked against an oracle written from the rule, not from the code.
-/// @notice The rule: closed, caller, matured (`now >= expiry`), no time added (`now == openTime`), lot, borrower rule, record, admission, policy.
-/// @notice The fee: `ceil(debt * baseBps * added * 11000 / (1e8 * minTenor))`, `added = newExpiry - expiry`, which under I1 is `now - openTime`.
+/// @notice The rule: closed, matured (`now >= expiry`), no time added (`now == openTime`), lot, borrower rule, record, the non-holder rule, admission, policy.
+/// @notice The fee: `ceil(debt * lenderAprBps * added * 11000 / (1e8 * 365 days))`, `added = newExpiry - expiry`, which under I1 is `now - openTime`.
 /// @notice Every refusal is a bare four-byte selector, the same at `tryExtend`, the lens, `extend` and `extendWithPermit2`.
 /// @dev Reasoning: the design record; the code review's F2 for the allowance-as-cap rows.
 contract AceExtendFromNowHardeningTest is ExtendRig {
@@ -51,35 +51,39 @@ contract AceExtendFromNowHardeningTest is ExtendRig {
 
     /// @dev The fee the rule charges for `added` seconds on `debt` in the rig's market, written out rather than read from `LoanMath`.
     function _ruleFee(uint256 debt, uint256 added) internal pure returns (uint256) {
-        uint256 d = 10_000 * 10_000 * uint256(TEN7);
+        uint256 d = 10_000 * 10_000 * uint256(365 days);
         return (debt * BASE * added * ALL_IN + d - 1) / d;
     }
 
     /// @dev The first leg the rule order refuses, for a holder-held loan `off` seconds into a TEN14 term.
-    /// @dev `who`: 0 the holder, 1 the granted lender, 2 the lender without the grant, 3 a stranger.
+    /// @dev `who`: 0 the holder, 1 the granted lender, 2 the lender without the grant, 3 a stranger; all but the holder are non-holders.
     /// @dev `recKind`: 0 par, 1 under the trigger, 2 a zero minimum, 3 a record that reverts. `polKind`: 0 yes, 1 no, 2 none.
+    /// @dev A non-holder's own rule runs after the record: at par the price and the band pass, so only the clock can refuse it.
     function _ruleLeg(uint256 who, uint256 off, uint256 recKind, bool buffered, uint256 polKind) internal pure returns (bytes4) {
-        if (who >= 2) return NotBorrower.selector;
         if (off >= TEN14) return LoanMatured.selector;
         if (off == 0) return ExtensionAddsNoTime.selector;
         if (recKind == 3) return RecordUnreadable.selector;
         if (recKind == 2) return NoRecordPrice.selector;
+        if (who != 0 && recKind == 1) return UnderPrice.selector;
+        if (who != 0 && off < TEN14 - TEN14 / 4) return ExtensionTooEarly.selector;
         if (recKind == 1) return TriggerAboveFloor.selector;
         if (buffered) return BufferBelowMin.selector;
         if (polKind != 0) return PolicyRefused.selector;
         return bytes4(0);
     }
 
-    /// @dev A second into the term, biased to its edges: the open second, one in, a middle one, the last one, expiry, and past it.
+    /// @dev A second into the term, biased to its edges: the open second, one in, a middle one, the last one, expiry, past it, and the quarter's edge.
     function _offset(uint256 seed) internal pure returns (uint256) {
-        uint256 k = seed % 6;
+        uint256 k = seed % 8;
         uint256 r = seed >> 8;
         if (k == 0) return 0;
         if (k == 1) return 1;
         if (k == 2) return 2 + r % (TEN14 - 3);
         if (k == 3) return TEN14 - 1;
         if (k == 4) return TEN14;
-        return TEN14 + 1 + r % 3 days;
+        if (k == 5) return TEN14 + 1 + r % 3 days;
+        if (k == 6) return TEN14 - TEN14 / 4 - 1;
+        return TEN14 - TEN14 / 4;
     }
 
     function _setRecord(uint256 kind) internal {
@@ -256,10 +260,10 @@ contract AceExtendFromNowHardeningTest is ExtendRig {
         _assertRefusedEverywhere(loanId, stranger, 0, LoanClosed.selector, "stranger");
     }
 
-    /// @notice The caller runs before the no-time leg: a stranger in the open second is refused `NotBorrower`.
-    function test_Order_AStrangerInTheOpenSecondIsRefusedNotBorrower() public {
+    /// @notice No caller leg runs first: a stranger in the open second is refused `ExtensionAddsNoTime`, as the holder is.
+    function test_Order_AStrangerInTheOpenSecondIsRefusedExtensionAddsNoTime() public {
         uint256 loanId = _open(P, TEN7, 5000);
-        _assertRefusedEverywhere(loanId, stranger, 0, NotBorrower.selector, "open second");
+        _assertRefusedEverywhere(loanId, stranger, 0, ExtensionAddsNoTime.selector, "open second");
     }
 
     /// @notice Both timing legs run before the borrower rule: a holder the market does not name meets the timing refusal at either edge.
@@ -342,32 +346,32 @@ contract AceExtendFromNowHardeningTest is ExtendRig {
 
     /* ============================== 3. the fee, by hand ============================== */
 
-    /// @notice A day added on 10,000 USDC at 40 bps a week, ACE's tenth on top, is 6,285,715 atoms: 44 USDC a week, ceiled.
+    /// @notice A day added on 10,000 USDC at 2190 bps a year, ACE's tenth on top, is 6,600,000 atoms: 6.6 USDC a day, exact.
     function test_Fee_ADayAddedIsTheHandComputedFee() public {
         uint256 loanId = _open(P, TEN7, 5000);
         _warpBy(1 days);
         uint256 bal = usdc.balanceOf(borrower) + _ceiling(loanId);
         uint256 fee = _extend(borrower, loanId);
-        assertEq(fee, 6_285_715, "4e15 * 86400 * 1.1 / 6.048e13, ceiled");
-        assertEq(bal - usdc.balanceOf(borrower), 6_285_715, "and exactly that was pulled");
+        assertEq(fee, 6_600_000, "1e10 * 2190 * 86400 * 1.1 / 3.1536e15, exact");
+        assertEq(bal - usdc.balanceOf(borrower), 6_600_000, "and exactly that was pulled");
     }
 
-    /// @notice One second added costs 73 atoms, 72.75 ceiled: the open second is the only free one, and it refuses.
-    function test_Fee_OneSecondAddedCostsSeventyThreeAtoms() public {
+    /// @notice One second added costs 77 atoms, 76.39 ceiled: the open second is the only free one, and it refuses.
+    function test_Fee_OneSecondAddedCostsSeventySevenAtoms() public {
         uint256 loanId = _open(P, TEN7, 5000);
         _warpBy(1);
-        assertEq(_extend(borrower, loanId), 73, "one second, ceiled");
+        assertEq(_extend(borrower, loanId), 77, "one second, ceiled");
     }
 
-    /// @notice The last second adds the tenor less one second, 43,999,928 atoms, which is under the whole tenor's 44,000,000.
+    /// @notice The last second adds the tenor less one second, 46,199,924 atoms, which is under the whole tenor's 46,200,000.
     function test_Fee_TheLastSecondChargesTheTenorLessOneSecond() public {
         uint256 loanId = _open(P, TEN7, 5000);
         _warpTo(uint256(read.loan(loanId).expiry) - 1);
-        assertEq(_ceiling(loanId), 44_000_000, "PREMISE: the whole tenor costs 44 USDC");
-        assertEq(_extend(borrower, loanId), 43_999_928, "the last second's extension pays for the tenor less one second");
+        assertEq(_ceiling(loanId), 46_200_000, "PREMISE: the whole tenor costs 46.2 USDC");
+        assertEq(_extend(borrower, loanId), 46_199_924, "the last second's extension pays for the tenor less one second");
     }
 
-    /// @notice After an extension, the next one pays only for the seconds between them: an hour, 261,905 atoms, logged as 3600 added.
+    /// @notice After an extension, the next one pays only for the seconds between them: an hour, 275,000 atoms, logged as 3600 added.
     function test_Fee_TheNextExtensionPaysOnlyForTheSecondsSinceTheLast() public {
         uint256 loanId = _open(P, TEN7, 5000);
         _warpBy(2 days);
@@ -375,23 +379,21 @@ contract AceExtendFromNowHardeningTest is ExtendRig {
         _warpBy(1 hours);
         _fund(borrower, _ceiling(loanId));
         vm.expectEmit(true, true, false, true, address(ace));
-        emit Borrower.Extended(loanId, 1 hours, uint64(_now()) + TEN7, 261_905, borrower);
+        emit Borrower.Extended(loanId, 1 hours, uint64(_now()) + TEN7, 275_000, borrower);
         vm.prank(borrower);
-        assertEq(ace.extend(loanId, 0, ""), 261_905, "an hour since the last re-anchor, not since the loan first opened");
+        assertEq(ace.extend(loanId, 0, ""), 275_000, "an hour since the last re-anchor, not since the loan first opened");
     }
 
-    /// @notice The granted lender pays, in the same second, exactly the fee the holder would.
-    function test_Fee_TheGrantedLenderPaysWhatTheHolderWould() public {
+    /// @notice The lender pays, in the same second of the last quarter, exactly the fee the holder would.
+    function test_Fee_TheLenderPaysWhatTheHolderWould() public {
         uint256 loanId = _open(P, TEN7, 5000);
-        vm.prank(borrower);
-        ace.setCreditOperator(alice, true);
-        _warpBy(3 days + 17);
+        _warpBy(6 days + 17);
         uint256 snap = vm.snapshotState();
         uint256 byHolder = _extend(borrower, loanId);
         vm.revertToState(snap);
         uint256 byLender = _extend(alice, loanId);
         assertEq(byLender, byHolder, "one fee whoever pays");
-        assertEq(byHolder, _ruleFee(P, 3 days + 17), "the fee on the time added");
+        assertEq(byHolder, _ruleFee(P, 6 days + 17), "the fee on the time added");
     }
 
     /* ============================== 4. the allowance is the cap (review F2) ============================== */
