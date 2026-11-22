@@ -4,6 +4,7 @@ pragma solidity 0.8.36;
 import {Ace} from "../../../src/ace/hub/Ace.sol";
 import {LenderUnresolved, Loan, LoanBook, Market, Storage} from "../../../src/ace/hub/Types.sol";
 import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
+import {Constants} from "../../../src/ace/hub/Constants.sol";
 
 /// @title AceHarness
 /// @notice The hub plus read-only views, so a spec reads namespaced storage through the hub's own accessors.
@@ -138,6 +139,16 @@ contract AceHarness is Ace {
     /// @notice A market's keeper sliver rate, which every settlement prices off the debt.
     function marketSettleBountyBpsOf(bytes32 id) external view returns (uint256) {
         return Storage.markets()[id].p.settleBountyBps;
+    }
+
+    /// @notice A market's deleverage band: non-zero is the class whose settlement reads the record's price.
+    function marketBandBpsOf(bytes32 id) external view returns (uint256) {
+        return Storage.markets()[id].p.deleverageBandBps;
+    }
+
+    /// @notice How long past expiry a band-on market's dark record holds the settle doors.
+    function settleDarkGrace() external pure returns (uint256) {
+        return Constants.SETTLE_DARK_GRACE;
     }
 
     /// @notice A digest of everything one market record holds, so "untouched" is one comparison.

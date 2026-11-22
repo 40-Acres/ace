@@ -58,7 +58,7 @@ interface IVaultTerms {
 
     /// @notice Whether the product still consents to one of the vault's loans continuing in its own market; the vault's own legs are asked first.
     /// @notice `extendFor` asks with the holder as `e.borrower`, a same-market `refinanceFor` with the vault, which then holds the title.
-    /// @notice The hub lets anyone extend, so `e.caller` may be a stranger: a product that consents only to its door or its holder checks it.
+    /// @notice The hub lets anyone extend, so `e.caller` may be a stranger: a product that consents only to its vault or holder checks it.
     /// @param e The extension, as the hub handed it to the vault.
     /// @param data The caller's payload.
     /// @return Whether the product consents.
@@ -78,7 +78,7 @@ interface IVaultTerms {
     /// @notice Write the product's own record for a lending door: a borrow's after the pledge arrives and before any cash rests. THE VAULT ONLY.
     /// @notice An extension's runs after its fee is pulled and before the hub's extend; a refinance's once the vault holds the title, before any rest.
     /// @notice A top-up's runs before its rest, the holder keeping the title.
-    /// @param kind Which door.
+    /// @param kind Which lending door.
     /// @param mp The market.
     /// @param loanId The loan being extended, refinanced or topped up, zero for a borrow.
     /// @param data The product's own payload.
@@ -87,9 +87,9 @@ interface IVaultTerms {
     /// @notice Write the product's own record after a lending door: a borrow's once the cash and the title have left the vault. THE VAULT ONLY.
     /// @notice An extension's runs once the hub's extend took the fee priced; a refinance's once both titles and the net are home.
     /// @notice A top-up's runs once the hub paid the holder and the vault drained the market.
-    /// @param kind Which door.
+    /// @param kind Which lending door.
     /// @param mp The market.
-    /// @param loanId The loan the door opened, extended, refinanced into or topped up.
+    /// @param loanId The loan opened, extended, refinanced into or topped up.
     /// @param holder The loan's title holder.
     /// @param data The product's own payload.
     function afterLend(Lend kind, MarketParams calldata mp, uint256 loanId, address holder, bytes calldata data) external;

@@ -129,7 +129,7 @@ contract AceVaultTroughHoldFloorTest is AceVaultRig {
         assertEq(_hold(), MARKED, "PREMISE: the exemption wrote no hold");
     }
 
-    // ---- `_held`: a stored hold binds only over a pile above the floor ----
+    // ---- `_troughHeld`: a stored hold binds only over a pile above the floor ----
 
     /// @notice Under a stored hold, a pile exactly on the floor does not hold entry: the view opens and the verb lands, before the stored second.
     function test_HoldFloor_APileExactlyOnTheOneBpFloorDoesNotHoldEntry() public {

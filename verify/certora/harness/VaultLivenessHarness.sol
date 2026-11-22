@@ -27,14 +27,14 @@ contract VaultLivenessHarness is VaultBoundaryHarness {
         return AceVaultFlows.layout().troughHold;
     }
 
-    /// @notice AceVault's `_holdOnly`, restated line for line over the vault's own helpers, as a derived contract cannot call a private function.
+    /// @notice AceVault's `_shutByHoldAlone`, restated line for line over the vault's own helpers, as a derived contract cannot call a private function.
     /// @dev A spec that reads this states the gate's second leg as written; a rule that must not lean on the restatement reads `troughHold` instead.
     function holdOnly() external view returns (bool) {
         VaultLayout storage $ = AceVaultFlows.layout();
-        uint48 t = $.troughHold;
-        if (t == 0 || t == TROUGH_MARKED || block.timestamp >= t || ($.openSeized != 0 && $.exemptSettled == 0)) return false;
-        (uint256 u, uint256 m) = (unvested(), $.navMark);
-        return AceVaultFlows.material(u, m) && !_vesting(u, Math.saturatingSub(m, u));
+        uint48 holdUntil = $.troughHold;
+        if (holdUntil == 0 || holdUntil == TROUGH_MARKED || block.timestamp >= holdUntil || ($.openSeized != 0 && $.exemptSettled == 0)) return false;
+        (uint256 deferred, uint256 mark) = (unvested(), $.navMark);
+        return AceVaultFlows.material(deferred, mark) && !_vesting(deferred, Math.saturatingSub(mark, deferred));
     }
 
     /// @notice The idle the standing requests hold at today's NAV: what no instant exit and no placement may take.

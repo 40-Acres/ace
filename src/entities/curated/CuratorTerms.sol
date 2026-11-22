@@ -263,12 +263,17 @@ contract CuratorTerms is IVaultTerms, IVaultDoor, ReentrancyGuardTransient {
     }
 
     /// @notice The collateral's room with its unsold hub pot units held at the market record's minimum; uncapped while none is unsold at the hub.
+    /// @notice While a pot is unsold, a record that reverts, burns its gas or answers short leaves no room, as does a pot too large to price.
     /// @dev Goods collected to this door leave the hub's count, the vault's row then holding them at their booked value; in kind nothing is booked.
+    /// @dev Zero room is the refusal, so a failed `Probe.askWord` folds into it; the 1/64 a burning record leaves is enough to return it.
     function room(MarketParams calldata mp) public view virtual returns (uint256) {
         (uint256 lent, uint256 unsold) = IAceLenderOps(ACE).lenderByCollateral(VAULT, ASSET, mp.collateral);
         if (unsold == 0) return type(uint256).max;
-        uint256 parked = Math.mulDiv(unsold, IPersistenceRecord(mp.record).minPrice(ASSET, mp.collateral), Q96);
-        return Math.saturatingSub(AceVault(VAULT).effectiveCap(mp.collateral), lent + parked);
+        (bool ok, uint256 m) = Probe.askWord(mp.record, abi.encodeCall(IPersistenceRecord.minPrice, (ASSET, mp.collateral)));
+        (uint256 high,) = Math.mul512(unsold, m);
+        if (!ok || high >= Q96) return 0; // unpriced: a failed read, or a pot worth 2^256 or more, past any cap
+        uint256 parked = Math.mulDiv(unsold, m, Q96);
+        return Math.saturatingSub(AceVault(VAULT).effectiveCap(mp.collateral), Math.saturatingAdd(lent, parked));
     }
 
     /// @notice No entry cap of the terms' own.

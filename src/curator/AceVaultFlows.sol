@@ -7,14 +7,15 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {LowLevelCall} from "@openzeppelin/contracts/utils/LowLevelCall.sol";
 import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
-import {LoanClosed, LoanMatured} from "../ace/hub/Borrower.sol";
+import {LoanClosed, LoanMatured, NoRecordPrice, RecordUnreadable} from "../ace/hub/Borrower.sol";
 import {EmptyPot} from "../ace/hub/Lender.sol";
 import {NotExpired} from "../ace/hub/Settlement.sol";
 import {LoanMath} from "../ace/hub/libraries/LoanMath.sol";
 import {Permits} from "../ace/hub/libraries/Permits.sol";
-import {Probe} from "../ace/hub/libraries/Probe.sol";
+import {Probe, RecordGasShort} from "../ace/hub/libraries/Probe.sol";
 import {MarketParams, MigrateArgs, OpenBounds} from "../ace/hub/Types.sol";
 import {HubLoanTerm} from "../interfaces/HubLoanTerm.sol";
+import {HubProtocolShare} from "../interfaces/HubProtocolShare.sol";
 import {IAceLenderOps} from "../interfaces/IAceLenderOps.sol";
 import {IAceVaultDoor} from "../interfaces/IAceVaultDoor.sol";
 import {IAceVaultOps} from "../interfaces/IAceVaultOps.sol";
@@ -98,7 +99,7 @@ struct VaultLayout {
     uint256 openSeized; // door mode: the keys still open, each shutting entry
 }
 
-/// @notice What a vault hands its door body: the cash, custody, and the bounds it read before resting anything.
+/// @notice What a vault hands its core door body: the cash, custody, and the bounds it read before resting anything.
 struct Ctx {
     address asset;
     address manager; // the hub's custodian, approved for exactly the pledge
@@ -109,7 +110,7 @@ struct Ctx {
 /// @notice A refinance's successor between its stages: the market and draw, the market id, and the hub's lent figures before the call.
 struct Refi {
     MarketParams mp;
-    Terms t; // the base's admitted draw, its term resolved
+    Terms draw; // the base's admitted draw, its term resolved
     bytes32 id;
 }
 
@@ -144,6 +145,7 @@ library AceVaultFlows {
     uint16 internal constant GATE_BPS = 500; // entry shuts while a gain over this share of NAV vests
     uint256 internal constant VIRTUAL_SHARES = 1e6; // the vault's share offset, 10 ** its `_decimalsOffset`
     uint256 internal constant Q96 = 1 << 96; // the hub's price frame
+    uint256 internal constant ASK_RESERVE = 12_000; // gas a product read keeps back: a cold call's charge plus the worst caller tail, maxMint's
     bytes32 internal constant ROOT = 0xb7a4de03362d20465bcc8b45bb9625cb4abe76f109b674085f908e1bc61c7000; // erc7201:ace.curatorvault
     bytes32 internal constant LENDING = 0xb4c2d4b34891c0765211169272b8bce7558ad3adc06ef150053a535d7120ce00; // erc7201:ace.curatorvault.lending, transient
     bytes32 internal constant BOOKED = bytes32(uint256(LENDING) + 2); // transient: a door collect's booked rise, read by its trailing sync
@@ -156,31 +158,43 @@ library AceVaultFlows {
         }
     }
 
-    /// @dev Whether `x` is material to the trough hold against `ref`: over `MIN_SEED` atoms and over `HOLD_BPS` of `ref`, compared without a product.
-    function material(uint256 x, uint256 ref) internal pure returns (bool) {
-        return x > MIN_SEED && x > Math.mulDiv(ref, HOLD_BPS, 10_000);
+    /// @dev One word from the product `terms` by raw static call, keeping `ASK_RESERVE` back; a revert, a bomb, a burn or a wrong-sized answer reads zero.
+    /// @dev Not `Probe`: `askBool`'s floor reverts a short caller, `askWord` keeps no gas back; a 4626 max view must not revert, and each zero is closed.
+    function ask(address terms, bytes memory callData) internal view returns (uint256 word) {
+        assembly ("memory-safe") {
+            let left := gas()
+            if gt(left, ASK_RESERVE) {
+                let ok := staticcall(sub(left, ASK_RESERVE), terms, add(callData, 0x20), mload(callData), 0, 0x20)
+                if and(ok, eq(returndatasize(), 0x20)) { word := mload(0) }
+            }
+        }
     }
 
-    /// @dev Whether a pile `u` is still vesting against NAV `a`: over `floor` and over `GATE_BPS` of `a`.
-    function gainVesting(uint256 u, uint256 a, uint256 floor) internal pure returns (bool) {
-        return u > floor && u * 10_000 > a * GATE_BPS;
+    /// @dev Whether `amount` is material to the trough hold against `ref`: over `MIN_SEED` atoms and over `HOLD_BPS` of `ref`, compared without a product.
+    function material(uint256 amount, uint256 ref) internal pure returns (bool) {
+        return amount > MIN_SEED && amount > Math.mulDiv(ref, HOLD_BPS, 10_000);
     }
 
-    /// @dev Whether entry waits on a pot: one unsold at the hub or a door key open, and no exemption at the hub's settled count `s`.
-    function unsold(uint256 hubUnsold, uint256 openKeys, uint256 s, uint256 exempt) internal pure returns (bool) {
-        return (hubUnsold != 0 || openKeys != 0) && s != exempt;
+    /// @dev Whether pile `deferred` is still vesting against `nav`: over `floor` and over `GATE_BPS` of `nav`.
+    function gainVesting(uint256 deferred, uint256 nav, uint256 floor) internal pure returns (bool) {
+        return deferred > floor && deferred * 10_000 > nav * GATE_BPS;
     }
 
-    /// @dev The maturity a rise of `d` stamped now onto a pile of `u` maturing at `m` leaves, over a window of `w` seconds.
-    function blended(uint256 u, uint256 d, uint256 m, uint256 w) internal view returns (uint64) {
-        uint256 end = block.timestamp + w;
-        return uint64((u == 0 || m <= block.timestamp) ? end : m + Math.mulDiv(end - m, d, u + d));
+    /// @dev Whether entry waits on a pot: one unsold at the hub or a door key open, and no exemption at the hub's count `settledPots`.
+    function unsold(uint256 hubUnsold, uint256 openKeys, uint256 settledPots, uint256 exempt) internal pure returns (bool) {
+        return (hubUnsold != 0 || openKeys != 0) && settledPots != exempt;
+    }
+
+    /// @dev The maturity a `rise` stamped now onto pile `deferred` maturing at `maturity` leaves, over a `window` in seconds.
+    function blended(uint256 deferred, uint256 rise, uint256 maturity, uint256 window) internal view returns (uint64) {
+        uint256 end = block.timestamp + window;
+        return uint64((deferred == 0 || maturity <= block.timestamp) ? end : maturity + Math.mulDiv(end - maturity, rise, deferred + rise));
     }
 
     /// @notice A door-mode booking of `units` at `price`, `units * price >> 96` floored and saturating; a door computing one must call this.
     function bookValue(uint256 units, uint256 price) internal pure returns (uint256) {
-        (bool fits, uint256 v) = Math.tryMul(units, price);
-        return fits ? v >> 96 : type(uint256).max;
+        (bool fits, uint256 value) = Math.tryMul(units, price);
+        return fits ? value >> 96 : type(uint256).max;
     }
 
     /// @notice A collected pot's senior claim: the `bookValue` of the pot, capped at the claim's need, `ceil(debt * 2^96 / price)` units.
@@ -195,9 +209,9 @@ library AceVaultFlows {
         return bookValue(Math.min(pot, Math.mulDiv(debt, Q96, price, Math.Rounding.Ceil)), price);
     }
 
-    /* ============================== THE DOOR ============================== */
+    /* ============================== THE CORE DOOR ============================== */
 
-    /// @notice The door's market checks, moving nothing: `self` the lender, `asset` the quote, neither own token the collateral, no settle bounty.
+    /// @notice A lending door's market checks, moving nothing: `self` the lender, `asset` the quote, neither own token the collateral, no settle bounty.
     function checkMarket(MarketParams memory mp, address asset, address self) internal pure {
         if (mp.lender != self) revert NotOurLender();
         if (mp.quote != asset) revert OutsideEnvelope();
@@ -206,41 +220,46 @@ library AceVaultFlows {
         if (mp.settleBountyBps != 0) revert PaysSettleBounty();
     }
 
-    /// @notice The door's checks and pledge: the market is this vault's, the placement fits, and exactly the units arrived.
+    /// @notice The core door's checks and pledge: the market is this vault's, the placement fits, and exactly the units arrived.
     /// @dev Runs before the product's write hook, so the borrower's pull meets no primed product; custody's in `hub.open` runs primed, under the hub's lock.
     /// @return id The market id.
-    function place(Ctx memory c, MarketParams memory mp, Terms memory t, bytes calldata permit2) public returns (bytes32 id) {
-        checkMarket(mp, c.asset, address(this));
-        if (t.principal > c.lendable) revert OverLendable();
-        if (t.principal > c.room) revert OverCap();
-        _pull(mp.collateral, t.units, c.manager, permit2);
+    function place(Ctx memory ctx, MarketParams memory mp, Terms memory draw, bytes calldata permit2) public returns (bytes32 id) {
+        checkMarket(mp, ctx.asset, address(this));
+        if (draw.principal > ctx.lendable) revert OverLendable();
+        if (draw.principal > ctx.room) revert OverCap();
+        _pull(mp.collateral, draw.units, ctx.manager, permit2);
         id = keccak256(abi.encode(mp));
     }
 
-    /// @notice The door's hub leg: create the market if missing, rest all idle, open to this vault, withdraw every unit.
+    /// @notice The core door's hub leg: create the market if missing, rest all idle, open to this vault, withdraw every unit.
     /// @dev Opening to this vault passes the hub's credit-operator gate; the title is handed over by the wrapper after this returns.
     /// @return loanId The loan, titled to this vault until the wrapper hands it over.
     /// @return payout The cash the open paid this vault, measured.
-    function lend(address ace, bytes32 id, MarketParams memory mp, Terms memory t, uint256 minPayout, uint64 deadline)
+    function lend(address ace, bytes32 id, MarketParams memory mp, Terms memory draw, uint256 minPayout, uint64 deadline)
         public
         returns (uint256 loanId, uint256 payout)
     {
         IAceLenderOps hub = IAceLenderOps(ace);
         if (hub.idToMarketParams(id).quote == address(0)) hub.createMarket(mp);
-        if (t.tenor == 0) t.tenor = mp.minTenor;
+        if (draw.tenor == 0) draw.tenor = mp.minTenor;
         _rest(hub, IERC20(mp.quote), id, type(uint256).max, 1);
-        (loanId, payout) = _open(hub, IERC20(mp.quote), id, t, OpenBounds(minPayout, t.minBufferWad, deadline));
+        (loanId, payout) = _open(hub, IERC20(mp.quote), id, draw, OpenBounds(minPayout, draw.minBufferWad, deadline));
         _drain(hub, id);
-        emit Borrowed(loanId, id, msg.sender, t.units, t.principal, payout);
+        emit Borrowed(loanId, id, msg.sender, draw.units, draw.principal, payout);
     }
 
     /* ============================== THE LOAN END ============================== */
 
     /// @notice End a vault loan before its pot is collected: `forceClose` from expiry, `finalize` on distress before it; a loan already ended is tolerated.
+    /// @notice A band-on loan whose record is dark, or a limit short of its record read, is SKIPPED, not bubbled: one loan never holds a batch.
+    /// @dev A skipped loan stays live, so the batch's collect finds no pot for it and pays zero; a later batch ends it.
     function endLoan(address ace, uint256 loanId) internal {
         (bool ok, bytes memory err) = ace.call(abi.encodeWithSelector(IAceSettle.forceClose.selector, loanId));
         if (!ok && bytes4(err) == NotExpired.selector) (ok, err) = ace.call(abi.encodeWithSelector(IAceSettle.finalize.selector, loanId));
-        if (!ok && bytes4(err) != LoanClosed.selector) LowLevelCall.bubbleRevert(err);
+        if (ok) return;
+        bytes4 why = bytes4(err);
+        if (why == LoanClosed.selector || why == NoRecordPrice.selector || why == RecordUnreadable.selector || why == RecordGasShort.selector) return;
+        LowLevelCall.bubbleRevert(err);
     }
 
     /* ============================== DOOR MODE ============================== */
@@ -267,92 +286,92 @@ library AceVaultFlows {
 
     /// @dev Zero an exemption a settlement since has voided, so the policy's storage-only read sees the door's keys as unexempted.
     function _voidStaleExemption(IAceLenderOps hub, address asset, VaultLayout storage $) private {
-        uint256 x = $.exemptSettled;
-        if (x == 0) return;
-        (, uint256 s) = hub.lenderUnresolved(address(this), asset);
-        if (s != x) $.exemptSettled = 0;
+        uint256 exempt = $.exemptSettled;
+        if (exempt == 0) return;
+        (, uint256 settledPots) = hub.lenderUnresolved(address(this), asset);
+        if (settledPots != exempt) $.exemptSettled = 0;
     }
 
-    /// @notice Take `cash` from the door against key `c`, and close `c` from the entry gate if `closes`; only `(c, 0, false)` refuses.
+    /// @notice Take `cash` from the door against key `collateral`, and close it from the entry gate if `closes`; only `(collateral, 0, false)` refuses.
     /// @dev The cash is pulled on the door's exact allowance and measured; the key's value falls by it, saturating, whatever the key.
-    function returnProceeds(address c, uint256 cash, bool closes) external {
+    function returnProceeds(address collateral, uint256 cash, bool closes) external {
         if (cash == 0 && !closes) revert IAceVaultDoor.NothingReturned();
         VaultLayout storage $ = layout();
-        Seizure storage s = $.seized[c];
+        Seizure storage seizure = $.seized[collateral];
         if (cash != 0) {
-            IERC20 a = IERC20(AceVaultTail.asset());
-            uint256 pre = a.balanceOf(address(this));
-            a.safeTransferFrom(msg.sender, address(this), cash);
-            if (a.balanceOf(address(this)) - pre != cash) revert IAceVaultDoor.ProceedsShort();
-            s.value = uint184(Math.saturatingSub(s.value, cash));
+            IERC20 token = IERC20(AceVaultTail.asset());
+            uint256 pre = token.balanceOf(address(this));
+            token.safeTransferFrom(msg.sender, address(this), cash);
+            if (token.balanceOf(address(this)) - pre != cash) revert IAceVaultDoor.ProceedsShort();
+            seizure.value = uint184(Math.saturatingSub(seizure.value, cash));
         }
-        bool closed = closes && s.open;
-        if (closed) _close($, s);
-        emit IAceVaultDoor.ProceedsReturned(c, cash, closed);
+        bool closed = closes && seizure.open;
+        if (closed) _close($, seizure);
+        emit IAceVaultDoor.ProceedsReturned(collateral, cash, closed);
     }
 
-    /// @notice Queue a write-off of key `c`'s residue, due after the cap timelock. CURATOR ONLY; an empty key refuses `NothingSeized`.
-    function submitWriteOff(address c) external {
+    /// @notice Queue a write-off of key `collateral`'s residue, due after the cap timelock. CURATOR ONLY; an empty key refuses `NothingSeized`.
+    function submitWriteOff(address collateral) external {
         if (msg.sender != AceVaultTail.curator()) revert IAceVaultDoor.NotCurator();
-        Seizure storage s = layout().seized[c];
-        if (s.value == 0 && !s.open) revert IAceVaultDoor.NothingSeized();
-        uint64 at = uint64(block.timestamp) + AceVaultTail.capTimelock();
-        s.writeOffAt = at;
-        emit IAceVaultDoor.WriteOffSubmitted(c, at);
+        Seizure storage seizure = layout().seized[collateral];
+        if (seizure.value == 0 && !seizure.open) revert IAceVaultDoor.NothingSeized();
+        uint64 due = uint64(block.timestamp) + AceVaultTail.capTimelock();
+        seizure.writeOffAt = due;
+        emit IAceVaultDoor.WriteOffSubmitted(collateral, due);
     }
 
-    /// @notice Land key `c`'s write-off once due: its value goes to zero and it closes. PERMISSIONLESS.
-    function acceptWriteOff(address c) external {
+    /// @notice Land key `collateral`'s write-off once due: its value goes to zero and it closes. PERMISSIONLESS.
+    function acceptWriteOff(address collateral) external {
         VaultLayout storage $ = layout();
-        Seizure storage s = $.seized[c];
-        uint64 at = s.writeOffAt;
-        if (at == 0 || block.timestamp < at) revert IAceVaultDoor.NothingDue();
-        uint256 forgiven = s.value;
-        (s.value, s.writeOffAt) = (0, 0);
-        if (s.open) _close($, s);
-        emit IAceVaultDoor.WriteOffAccepted(c, forgiven);
+        Seizure storage seizure = $.seized[collateral];
+        uint64 due = seizure.writeOffAt;
+        if (due == 0 || block.timestamp < due) revert IAceVaultDoor.NothingDue();
+        uint256 forgiven = seizure.value;
+        (seizure.value, seizure.writeOffAt) = (0, 0);
+        if (seizure.open) _close($, seizure);
+        emit IAceVaultDoor.WriteOffAccepted(collateral, forgiven);
     }
 
-    /// @notice Drop key `c`'s pending write-off. The curator or the guardian; with none pending it refuses `NothingDue`.
-    function revokeWriteOff(address c) external {
+    /// @notice Drop key `collateral`'s pending write-off. The curator or the guardian; with none pending it refuses `NothingDue`.
+    function revokeWriteOff(address collateral) external {
         if (msg.sender != AceVaultTail.curator() && msg.sender != AceVaultTail.guardian()) revert IAceVaultDoor.NotCurator();
-        Seizure storage s = layout().seized[c];
-        if (s.writeOffAt == 0) revert IAceVaultDoor.NothingDue();
-        s.writeOffAt = 0;
-        emit IAceVaultDoor.WriteOffRevoked(msg.sender, c);
+        Seizure storage seizure = layout().seized[collateral];
+        if (seizure.writeOffAt == 0) revert IAceVaultDoor.NothingDue();
+        seizure.writeOffAt = 0;
+        emit IAceVaultDoor.WriteOffRevoked(msg.sender, collateral);
     }
 
     /// @dev One loan's pot to the door, the caller; an empty pot is nothing to hand over.
     function _handOver(address ace, uint256 loanId) private returns (uint256) {
-        (bool ok, bytes memory r) = ace.call(abi.encodeCall(IAceVaultOps.redeemInKind, (loanId, msg.sender)));
-        if (ok) return abi.decode(r, (uint256));
-        if (r.length != 4 || bytes4(r) != EmptyPot.selector) LowLevelCall.bubbleRevert(r);
+        (bool ok, bytes memory ret) = ace.call(abi.encodeCall(IAceVaultOps.redeemInKind, (loanId, msg.sender)));
+        if (ok) return abi.decode(ret, (uint256));
+        if (ret.length != 4 || bytes4(ret) != EmptyPot.selector) LowLevelCall.bubbleRevert(ret);
         return 0;
     }
 
     /// @dev Book a pot of `units` on its collateral's key, saturating at the record's width, void a pending write-off, open the key, and return the rise.
-    /// @dev A recorded pot books the claim it retired, `seniorClaim`, since an in-term take above the need is owed no recovery; a recordless pot books whole.
+    /// @dev A recorded pot books the claim it retired, `seniorClaim`, since a recorded take above the need is owed no recovery; a recordless pot books whole.
     function _book(VaultLayout storage $, address ace, uint256 loanId, MarketParams memory mp, uint256 units) private returns (uint256 rise) {
-        address c = mp.collateral;
-        Seizure storage s = $.seized[c];
-        uint256 was = s.value;
-        uint256 v = mp.record == address(0) ? bookValue(units, mp.price) : seniorClaim(ace, loanId, units, mp.price);
-        s.value = uint184(Math.min(Math.saturatingAdd(was, v), type(uint184).max));
-        if (s.writeOffAt != 0) {
-            s.writeOffAt = 0;
-            emit IAceVaultDoor.WriteOffRevoked(msg.sender, c);
+        address collateral = mp.collateral;
+        Seizure storage seizure = $.seized[collateral];
+        uint256 was = seizure.value;
+        uint256 value = mp.record == address(0) ? bookValue(units, mp.price) : seniorClaim(ace, loanId, units, mp.price);
+        seizure.value = uint184(Math.min(Math.saturatingAdd(was, value), type(uint184).max));
+        if (seizure.writeOffAt != 0) {
+            seizure.writeOffAt = 0;
+            emit IAceVaultDoor.WriteOffRevoked(msg.sender, collateral);
         }
-        if (!s.open) {
-            s.open = true;
+        if (!seizure.open) {
+            seizure.open = true;
             $.openSeized++;
         }
-        rise = s.value - was;
-        emit IAceVaultDoor.Seized(loanId, c, units, rise);
+        rise = seizure.value - was;
+        emit IAceVaultDoor.Seized(loanId, collateral, units, rise);
     }
 
     /// @dev Close an open key from the entry gate.
-    function _close(VaultLayout storage $, Seizure storage s) private {
-        s.open = false;
+    function _close(VaultLayout storage $, Seizure storage seizure) private {
+        seizure.open = false;
         $.openSeized--;
     }
 
@@ -362,10 +381,12 @@ library AceVaultFlows {
     /// @notice The vault reaches the hub as the holder's title operator, so a holder who approved it for the title renews as the holder would.
     /// @notice Unapproved, the vault is a non-holder at the hub, and renews only where any caller could.
     /// @dev The exit gate is the wrapper's transient word, written before the pull, so the fee in flight never covers the requests.
+    /// @dev The fee is priced at the hub's live origination share, so the hub's own charge matches it to the wei.
     /// @return fee The fee the hub charged.
     function extendFor(uint256 loanId, uint256 maxFee, uint256 minBufferWad, bytes calldata data, bytes calldata permit2) external returns (uint256 fee) {
         (MarketParams memory mp, uint64 added) = _extendable(loanId);
-        fee = LoanMath.originationFee(IAceVaultOps(AceVaultTail.ace()).debtOf(loanId), added, mp.lenderAprBps);
+        address ace = AceVaultTail.ace();
+        fee = LoanMath.originationFee(IAceVaultOps(ace).debtOf(loanId), added, mp.lenderAprBps, HubProtocolShare.shareOf(ace));
         if (fee > maxFee) revert IAceVaultDoor.FeeOverMax();
         _pullFee(fee, permit2);
         _bracketed(loanId, minBufferWad, mp, data, fee);
@@ -447,69 +468,71 @@ library AceVaultFlows {
     }
 
     /// @dev The refinance in its stages, on the request as one struct.
-    function _refinance(uint256 loanId, RefinanceRequest memory r, bytes calldata data) private returns (uint256 newId, uint256 out) {
-        Refi memory f = _refinanceable(loanId, r, data);
+    function _refinance(uint256 loanId, RefinanceRequest memory req, bytes calldata data) private returns (uint256 newId, uint256 out) {
+        Refi memory refi = _refinanceable(loanId, req, data);
         IVaultTerms terms = IVaultTerms(AceVaultTail.terms());
         IERC721(AceVaultTail.title()).transferFrom(msg.sender, address(this), loanId);
-        terms.beforeLend(Lend.Refinance, f.mp, loanId, data);
-        (newId, out) = _refinanceAtHub(f, loanId, r);
-        _home(f, loanId, newId, out);
-        terms.afterLend(Lend.Refinance, f.mp, newId, msg.sender, data);
-        emit IAceVaultDoor.Refinanced(loanId, newId, msg.sender, f.t.principal, out);
+        terms.beforeLend(Lend.Refinance, refi.mp, loanId, data);
+        (newId, out) = _refinanceAtHub(refi, loanId, req);
+        _home(refi, loanId, newId, out);
+        terms.afterLend(Lend.Refinance, refi.mp, newId, msg.sender, data);
+        emit IAceVaultDoor.Refinanced(loanId, newId, msg.sender, refi.draw.principal, out);
     }
 
     /// @dev The successor and its draw: the held loan's refusals, the withdraw leg, the product's answer, the exit gate on a lengthening, and the room.
-    function _refinanceable(uint256 loanId, RefinanceRequest memory r, bytes calldata data) private view returns (Refi memory f) {
+    function _refinanceable(uint256 loanId, RefinanceRequest memory req, bytes calldata data) private view returns (Refi memory refi) {
         (,, uint64 expiry) = _heldLoan(loanId);
-        if (r.withdrawTo == address(this)) revert IAceVaultDoor.WithdrawToVault();
-        f = _answer(loanId, r, data);
+        if (req.withdrawTo == address(this)) revert IAceVaultDoor.WithdrawToVault();
+        refi = _answer(loanId, req, data);
         bool covered = TransientSlot.tload(TransientSlot.asUint256(LENDING)) != 0;
-        if (block.timestamp + f.t.tenor > expiry && !covered) revert IAceVaultDoor.RequestsOutweighIdle();
-        _refinanceRoom(f, IAceVaultOps(AceVaultTail.ace()).debtOf(loanId));
+        if (block.timestamp + refi.draw.tenor > expiry && !covered) revert IAceVaultDoor.RequestsOutweighIdle();
+        _refinanceRoom(refi, IAceVaultOps(AceVaultTail.ace()).debtOf(loanId));
     }
 
-    /// @dev The product's refinance answer to `r` and the base's checks on it: the market is this vault's, the draw bound to the ask and the rail.
-    function _answer(uint256 loanId, RefinanceRequest memory r, bytes calldata data) private view returns (Refi memory f) {
-        (f.mp, f.t) = IVaultTerms(AceVaultTail.terms()).refinanceTerms(msg.sender, loanId, r, data);
-        checkMarket(f.mp, AceVaultTail.asset(), address(this));
-        BorrowRequest memory b = BorrowRequest(r.collateral, f.t.units, r.principal, r.tenor, r.minPayout, r.minBufferWad, r.deadline);
+    /// @dev The product's refinance answer to `req` and the base's checks on it: the market is this vault's, the draw bound to the ask and the rail.
+    function _answer(uint256 loanId, RefinanceRequest memory req, bytes calldata data) private view returns (Refi memory refi) {
+        (refi.mp, refi.draw) = IVaultTerms(AceVaultTail.terms()).refinanceTerms(msg.sender, loanId, req, data);
+        checkMarket(refi.mp, AceVaultTail.asset(), address(this));
+        BorrowRequest memory asked = BorrowRequest(req.collateral, refi.draw.units, req.principal, req.tenor, req.minPayout, req.minBufferWad, req.deadline);
         bool hubAsk = !AceVaultTail.inKind() && !AceVaultTail.door();
-        f.t = AceVaultCaps.admit(b, f.mp, f.t, hubAsk, AceVaultTail.minTenor(), AceVaultTail.maxTenor());
-        if (f.t.tenor == 0) f.t.tenor = f.mp.minTenor;
-        f.id = keccak256(abi.encode(f.mp));
+        refi.draw = AceVaultCaps.admit(asked, refi.mp, refi.draw, hubAsk, AceVaultTail.minTenor(), AceVaultTail.maxTenor());
+        if (refi.draw.tenor == 0) refi.draw.tenor = refi.mp.minTenor;
+        refi.id = keccak256(abi.encode(refi.mp));
     }
 
     /// @dev The net new cash, principal over old debt, under lendable and the total's, row's and product's room; once, as the call raises lent by exactly it.
-    function _refinanceRoom(Refi memory f, uint256 debtOld) private view {
+    /// @dev No new cash asks nothing; the product's room is read as `borrow` reads it, any failure there zero.
+    function _refinanceRoom(Refi memory refi, uint256 debtOld) private view {
         (address ace, address asset) = (AceVaultTail.ace(), AceVaultTail.asset());
-        uint256 fresh = Math.saturatingSub(f.t.principal, debtOld);
+        uint256 fresh = Math.saturatingSub(refi.draw.principal, debtOld);
+        if (fresh == 0) return;
         if (fresh > TransientSlot.tload(TransientSlot.asUint256(bytes32(uint256(LENDING) + 1)))) revert OverLendable();
         uint256 held = IAceLenderOps(ace).lenderAssets(address(this), asset);
-        (uint256 row, uint256 total) = AceVaultCaps.room(ace, asset, f.mp.collateral, held, _drawdown(asset, held));
+        (uint256 row, uint256 total) = AceVaultCaps.room(ace, asset, refi.mp.collateral, held, _drawdown(asset, held));
         if (fresh > total) revert AceVaultCaps.OverTotal();
-        if (fresh > row || fresh > IVaultTerms(AceVaultTail.terms()).room(f.mp)) revert OverCap();
+        if (fresh > row || fresh > ask(AceVaultTail.terms(), abi.encodeCall(IVaultTerms.room, (refi.mp)))) revert OverCap();
     }
 
     /// @dev Create the market if missing, rest at most the principal unless the record sits under the price, refinance as holder of record, then drain.
-    function _refinanceAtHub(Refi memory f, uint256 loanId, RefinanceRequest memory r) private returns (uint256 newId, uint256 out) {
+    function _refinanceAtHub(Refi memory refi, uint256 loanId, RefinanceRequest memory req) private returns (uint256 newId, uint256 out) {
         address ace = AceVaultTail.ace();
         IAceLenderOps hub = IAceLenderOps(ace);
-        IERC20 cash = IERC20(f.mp.quote);
-        if (hub.idToMarketParams(f.id).quote == address(0)) hub.createMarket(f.mp);
-        if (!_underPrice(f.mp)) _rest(hub, cash, f.id, f.t.principal, f.mp.minPrincipal);
+        IERC20 cash = IERC20(refi.mp.quote);
+        if (hub.idToMarketParams(refi.id).quote == address(0)) hub.createMarket(refi.mp);
+        if (!_underPrice(refi.mp)) _rest(hub, cash, refi.id, refi.draw.principal, refi.mp.minPrincipal);
         uint256 held = cash.balanceOf(address(this));
-        OpenBounds memory bnd = OpenBounds(r.minPayout, f.t.minBufferWad, r.deadline);
-        newId = IAceVaultOps(ace).refinanceTo(MigrateArgs(loanId, f.id, f.t.principal, f.t.tenor, bnd, r.withdrawUnits, r.withdrawTo));
+        OpenBounds memory bounds = OpenBounds(req.minPayout, refi.draw.minBufferWad, req.deadline);
+        newId = IAceVaultOps(ace).refinanceTo(MigrateArgs(loanId, refi.id, refi.draw.principal, refi.draw.tenor, bounds, req.withdrawUnits, req.withdrawTo));
         out = cash.balanceOf(address(this)) - held;
-        _drain(hub, f.id);
+        _drain(hub, refi.id);
     }
 
     /// @dev Send both titles and the net home; the hub's refinance credits the retired loan nothing, so no claim strands on it.
-    function _home(Refi memory f, uint256 loanId, uint256 newId, uint256 out) private {
-        IERC721 t = IERC721(AceVaultTail.title());
-        t.transferFrom(address(this), msg.sender, newId);
-        t.transferFrom(address(this), msg.sender, loanId);
-        if (out != 0) IERC20(f.mp.quote).safeTransfer(msg.sender, out); // as the hub skips a zero net, for an asset that refuses zero transfers
+    function _home(Refi memory refi, uint256 loanId, uint256 newId, uint256 out) private {
+        IERC721 titles = IERC721(AceVaultTail.title());
+        titles.transferFrom(address(this), msg.sender, newId);
+        titles.transferFrom(address(this), msg.sender, loanId);
+        if (out != 0) IERC20(refi.mp.quote).safeTransfer(msg.sender, out); // as the hub skips a zero net, for an asset that refuses zero transfers
     }
 
     /// @dev Gross NAV's fall below its high-water, with the hub holding `held`: the vault's own figure, read here off the same two balances.
@@ -533,26 +556,26 @@ library AceVaultFlows {
     }
 
     /// @dev The held loan's refusals, the answer at the debt plus `amount`, refused unless the loan's own market admits it whole, the room, the hub leg.
-    function _topUp(uint256 loanId, uint256 amount, RefinanceRequest memory r, bytes calldata data) private returns (uint256 fee) {
+    function _topUp(uint256 loanId, uint256 amount, RefinanceRequest memory req, bytes calldata data) private returns (uint256 fee) {
         (MarketParams memory src,,) = _heldLoan(loanId);
         uint256 debt = IAceVaultOps(AceVaultTail.ace()).debtOf(loanId);
-        (r.collateral, r.principal) = (src.collateral, debt + amount);
-        Refi memory f = _answer(loanId, r, data);
-        if (f.id != keccak256(abi.encode(src)) || f.t.principal != r.principal) revert IAceVaultDoor.TopUpRefused();
-        _refinanceRoom(f, debt);
-        fee = _topUpAtHub(f, loanId, amount, r, data);
+        (req.collateral, req.principal) = (src.collateral, debt + amount);
+        Refi memory refi = _answer(loanId, req, data);
+        if (refi.id != keccak256(abi.encode(src)) || refi.draw.principal != req.principal) revert IAceVaultDoor.TopUpRefused();
+        _refinanceRoom(refi, debt);
+        fee = _topUpAtHub(refi, loanId, amount, req, data);
     }
 
     /// @dev Inside the product's write calls: rest exactly `amount`, draw it as the holder's title operator, drain; the hub pays the holder last.
-    function _topUpAtHub(Refi memory f, uint256 loanId, uint256 amount, RefinanceRequest memory r, bytes calldata data) private returns (uint256 fee) {
+    function _topUpAtHub(Refi memory refi, uint256 loanId, uint256 amount, RefinanceRequest memory req, bytes calldata data) private returns (uint256 fee) {
         address ace = AceVaultTail.ace();
         IAceLenderOps hub = IAceLenderOps(ace);
         IVaultTerms terms = IVaultTerms(AceVaultTail.terms());
-        terms.beforeLend(Lend.Refinance, f.mp, loanId, data);
-        _rest(hub, IERC20(f.mp.quote), f.id, amount, amount);
-        fee = IAceVaultOps(ace).drawMore(loanId, amount, OpenBounds(r.minPayout, f.t.minBufferWad, r.deadline));
-        _drain(hub, f.id);
-        terms.afterLend(Lend.Refinance, f.mp, loanId, msg.sender, data);
+        terms.beforeLend(Lend.Refinance, refi.mp, loanId, data);
+        _rest(hub, IERC20(refi.mp.quote), refi.id, amount, amount);
+        fee = IAceVaultOps(ace).drawMore(loanId, amount, OpenBounds(req.minPayout, refi.draw.minBufferWad, req.deadline));
+        _drain(hub, refi.id);
+        terms.afterLend(Lend.Refinance, refi.mp, loanId, msg.sender, data);
     }
 
     /* ============================== INTERNALS ============================== */
@@ -568,18 +591,18 @@ library AceVaultFlows {
     }
 
     /// @dev Open to this vault and measure what the open paid it.
-    function _open(IAceLenderOps hub, IERC20 cash, bytes32 id, Terms memory t, OpenBounds memory bnd) private returns (uint256 loanId, uint256 payout) {
+    function _open(IAceLenderOps hub, IERC20 cash, bytes32 id, Terms memory draw, OpenBounds memory bounds) private returns (uint256 loanId, uint256 payout) {
         uint256 held = cash.balanceOf(address(this));
-        loanId = hub.open(id, t.units, t.principal, t.tenor, address(this), bnd);
+        loanId = hub.open(id, draw.units, draw.principal, draw.tenor, address(this), bounds);
         payout = cash.balanceOf(address(this)) - held;
     }
 
     /// @dev Rest idle up to `cap` as the market's cash cap admits, on an exact allowance the deposit spends; nothing under `minLot`.
     function _rest(IAceLenderOps hub, IERC20 cash, bytes32 id, uint256 cap, uint256 minLot) private {
-        uint256 amt = Math.min(Math.min(cash.balanceOf(address(this)), cap), type(uint128).max - hub.restingOf(id));
-        if (amt < minLot) return;
-        cash.forceApprove(address(hub), amt);
-        hub.deposit(id, amt);
+        uint256 amount = Math.min(Math.min(cash.balanceOf(address(this)), cap), type(uint128).max - hub.restingOf(id));
+        if (amount < minLot) return;
+        cash.forceApprove(address(hub), amount);
+        hub.deposit(id, amount);
     }
 
     /// @dev Whether the market's record reads live under its price, as the hub's deposit reads it: the hub then takes no resting cash and lends none fresh.

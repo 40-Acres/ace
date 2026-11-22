@@ -308,6 +308,7 @@ contract AceReader {
     /// @notice Whether distress has persisted for the full settle window: the ONLY precondition on finalize.
     /// @notice False again for free the moment the record prints a recovery.
     /// @notice Record-less and closed loans answer false on all three, mirroring `AceLens` so parity holds.
+    /// @dev Parity holds on a record that answers: on one that cannot, `AceLens` reverts `RecordUnreadable` and this bubbles the record's own failure.
     function settleable(uint256 loanId) external view returns (bool) {
         (MarketParams memory p, uint256 trig, bool closed) = _riskView(loanId);
         if (closed || p.record == address(0)) return false;

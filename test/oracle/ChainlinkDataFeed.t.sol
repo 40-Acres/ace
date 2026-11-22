@@ -16,7 +16,7 @@ contract ChainlinkDataFeedHarness {
 
 /// @title ChainlinkDataFeedTest
 /// @notice The shared round checks, each pinned at its boundary: the fit side reads, the first unfit step answers (0, 0).
-/// @dev OracleRecord, YbRecord and NftAccountRecord all read their feed through this one function.
+/// @dev OracleRecord, MultiPairOracleRecord and NftAccountRecord all read their feed through this one function.
 contract ChainlinkDataFeedTest is WarpClock {
     ChainlinkDataFeedHarness internal lib;
     MockAggregatorV3 internal feed;

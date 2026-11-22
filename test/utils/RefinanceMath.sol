@@ -12,6 +12,6 @@ library RefinanceMath {
     /// @dev Rounds UP; the caller must hold `LoanMath.feeFundable`, or the denominator underflows.
     function principalForOwed(uint256 owed, uint64 tenor, uint256 lenderAprBps) internal pure returns (uint256) {
         uint256 d = 10000 * 10000 * Constants.SECONDS_PER_YEAR;
-        return FullMath.mulDivRoundingUp(owed, d, d - lenderAprBps * uint256(tenor) * (10000 + Constants.PROTOCOL_SHARE_BPS));
+        return FullMath.mulDivRoundingUp(owed, d, d - lenderAprBps * uint256(tenor) * (10000 + Constants.MAX_PROTOCOL_SHARE_BPS));
     }
 }

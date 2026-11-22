@@ -37,7 +37,7 @@ contract AceAllInFeeNettingTest is WarpClock {
     address internal alice = address(0xA11CE);
     address internal borrower = address(0xB0B);
 
-    uint256 internal constant PS = Constants.PROTOCOL_SHARE_BPS;
+    uint256 internal constant PS = Constants.MAX_PROTOCOL_SHARE_BPS;
     uint64 internal constant TEN7 = 7 days;
     uint64 internal constant TEN30 = 30 days;
     uint256 internal constant BASE_BPS_A = 2190; // the launch rung: 2190 bps a year to the LENDER, 6 a day

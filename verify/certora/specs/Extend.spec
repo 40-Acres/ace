@@ -4,7 +4,8 @@
 // An extension lengthens a live loan IN PLACE: the same id and title, its term re-anchored at now and run for the loan's
 // own tenor again, so the new expiry is `now + tenor`, at most `now + maxTenor`, and the tenor never moves. It lands only
 // strictly inside the term: at `expiry - tenor` it adds no time and refuses, and from the expiry second it refuses
-// `LoanMatured`. Its fee is `originationFee(debt, newExpiry - expiry, ...)`, the fee on the time it adds, and the CALLER,
+// `LoanMatured`. Its fee is `originationFee(debt, newExpiry - expiry, ...)` at the hub's live origination share, the fee on
+// the time it adds, and the CALLER,
 // whoever it is, pays it in cash: the protocol cut to revenue, the tick cut to `owed`, the escrow cut funded. A caller who
 // is neither the holder nor an operator of its title lands only with the record at or above the price, the trigger out of
 // the deleverage band, and at most a quarter of the tenor left. A top-up (`drawMore`) moves the debt and the claim by
@@ -113,6 +114,8 @@ methods {
     function protocolCut(uint256) external returns (uint256) envfree;
     function escrowCut(uint256) external returns (uint256) envfree;
     function tickCut(uint256) external returns (uint256) envfree;
+    function protocolShareBps() external returns (uint256) envfree;
+    function treasuryOf() external returns (address) envfree;
     function quoteToken.balanceOf(address) external returns (uint256) envfree;
 }
 
@@ -755,4 +758,35 @@ rule aRefinanceCanPayOut(env e, ExtendHarness.MigrateArgs a) {
     uint256 hub0 = quoteToken.balanceOf(currentContract);
     refinanceTo(e, a);
     satisfy quoteToken.balanceOf(currentContract) < hub0;
+}
+
+// ---- THE ORIGINATION SHARE: the hub's one admin power ----
+
+// The constructor writes the ceiling and the one setter refuses anything over it, so no verb ever prices a fee past 10%.
+invariant theShareNeverPassesTheCeiling()
+    to_mathint(protocolShareBps()) <= 1000
+    filtered { f -> hubVerb(f) }
+
+// Only the treasury moves the share, and only through its setter: no fee door, no settlement, no lender verb reaches it.
+rule onlyTheTreasuryMovesTheShare(env e, method f, calldataarg args) filtered { f -> hubVerb(f) } {
+    uint256 before = protocolShareBps();
+    f(e, args);
+    assert protocolShareBps() != before
+        => f.selector == sig:setProtocolShareBps(uint256).selector && e.msg.sender == treasuryOf() && treasuryOf() != 0,
+        "the share moved by other than its treasury's own setter";
+}
+
+// ANTI-HOLLOW: the treasury can move it down, to zero.
+rule theTreasuryCanCutTheShareToZero(env e, uint256 s) {
+    require e.msg.sender == treasuryOf() && treasuryOf() != 0 && e.msg.value == 0;
+    setProtocolShareBps(e, s);
+    satisfy protocolShareBps() == 0;
+}
+
+// ANTI-HOLLOW: and back UP from a cut to the ceiling, so the setter is no ratchet.
+rule theTreasuryCanRaiseACutShareToTheCeiling(env e, uint256 s) {
+    require e.msg.sender == treasuryOf() && treasuryOf() != 0 && e.msg.value == 0;
+    require protocolShareBps() < 1000;
+    setProtocolShareBps(e, s);
+    satisfy protocolShareBps() == 1000;
 }

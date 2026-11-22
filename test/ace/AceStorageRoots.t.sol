@@ -24,4 +24,19 @@ contract AceStorageRootsTest is Test {
     function test_LendersRoot_MatchesTheFormula() public pure {
         assertEq(Storage.LENDERS, _root("ace.storage.lenders"), "erc7201:ace.storage.lenders");
     }
+
+    /// @notice The fourth root holds the origination share; a root moved onto another's slot reads a share no test would notice.
+    function test_ProtocolRoot_MatchesTheFormula() public pure {
+        assertEq(Storage.PROTOCOL, _root("ace.storage.protocol"), "erc7201:ace.storage.protocol");
+    }
+
+    /// @notice No two roots share a slot, so no namespace can write over another's first member.
+    function test_TheFourRootsAreDistinct() public pure {
+        bytes32[4] memory r = [Storage.MARKETS, Storage.BOOK, Storage.LENDERS, Storage.PROTOCOL];
+        for (uint256 i; i < r.length; ++i) {
+            for (uint256 j = i + 1; j < r.length; ++j) {
+                assertTrue(r[i] != r[j], "two roots share a slot");
+            }
+        }
+    }
 }

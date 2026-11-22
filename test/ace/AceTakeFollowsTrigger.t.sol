@@ -311,8 +311,9 @@ contract AceTakeFollowsTriggerTest is WarpClock, DeleverageCrank {
         assertEq(read.invPotOf(mid, loanId), s.line, "the take is the coverage line at the current debt");
     }
 
-    /// @notice A deleverage restore sells units and melts debt to the target margin; a later `finalize` takes the capped claim at the restored trigger.
-    function test_DeleverageRestore_FinalizeInsideTheTerm_TakesTheCappedClaimAtTheRestoredTrigger() public {
+    /// @notice A deleverage restore sells units and melts debt to the target margin; a later `finalize` in this band-on market takes the claim at the record.
+    /// @dev Band on (#944, #945) the take is `max(need, ceil(claim * unitScale / minPrice))`, where the crank sold, not the capped claim at the trigger.
+    function test_DeleverageRestore_FinalizeInsideTheTerm_BandOnTakesTheClaimAtTheRecord() public {
         _makeBand();
         _lend(SEED);
         uint256 loanId = _open(_line(PRINCIPAL), PRINCIPAL);
@@ -329,10 +330,17 @@ contract AceTakeFollowsTriggerTest is WarpClock, DeleverageCrank {
         Pre memory s = _pre(loanId);
         assertLt(s.trig, _price(), "PREMISE: the restore left the trigger under the price");
         _assertRulesDiffer(s);
+        uint256 ps = rec.windowMin();
+        uint256 atRecord = Math.max(FullMath.mulDivRoundingUp(s.claim, scale, ps), s.need);
+        assertGt(ps, _price(), "PREMISE: a lot on the line sits in the band only over the price, so the claim at the record is the need");
+        assertEq(atRecord, s.need, "PREMISE: over the price the need binds");
 
         _finalize(loanId);
 
-        _assertTakesTheInTermTake(loanId, s);
+        uint256 want = Math.min(atRecord, s.lot - s.sliver);
+        assertEq(read.invPotOf(mid, loanId), want, "band on, the pot is the claim at the record, ceiled, on the post-sliver lot");
+        assertEq(read.unitsOwedOf(loanId, borrower), s.lot - s.sliver - want, "the borrower keeps the lot less the sliver and the take");
+        _assertCoveredAndConserved(loanId, s);
     }
 
     /// @notice A withdrawal down to a record line priced UNDER the market's price, then `finalize`: the take is the claim at the trigger.

@@ -58,11 +58,13 @@ contract AceSplitOrderHandler is WarpClock, DeleverageCrank {
     mapping(uint256 => uint256) public postedPrincipal; // order -> principal stated at post
     mapping(uint256 => uint256) public carriedUnits; // order -> units carried into the loans its fills opened
     mapping(uint256 => uint256) public returnedUnits; // order -> units the maker's close handed back
+    mapping(uint256 => bool) public zeroFloorPosted; // order -> posted with a zero minFill
 
     uint256 public ordersPosted;
     uint256 public splittablePosted; // posted with principal at least two minimum fills
     uint256 public wholeOnlyPosted; // posted with principal under two minimum fills
-    uint256 public sentinelPosted; // posted with a zero minFill, which resolves to minPrincipal and buys the largest slack
+    uint256 public sentinelPosted; // posted with a zero minFill, which resolves to the whole principal: all-or-nothing, the one-atom slack
+    uint256 public wholeStatedPosted; // posted with an explicit floor of the whole principal, the sentinel's stated twin
     uint256 public capFills; // fills that landed at the pro-rata cap
     uint256 public partialCapFills; // of those, ones that left principal behind: the split branch itself
     uint256 public minFillCapFills; // of those, ones of exactly the maker's floor: where the per-fill slack is thinnest
@@ -265,7 +267,7 @@ contract AceSplitOrderHandler is WarpClock, DeleverageCrank {
 
     /* ============================ the actions ============================ */
 
-    /// @notice A maker's post: mostly splittable, sometimes whole-only or all-or-nothing, sometimes the zero-minFill sentinel.
+    /// @notice A maker's post: mostly splittable, sometimes whole-only, sometimes the zero-minFill sentinel, which is all-or-nothing.
     /// @notice The low end sits AT the price on half the posts (maximum leverage, where the slack is all there is) and within 10% under it otherwise.
     function postOrder(uint256 principalSeed, uint256 minFillSeed, uint256 lowSeed, uint256 shapeSeed) external {
         _bump("postOrder");
@@ -273,15 +275,20 @@ contract AceSplitOrderHandler is WarpClock, DeleverageCrank {
         uint256 d = bound(principalSeed, 2 * MIN_PRINCIPAL, 100 * MIN_PRINCIPAL);
         uint256 shape = shapeSeed % 8;
         uint256 m;
-        if (shape == 0) m = 0;
-        else if (shape == 1) m = d;
-        else if (shape == 2) m = bound(minFillSeed, d / 2 + 1, d);
+        if (shape == 0) m = MIN_PRINCIPAL; // the largest slack, now an explicit floor: a zero one fills whole only
+        else if (shape == 1) m = 0; // the zero sentinel, which resolves to `d`: all-or-nothing
+        else if (shape == 2) m = d; // the explicit whole-principal floor, the sentinel's stated twin
+        else if (shape == 3) m = bound(minFillSeed, d / 2 + 1, d);
         else m = bound(minFillSeed, MIN_PRINCIPAL, d / 2);
         uint256 low = lowSeed % 2 == 0 ? price : bound(lowSeed >> 1, (price * 9) / 10, price);
         vm.prank(MAKER);
         try ace.postOrder(id, d, low, price, m, 0, 0) returns (uint256 orderId) {
             _trackOrder(orderId);
-            if (m == 0) sentinelPosted++;
+            if (m == 0) {
+                sentinelPosted++;
+                zeroFloorPosted[orderId] = true;
+            }
+            if (m == d) wholeStatedPosted++;
         } catch {}
     }
 

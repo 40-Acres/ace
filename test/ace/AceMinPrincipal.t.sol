@@ -114,7 +114,7 @@ contract AceMinPrincipalTest is WarpClock {
         assertTrue(ace.isClosed(loanId), "and the old loan retired on it");
     }
 
-    /// @notice RED: an order under `minPrincipal` and a fill floor under it are refused at post; the zero sentinel resolves to it.
+    /// @notice RED: an order under `minPrincipal` and a fill floor under it are refused at post; the zero sentinel resolves to the whole principal.
     function test_RED_OrdersFloorAtMinPrincipal() public {
         uint256 mp = _mp();
         uint256 price = ace.idToMarketParams(id).price;
@@ -125,7 +125,7 @@ contract AceMinPrincipalTest is WarpClock {
         ace.postOrder(id, 4 * mp, price / 2, price, mp - 1, 7 days, 0);
         uint256 orderId = ace.postOrder(id, 4 * mp, price / 2, price, 0, 7 days, 0);
         vm.stopPrank();
-        assertEq(ace.orderOf(orderId).minFillPrincipal, mp, "the zero fill floor resolves to minPrincipal");
+        assertEq(ace.orderOf(orderId).minFillPrincipal, 4 * mp, "the zero fill floor resolves to the order's whole principal");
     }
 
     /// @notice CONTROL: an order of exactly `minPrincipal` posts, and its whole fill is a birth at exactly it.

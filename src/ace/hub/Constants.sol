@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 /// @title Constants
-/// @notice Everything the hub freezes at deploy: ACE's own take, and the envelope every market is created inside.
+/// @notice Everything the hub freezes at deploy: the ceiling on ACE's own take, and the envelope every market is created inside.
 /// @notice Nothing here is creator-set -- a creator dials `MarketParams`, and the rails say how far.
 /// @dev `MarketInit` enforces the rails; they live here so the whole immutable surface reads on one screen.
 /// @dev A rail loosens only on a ruling, and only before broadcast: immutability is permanent.
@@ -13,7 +13,7 @@ pragma solidity 0.8.36;
 library Constants {
     // ---- ACE's own take: uniform across every market, never creator-set ----
 
-    uint256 internal constant PROTOCOL_SHARE_BPS = 1000; // ACE's origination take, charged ON TOP of the lender's rate, never carved out of it
+    uint256 internal constant MAX_PROTOCOL_SHARE_BPS = 1000; // the most ACE's origination take can be; TREASURY sets the live share at or under it
     uint256 internal constant SECONDS_PER_YEAR = 365 days; // the period every market's rate is quoted per, leap years ignored: a rate is bps a year
     uint256 internal constant REBATE_PHI_BPS = 5000; // half the lender fee is refundable: a borrower pays the midpoint of term booked and used
     uint64 internal constant SWEEP_PERIOD = 1 days; // min spacing between keeper-crank sweeps: transfer count against dwell time
@@ -24,12 +24,13 @@ library Constants {
     uint256 internal constant MAX_PUSH_GAS = 250_000; // its ceiling: bounds a hostile quote's burn per push, and the limit every close carries
     uint256 internal constant PUSH_TAIL = 40_000; // the lender push's frame past its budget, 2x measured: a from-zero restore is 20k of it
     uint256 internal constant SWEEP_TAIL = 47_000; // the sweep's frame past its budget: its stamp, counter, restore and event, 2x measured
-    uint256 internal constant POLICY_TAIL = 300; // the roll-policy ask's gas between its floor check and its STATICCALL, warm target, 2x measured
+    uint256 internal constant POLICY_TAIL = 300; // a capped ask's gas between its floor check and its STATICCALL, warm target, 2x measured
 
-    // ---- the roll-policy ask: a fixed budget per deploy, railed here ----
+    // ---- the capped ask: a fixed budget per deploy, railed here, for the roll policy and a band-on settlement's price read ----
 
     uint256 internal constant MIN_POLICY_GAS = 50_000; // the budget's floor: a policy reading a record and two params needs well under it
-    uint256 internal constant MAX_POLICY_GAS = 500_000; // its ceiling: on a chain charging the whole limit, every extend and reuse ask carries it
+    uint256 internal constant MAX_POLICY_GAS = 500_000; // its ceiling: on a chain charging the whole limit, every capped ask carries it
+    uint64 internal constant SETTLE_DARK_GRACE = 3 days; // band on, how long past expiry a dark record holds both settle doors before they take the need
 
     // ---- genesis rails: the universal envelope, enforced by MarketInit ----
 

@@ -39,13 +39,13 @@ contract FairnessPriceMonotoneTest is FairnessHarness {
         }
     }
 
-    /// @notice #933's accepted residual, measured: a cranked loan's remainder settles at need at expiry, so its book loss is debt left times the gap to par.
-    /// @notice Just above the stop a lower print melts more debt, and the product turns: a higher print leaves the lender slightly shorter.
-    function test_Residual_933_BandOn_TheLenderShortfallTurnsNearTheStop() public {
+    /// @notice #933's at-tenor residual is CLOSED band on: a cranked loan's remainder settles at the record, so neither run leaves the lender short.
+    /// @notice Before, the remainder settled at the need and a lower print near the stop melted more debt, turning the product.
+    function test_F3_BandOn_NearTheStop_NeitherRunLeavesTheLenderShort() public {
         (Outcome memory a, Outcome memory b) = _shiftPair(Kind.BandOn, 6500, _flatAt(7250, 4), 200);
         assertTrue(a.sold > 0 && b.sold > 0, "fixture: both runs are cranked");
-        assertGt(_shortfall(b, Mark.End), _shortfall(a, Mark.End), "residual: the higher print leaves the band-on lender shorter near the stop");
-        emit log_named_decimal_uint("#933 residual: extra shortfall at the higher print", _shortfall(b, Mark.End) - _shortfall(a, Mark.End), 6);
+        assertEq(_shortfall(a, Mark.End), 0, "the lower print leaves the band-on lender whole at the end");
+        assertEq(_shortfall(b, Mark.End), 0, "and so does the higher one: the residual is closed");
     }
 
     /// @notice F3 for the borrower, band off and recordless: a higher path never leaves it worse off.

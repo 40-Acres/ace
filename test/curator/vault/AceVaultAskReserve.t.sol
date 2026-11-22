@@ -20,7 +20,7 @@ contract AceVaultAskReserveTest is AceVaultBaseRig {
     function setUp() public override {
         super.setUp();
         VaultConfig memory cfg = _cfg();
-        cfg.perfFeeBps = 1000; // the fee high-water is in maxMint's tail after the read
+        cfg.perfFeeBps = 1000; // a fee vault: maxMint's quote supply reads the fee high-water, before the product read
         (vault, terms) = _deploy(cfg, _pc(), _caps(UNCAPPED, 0, UNCAPPED));
         _lp(alice, LP_CASH);
         terms.setEntryCap(MockTerms.Mode.BurnGas, 5_000e6);

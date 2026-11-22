@@ -338,7 +338,7 @@ contract AceSettleDestinationsTest is WarpClock {
     }
 
     /// @notice Nobody else can take an unclaimed credit, and there is deliberately no reaper.
-    /// @dev A decade later, on an immutable hub with no admin, it is still the holder's.
+    /// @dev A decade later, on an immutable hub whose one admin power is the origination share, it is still the holder's.
     function test_UnclaimedCreditStrandsAndNobodyElseCanTakeIt() public {
         uint256 loanId = _openStd();
         coll.setBlocked(blockedHolder, true);

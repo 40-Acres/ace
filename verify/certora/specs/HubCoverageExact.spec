@@ -7,7 +7,7 @@
 //     bill of what it took, `ceil(ps * sold * (1e4 - eps) / (1e4 * S))`, and the cut is the floor of its share of that bill;
 //   - O54/O63 `aClosingCrankSellsTheSmallestLotThatPaysTheDebt`: a closing crank sold the fewest units whose bill covers the debt;
 //   - O15 `aCrankSellsOnlyAboveTheStop`: any crank that sold did so at a record price strictly over the trigger's stop level;
-//   - O50 `aSettlementSplitsTheLot`: settlement splits the lot into the keeper's sliver (its formula, exactly), the lender's
+//   - O50 `aSettlementSplitsTheLot*` (band off/on by door): settlement splits the lot into the keeper's sliver (its formula, exactly), the lender's
 //     pot (the need, or all the lot can pay) and the borrower's credit, losing and minting nothing.
 // O15 itself composes: the two crank rules here give the post-crank debt and lot, and CoverageMath.spec's
 // `aSoldUnitMeltsAtLeastTheDebtPerUnit` and `theTriggerFallsWithTheDebtPerUnit` give a trigger that never rises.
@@ -26,7 +26,7 @@
 methods {
     function FullMath.mulDiv(uint256 a, uint256 b, uint256 d) internal returns (uint256) => mulDivDownExact(a, b, d);
 
-    // the record's windowed minimum, RECORDED: the price the crank sized at, billed at and gated the stop on
+    // the record's windowed minimum for the verbs that read it with all gas, RECORDED; the crank reads `cappedPrice` below
     function Borrower.persistedPrice(HubCoverageHarness.Cfg memory) internal returns (uint256) => priceAsked();
     function Borrower.inDistress(HubCoverageHarness.Loan storage, HubCoverageHarness.Cfg memory) internal returns (bool) => NONDET;
     // the record's below-questions, on the one decoder both share: via-IR inlines `persistedBelowOrRevert` into `deleverage`
@@ -38,6 +38,8 @@ methods {
     // the coverage line RECORDED, still any answer: settlement's in-term cap is checked against the line the code asked
     function Borrower.coverageLine(HubCoverageHarness.Cfg memory c, uint256 debt, uint256 price) internal returns (uint256)
         => coverageLineAsked(c.p.minCoverageWad, c.unitScale, debt, price);
+    // THE ONE CAPPED PRICE READ (#944, #945): the crank's and a band-on settlement's, RECORDED, any answer; its gas floor is assumed met
+    function Borrower.cappedPrice(HubCoverageHarness.Cfg memory) internal returns (bool, uint256) => takeAsked();
 
     // the custodian, title and keeper calls, by selector; NO `unresolved` catch-all (see HubCoverage.spec)
     function _.mint(uint256, address) external => NONDET;
@@ -63,6 +65,19 @@ methods {
     function marketLastSweptAtOf(bytes32) external returns (uint64) envfree; // AceHarness
     function marketDeleverageOf(bytes32) external returns (uint256, uint256, uint256, uint256, uint256) envfree; // HubCoverageHarness
     function marketRecordOf(bytes32) external returns (address) envfree; // HubCoverageHarness
+}
+
+persistent ghost bool takeOk;
+persistent ghost uint256 takeWord;
+
+// the crank's price ghosts move with it: the crank rules read the one price it sized, billed and gated at
+function takeAsked() returns (bool, uint256) {
+    bool ok; uint256 w;
+    takeOk = ok;
+    takeWord = w;
+    priceAsks = priceAsks + 1;
+    priceSeen = w;
+    return (ok, w);
 }
 
 function mulDivDownExact(uint256 a, uint256 b, uint256 d) returns uint256 {
@@ -212,7 +227,8 @@ rule aCrankSellsOnlyAboveTheStop(env e, uint256 id, uint256 minStableOut, bytes 
 
 // O50: settlement splits the lot exactly. The keeper's sliver is `min(floor(debt * bps * S / (1e4 * price)), lot)`; the
 // lender's pot takes at least the claim's need `ceil(claim * S / price)` or all the lot past the sliver can pay. With a
-// record it takes exactly the ruled take capped at the lot past the sliver: inside the term the claim at the trigger,
+// record it takes exactly the ruled take capped at the lot past the sliver. Band on, the claim at the record's price,
+// ceiled, never under the need, at either door (#944, #945). Band off, inside the term the claim at the trigger,
 // ceil(lot * 1e18 / k), held between the need and the coverage line the settlement asked on the loan's own dials and
 // debt (RECORDED; its value is CoverageMath.spec's `theCoverageLineIsRequiredPlusOne`); from the expiry second the need.
 // The borrower is credited the rest. Nothing is lost or minted, whoever the keeper is.
@@ -221,7 +237,14 @@ rule aCrankSellsOnlyAboveTheStop(env e, uint256 id, uint256 minStableOut, bytes 
 // `aSettlementConservesTheLot` and `aSettlementPaysTheSliverAndTheNeed` hold for every value of an unconstrained `mulDiv`,
 // and CoverageMath.spec `theFloorsAndCeilsBindBothWays`, `theNeedIsTheClaimCeiled` and `theSliverIsTheDebtBountyFloored`
 // give their values under the floor.
-rule aSettlementSplitsTheLot(env e, uint256 id, bool viaFinalize) {
+// SPLIT four ways, band off or on by door, so each solves alone: the band-on take divides by a second free price,
+// and the one rule over both was UNKNOWN at 8 h on the deep split. The four together are the old rule's whole domain.
+rule aSettlementSplitsTheLotBandOffViaFinalize(env e, uint256 id) { settlementSplits(e, id, true, false); }
+rule aSettlementSplitsTheLotBandOffViaForceClose(env e, uint256 id) { settlementSplits(e, id, false, false); }
+rule aSettlementSplitsTheLotBandOnViaFinalize(env e, uint256 id) { settlementSplits(e, id, true, true); }
+rule aSettlementSplitsTheLotBandOnViaForceClose(env e, uint256 id) { settlementSplits(e, id, false, true); }
+
+function settlementSplits(env e, uint256 id, bool viaFinalize, bool bandOn) {
     liveLoanPremises(e, id);
     bytes32 m = loanMarket(id);
     address b = loanBorrowerOf(id);
@@ -236,6 +259,9 @@ rule aSettlementSplitsTheLot(env e, uint256 id, bool viaFinalize) {
     mathint owedB0 = unitsOwedOf(id, b);
     mathint owedK0 = unitsOwedOf(id, keeper);
     mathint asks0 = covAsks;
+    uint256 eps; uint256 band; uint256 target; uint256 stop; uint256 cut;
+    eps, band, target, stop, cut = marketDeleverageOf(m);
+    require bandOn == (band != 0);
     if (viaFinalize) {
         finalize(e, id);
     } else {
@@ -249,12 +275,23 @@ rule aSettlementSplitsTheLot(env e, uint256 id, bool viaFinalize) {
     mathint sliver = bounty < u0 ? bounty : u0;
     mathint afterSliver = u0 - sliver;
     bool inTerm = e.block.timestamp < exp0;
-    mathint atTrigger = (u0 * 10^18 + k - 1) / k;
-    mathint capped = atTrigger < to_mathint(covLine) ? atTrigger : to_mathint(covLine);
-    mathint take = inTerm ? (capped > need ? capped : need) : need;
-    assert marketRecordOf(m) != 0 && inTerm =>
+    // each variant encodes only its own take: a ternary still hands the solver the other branch's division
+    mathint take;
+    if (bandOn) {
+        // band on (#944, #945): the claim (the debt, O10) at the recorded price, ceiled; a word-overflowing claim takes the lot
+        bool priced = marketRecordOf(m) != 0 && takeOk && takeWord != 0;
+        mathint atRecord = takeWord == 0 ? 0 : (to_mathint(takeWord) <= (d0 * S()) / max_uint256 ? max_uint256 : (d0 * S() + takeWord - 1) / takeWord);
+        take = priced ? (atRecord > need ? atRecord : need) : need;
+    } else {
+        mathint atTrigger = (u0 * 10^18 + k - 1) / k;
+        mathint capped = atTrigger < to_mathint(covLine) ? atTrigger : to_mathint(covLine);
+        take = inTerm ? (capped > need ? capped : need) : need;
+    }
+    assert marketRecordOf(m) != 0 && inTerm && band == 0 =>
         covAsks > asks0 && covK == k && to_mathint(covS) == S() && to_mathint(covDebt) == d0 && covPrice <= p,
-        "a record-backed settlement inside the term did not cap at the coverage line of the loan's own dials and debt";
+        "a band-off record-backed settlement inside the term did not cap at the coverage line of the loan's own dials and debt";
+    assert band != 0 && marketRecordOf(m) != 0 && (!takeOk || takeWord == 0) => !inTerm,
+        "a band-on settlement moved value inside the term on a dark record";
     assert closedAtOf(id) != 0 && loanUnitsOf(id) == 0, "settlement left the loan live or holding units";
     assert keeper != b => dPot + dB + dK == u0, "settlement lost or minted units";
     assert keeper == b => dPot + dB == u0, "settlement lost or minted units";

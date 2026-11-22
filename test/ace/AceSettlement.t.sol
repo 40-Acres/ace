@@ -341,7 +341,7 @@ contract AceSettlementTest is WarpClock {
     /// @dev The escrow sits on the hub outside `totalCash`, so it is not part of this figure.
     function _lenderFee() internal pure returns (uint256) {
         uint256 fee = LoanMath.originationFee(4_500e6, ProtocolPolicy.MIN_TENOR, PocDeployConfig.LENDER_APR_BPS);
-        uint256 lender = fee - (fee * Constants.PROTOCOL_SHARE_BPS) / (10000 + Constants.PROTOCOL_SHARE_BPS);
+        uint256 lender = fee - (fee * Constants.MAX_PROTOCOL_SHARE_BPS) / (10000 + Constants.MAX_PROTOCOL_SHARE_BPS);
         return lender - (lender * Constants.REBATE_PHI_BPS) / 10000;
     }
 

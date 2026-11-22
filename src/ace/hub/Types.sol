@@ -128,7 +128,8 @@ struct Cfg {
     uint256 unitScale;
     address positionTitle; // the position collection
     address positionManager; // the ONE position manager, a hub immutable a library cannot read itself
-    uint256 policyGas; // the gas a roll-policy ask hands its callee, a hub value a library cannot read itself
+    uint256 policyGas; // the gas a capped ask (the roll policy, a band-on settlement's price) hands its callee, a hub value a library cannot read
+    uint256 protocolShareBps; // the live origination share, filled only by `_feeCache`; any other Cfg reads zero, which prices a fee with no protocol cut
 }
 
 /// @notice A terminal borrower loan. Loan ids are GLOBAL, so the loan carries its own market id.
@@ -156,7 +157,7 @@ struct Order {
     bool closed; // a flag, not an instant: no order path reads when it closed
     uint256 collateralUnits; // derived at post from the band's LOW end plus a fill slack; with that end at or under the market's price, a full take is covered
     uint256 principal;
-    uint256 minFillPrincipal; // the maker's floor on one fill; equal to principal IS all-or-nothing
+    uint256 minFillPrincipal; // the maker's floor on one fill, resolved at post; equal to principal IS all-or-nothing, which a zero post becomes
     uint256 liqHigh; // the highest trigger a fill may land at
     uint64 expiry; // zero NEVER expires: it reaches the open as a zero deadline, which means off
 }
@@ -216,6 +217,12 @@ struct Lenders {
     mapping(address lender => address policy) rollPolicyOf; // APPENDED: the contract a lender's extensions ask; zero consents to none
 }
 
+/// @notice The protocol's own word: the origination share TREASURY sets, under `MAX_PROTOCOL_SHARE_BPS`.
+/// @custom:storage-location erc7201:ace.storage.protocol
+struct Protocol {
+    uint256 shareBps;
+}
+
 /// @notice The hub's named storage: the ERC-7201 roots and the accessors over them, one home.
 /// @dev Each root is keccak256(abi.encode(uint256(keccak256(id)) - 1)) & ~bytes32(uint256(0xff)).
 /// @dev An accessor read costs what a state variable read did.
@@ -226,6 +233,8 @@ library Storage {
     bytes32 internal constant BOOK = 0x5967bc156a810f41a39d095ae4d338aca94a8ee479836018170c1fc64c743a00;
     // erc7201:ace.storage.lenders
     bytes32 internal constant LENDERS = 0x6bd405d8488bcf8aea88b86961ffb3be4d6d2f3e4b297dab758f37bb87f80c00;
+    // erc7201:ace.storage.protocol
+    bytes32 internal constant PROTOCOL = 0x715850d4bd55b3697bcd36ebd74d0933ac5ea4724483aa12ce3726a1b5ca2e00;
 
     /// @notice The id-keyed market ledger; `byId` is member 0, so the mapping sits AT the root.
     function markets() internal pure returns (mapping(bytes32 => Market) storage $) {
@@ -246,6 +255,14 @@ library Storage {
     /// @notice Every lender's pooled position, keyed by party and asset.
     function lenders() internal pure returns (Lenders storage $) {
         bytes32 slot = LENDERS;
+        assembly ("memory-safe") {
+            $.slot := slot
+        }
+    }
+
+    /// @notice The protocol's own word, the origination share.
+    function protocol() internal pure returns (Protocol storage $) {
+        bytes32 slot = PROTOCOL;
         assembly ("memory-safe") {
             $.slot := slot
         }

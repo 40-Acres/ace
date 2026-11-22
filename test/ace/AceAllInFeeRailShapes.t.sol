@@ -22,7 +22,7 @@ contract AceAllInFeeRailShapesTest is Test {
     MockStakeVault internal vault;
     MockPersistenceRecord internal record;
 
-    uint256 internal constant PS = Constants.PROTOCOL_SHARE_BPS;
+    uint256 internal constant PS = Constants.MAX_PROTOCOL_SHARE_BPS;
     uint256 internal constant RAIL = 71_672_727_272; // floor(2500 * 1e4 * 365 days / 11000): a rate times a term past it takes over a quarter
 
     uint64 internal constant EDGE_MIN_TENOR = 11 days;

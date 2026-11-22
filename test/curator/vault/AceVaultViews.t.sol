@@ -16,7 +16,7 @@ import {MockTerms} from "./MockTerms.sol";
 /// @dev The preview lives on `AceVaultLens`, which runs the door's own library checks on the vault's figures.
 contract AceVaultViewsTest is AceVaultBaseRig {
     uint256 internal constant VIEW_GAS = 5_000_000;
-    uint256 internal constant STOP_LINE = 23_000; // the plan's runtime ceiling for the base, in the profile this suite compiles under
+    uint256 internal constant STOP_LINE = 23_250; // the user-set runtime ceiling for the base, in the profile this suite compiles under
     IAceVaultLens internal lens;
 
     function setUp() public override {

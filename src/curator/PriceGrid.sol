@@ -6,8 +6,8 @@ import {TickBitmap} from "@uniswap/v4-core/src/libraries/TickBitmap.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 /// @title PriceGrid
-/// @notice The one price grid every vault door rounds onto: 50 ticks a step, about 0.5%, so nearby borrows share a market.
-/// @dev `down` is linked rather than inlined: the tick math is the heaviest code a vault would otherwise carry, and every door shares one copy.
+/// @notice The one price grid every vault rounds onto: 50 ticks a step, about 0.5%, so nearby borrows share a market.
+/// @dev `down` is linked rather than inlined: the tick math is the heaviest code a vault would otherwise carry, and all share one copy.
 library PriceGrid {
     int24 internal constant TICKS = 50; // the grid's step, about 0.5%
     uint256 internal constant Q96 = 1 << 96; // the hub's price frame

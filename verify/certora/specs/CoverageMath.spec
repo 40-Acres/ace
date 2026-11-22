@@ -406,3 +406,21 @@ rule aTriggerAtOrUnderThePriceMakesTheTakeCoverTheNeed(uint256 d, uint256 c, uin
     mathint atTrigger = (c * 10^18 + k - 1) / k;
     assert atTrigger >= collateralNeeded(d, price, require_uint256(S())), "the claim at the trigger fell under the need";
 }
+
+// THE BAND-ON TAKE (#944, #945): `_marketBound` takes `mulDivRoundingUp(claim, unitScale, ps)`, which is `collateralNeeded`
+// at the record's price `ps`. It is the debt's worth at `ps` plus at most one ceil atom: whole there, never a unit more.
+rule theTakeAtTheRecordIsTheDebtThereCeiled(uint256 d, uint256 ps) {
+    require d > 0 && d <= max_uint128 && ps > 0;
+    mathint take = collateralNeeded(d, ps, require_uint256(S()));
+    assert take * ps >= d * S(), "the take at the record is worth less than the debt there";
+    assert take <= (d * S()) / ps + 1, "the take at the record passed the debt there by more than one ceil atom";
+}
+
+// ... and it sits strictly under the coverage line at that same price, so a band-on seizure never takes units a withdrawal
+// gated at that record would have let the borrower take out (the claim is the debt, O10)
+rule theTakeAtTheRecordSitsUnderTheLineThere(uint256 d, uint256 ps, uint256 k) {
+    require d > 0 && d <= max_uint128 && ps > 0 && ps <= 2^224;
+    require k >= 105 * 10^16 && k <= 20 * 10^18;
+    assert collateralNeeded(d, ps, require_uint256(S())) < coverageLine(k, require_uint256(S()), d, ps),
+        "the take at the record reached the coverage line at the record";
+}

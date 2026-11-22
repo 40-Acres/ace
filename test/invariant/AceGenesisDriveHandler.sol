@@ -272,7 +272,7 @@ contract AceGenesisDriveHandler is WarpClock {
         p.lender = lenders[li];
         p.price = PriceFrame.priceAt(address(quoteTokens[qi]), address(collTokens[ci]), PRICE_OFFSETS[(seed >> 16) % 6]);
         p.minCoverageWad = bound(seed >> 24, 1.05e18, 20e18);
-        uint256 top = (Constants.MAX_FEE_SHARE_BPS * 10000 * Constants.SECONDS_PER_YEAR) / (uint256(p.maxTenor) * (10000 + Constants.PROTOCOL_SHARE_BPS));
+        uint256 top = (Constants.MAX_FEE_SHARE_BPS * 10000 * Constants.SECONDS_PER_YEAR) / (uint256(p.maxTenor) * (10000 + Constants.MAX_PROTOCOL_SHARE_BPS));
         p.lenderAprBps = bound(seed >> 32, 1, top + top / 10);
         p.minPrincipal = bound(seed >> 40, 1, 50 * quoteUnit(qi));
         p.settleBountyBps = bound(seed >> 72, 0, 200);

@@ -7,7 +7,7 @@ import {MockTerms} from "./MockTerms.sol";
 
 /// @title AceVaultStarvedEntryTest
 /// @notice `maxMint` answers zero, never reverts, on a gas budget an honest product answers on, when the product's entry cap burns or bombs its gas.
-/// @notice A burn leaves the caller only what the read holds back, and `maxMint` still reads the quote supply after it, a cold slot on a fee vault.
+/// @notice A burn leaves the caller only what the read holds back; `maxMint` reads the quote supply before it, so only arithmetic follows.
 /// @notice Read by a static call forwarding all gas, these rows were red at 40k, 60k and 80k and green from 120k.
 /// @dev On the tightest budget the reserve can leave an honest cap unasked, so `maxDeposit` may read under the cap there, as ERC-4626 permits.
 contract AceVaultStarvedEntryTest is AceVaultBaseRig {

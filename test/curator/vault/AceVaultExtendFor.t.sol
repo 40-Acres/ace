@@ -6,6 +6,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {WarpClock} from "../../utils/WarpClock.sol";
 import {AceFixtures} from "../../utils/AceFixtures.sol";
 import {AceReader} from "../../utils/AceReader.sol";
+import {AllInFeeSpec} from "../../utils/AllInFeeSpec.sol";
 import {IAceVaultLens, VaultLens} from "../../utils/VaultLens.sol";
 import {VaultSeed} from "../../utils/VaultSeed.sol";
 import {MockERC20} from "../../mocks/MockERC20.sol";
@@ -252,6 +253,23 @@ contract AceVaultExtendForTest is WarpClock {
         assertEq(c[3].holder, borrower, "and the holder");
         assertEq(c[3].expiry, _now() + TENOR, "after the hub's extend");
         assertEq(keccak256(c[2].data), keccak256(hex"c0ffee"), "the product's payload reaches its write calls");
+    }
+
+    /// @notice The door prices the hub's LIVE origination share: once the treasury moves it, a renewal still charges exactly the hub's fee.
+    /// @dev A door pricing the ceiling would quote over the hub's charge here and refuse `FeeMismatch`.
+    function test_TheDoorPricesTheHubsLiveShare() public {
+        uint256[2] memory shares = [uint256(0), 500];
+        for (uint256 i; i < shares.length; ++i) {
+            uint256 loanId = _loan();
+            vm.prank(AceFixtures.TREASURY);
+            ace.setProtocolShareBps(shares[i]);
+            MarketParams memory mp = ace.idToMarketParams(ace.loanMarket(loanId));
+            Loan memory l = read.loan(loanId);
+            uint256 fee = AllInFeeSpec.feeAllIn(read.debtOf(loanId), uint64(_now()) + l.tenor - l.expiry, mp.lenderAprBps, shares[i]);
+            _fund(borrower, fee);
+            vm.prank(borrower);
+            assertEq(dv.extendFor(loanId, fee, 0, "", ""), fee, "the door charges the hub's fee at the live share");
+        }
     }
 
     // ---- the refusals, in order ----

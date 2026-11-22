@@ -54,6 +54,8 @@ methods {
     function _.lenderByCollateral(address, address, address) external => DISPATCHER(true);
     function _.restingOf(bytes32) external => DISPATCHER(true);
     function _.deposit(bytes32, uint256) external => DISPATCHER(true);
+    function _.createMarket(VaultLivenessHarness.MarketParams) external => DISPATCHER(true);
+    function _.transferFrom(address f, address t, uint256 v) external with (env e) => moveFrom(e, calledContract, f, t, v) expect bool;
     function _.balanceOf(address a) external => cashBalance(calledContract, a) expect uint256;
     function _.approve(address s, uint256 v) external with (env e) => cashApprove(e, calledContract, s, v) expect bool;
     function _.allowance(address o, address s) external => cashAllowance(calledContract, o, s) expect uint256;
@@ -82,6 +84,19 @@ function cashAllowance(address c, address o, address s) returns uint256 {
 function cashApprove(env e, address c, address s, uint256 v) returns bool {
     if (c == token) {
         return token.approve(e, s, v);
+    }
+    bool b;
+    return b;
+}
+
+// VaultBoundary's `moveFrom`: the asset's or the title's own move, as the callee is.
+function moveFrom(env e, address c, address f, address t, uint256 v) returns bool {
+    if (c == token) {
+        return token.transferFrom(e, f, t, v);
+    }
+    if (c == title) {
+        title.transferFrom(e, f, t, v);
+        return true;
     }
     bool b;
     return b;

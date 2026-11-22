@@ -28,7 +28,7 @@ contract MainnetMultiPairRecordForkTest is Test {
         string memory key = vm.envOr("ALCHEMY_API_KEY", string(""));
         if (bytes(key).length == 0) return; // every test vm.skips on !live
         live = true;
-        uint256 blockNum = vm.envOr("ACE_FORK_BLOCK", uint256(25_717_936)); // the yb lifecycle's pin, so the RPC cache is shared
+        uint256 blockNum = vm.envOr("ACE_FORK_BLOCK", uint256(25_717_936)); // the other fork suites' pin, so the RPC cache is shared
         string memory url = string.concat("https://eth-mainnet.g.alchemy.com/v2/", key);
         if (blockNum == 0) vm.createSelectFork(url);
         else vm.createSelectFork(url, blockNum);

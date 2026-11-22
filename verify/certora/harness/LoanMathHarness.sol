@@ -34,4 +34,24 @@ contract LoanMathHarness {
     function feeFundable(uint256 lenderAprBps, uint64 tenor) external pure returns (bool) {
         return LoanMath.feeFundable(lenderAprBps, tenor);
     }
+
+    function originationFeeAt(uint256 principal, uint64 tenor, uint256 lenderAprBps, uint256 shareBps) external pure returns (uint256) {
+        return LoanMath.originationFee(principal, tenor, lenderAprBps, shareBps);
+    }
+
+    function protocolCutAt(uint256 fee, uint256 shareBps) external pure returns (uint256) {
+        return LoanMath.protocolCut(fee, shareBps);
+    }
+
+    function lenderCutAt(uint256 fee, uint256 shareBps) external pure returns (uint256) {
+        return LoanMath.lenderCut(fee, shareBps);
+    }
+
+    function escrowCutAt(uint256 fee, uint256 shareBps) external pure returns (uint256) {
+        return LoanMath.escrowCut(fee, shareBps);
+    }
+
+    function tickCutAt(uint256 fee, uint256 shareBps) external pure returns (uint256) {
+        return LoanMath.tickCut(fee, shareBps);
+    }
 }

@@ -41,7 +41,7 @@ library MarketInit {
     /// @dev What is proved is that each read ANSWERS: stronger than an ERC-165 declaration, weaker than a behavioural proof.
     /// @dev `supportsPair` alone admits a contract implementing nothing else, and settlement would then revert forever.
     /// @dev A zero or a false is the legitimate cold answer, so answering IS the test: creation never depends on feed uptime.
-    /// @dev Unscoped by the band: the interface IS these four reads, and `AceLens.inDistress` decodes distress raw on any recorded market.
+    /// @dev Unscoped by the band: the interface IS these four reads, and `AceLens.inDistress` asks distress on any recorded market.
     /// @dev Its own frame, so the four return decodes do not sit on the genesis function's stack.
     function _requireAnswers(address record, address quote, address collateral) private view {
         IPersistenceRecord(record).minPrice(quote, collateral);

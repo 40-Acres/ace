@@ -139,7 +139,30 @@ contract MockPersistenceRecord is IPersistenceRecord {
         shortAnswer = v;
     }
 
+    bool public burns; // when set, the windowed-min read BURNS every unit of gas it is handed: a record that never returns
+
+    /// @dev The fifth record shape: no answer within any budget, so only a capped ask survives it.
+    function setBurns(bool v) external {
+        burns = v;
+    }
+
+    uint256 public cost; // when set, the windowed-min read spends this much gas before it answers: a record over or under a budget
+
+    function setCost(uint256 v) external {
+        cost = v;
+    }
+
+    uint256 public needs; // when set, the windowed-min read answers zero unless it was handed at least this much gas
+
+    function setNeeds(uint256 v) external {
+        needs = v;
+    }
+
     function minPrice(address, address) external view returns (uint256) {
+        if (needs != 0 && gasleft() < needs) return 0;
+        while (burns && gasleft() > 0) {} // spins until the frame runs out of gas
+        uint256 g = gasleft();
+        while (cost != 0 && g - gasleft() < cost) {} // spends `cost` and then answers
         require(!sick, "record sick");
         if (shortAnswer) {
             assembly ("memory-safe") {

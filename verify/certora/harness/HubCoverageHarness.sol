@@ -5,6 +5,7 @@ import {Ace} from "../../../src/ace/hub/Ace.sol";
 import {Cfg, LenderUnresolved, Loan, Market, Storage} from "../../../src/ace/hub/Types.sol";
 import {LoanAccounting} from "../../../src/ace/hub/libraries/LoanAccounting.sol";
 import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
+import {Constants} from "../../../src/ace/hub/Constants.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 
 /// @title HubCoverageHarness
@@ -105,6 +106,11 @@ contract HubCoverageHarness is Ace {
     function marketDeleverageOf(bytes32 id) external view returns (uint256 eps, uint256 band, uint256 target, uint256 stop, uint256 cut) {
         Market storage M = Storage.markets()[id];
         return (M.p.deleverageFloorEpsBps, M.p.deleverageBandBps, M.p.deleverageTargetBps, M.p.deleverageStopBps, M.p.deleverageProtocolBps);
+    }
+
+    /// @notice How long past expiry a band-on market's dark record holds the settle doors.
+    function settleDarkGrace() external pure returns (uint256) {
+        return Constants.SETTLE_DARK_GRACE;
     }
 
     /// @notice One market's protocol revenue pot.

@@ -20,6 +20,10 @@
 // the debt, positive), O4 per loan (the pool's `lent` covers the claim), O5 (custody covers the units), and the rails.
 // `finalize` adds ONE MODEL PREMISE, which is the property's own condition: the record answers that distress has held for
 // the settle window (the record's below-question decoder, `_belowOrRevert`, answers yes).
+// BAND ON `finalize` also reads the record's price under the policy budget, and a DARK answer refuses until
+// `SETTLE_DARK_GRACE` past expiry: the one further refusal the rule admits. The read is summarized as any answer, never
+// reverting, and recorded in persistent ghosts so the assert sees what a reverted call read; its gas floor is assumed met,
+// as the push's is (HubBackstop.spec states `forceClose` the same way).
 
 using PositionManagerHarness as pm;
 using DummyERC20 as quoteToken;
@@ -30,7 +34,13 @@ methods {
     // the record's answer to the settle question: yes, the condition `finalizeMustExecute` is about. It sits on the one
     // decoder every below-question shares, because via-IR eliminates `persistedBelowSettleOrRevert`, its only caller being
     // `finalize`, and a summary on an eliminated function fails the run (verify/README.md). `repay` asks the record nothing.
-    function Borrower._belowOrRevert(HubCoverageHarness.Cfg memory, bytes memory) internal returns (bool) => settleSaysYes();
+    function Borrower._belowOrRevert(HubCoverageHarness.Cfg memory c, bytes memory data) internal returns (bool) => settleSaysYes();
+
+    // the band-on settlement's record read: any answer, never reverting, RECORDED; the gas floor before it is assumed met
+    function Borrower.cappedPrice(HubCoverageHarness.Cfg memory c) internal returns (bool, uint256) => readAsked();
+    function marketDeleverageOf(bytes32) external returns (uint256, uint256, uint256, uint256, uint256) envfree; // HubCoverageHarness
+    function loanExpiryOf(uint256) external returns (uint64) envfree; // HubCoverageHarness
+    function settleDarkGrace() external returns (uint256) envfree; // HubCoverageHarness: Constants.SETTLE_DARK_GRACE
 
     function closedAtOf(uint256) external returns (uint64) envfree; // AceHarness
     function loanMarket(uint256) external returns (bytes32) envfree;
@@ -89,6 +99,19 @@ function settleSaysYes() returns bool {
     return true;
 }
 
+// the band-on read, RECORDED in persistent ghosts so a reverted call still says what it read
+persistent ghost bool readSeen;
+persistent ghost bool readOk;
+persistent ghost uint256 readWord;
+
+function readAsked() returns (bool, uint256) {
+    bool ok; uint256 w;
+    readSeen = true;
+    readOk = ok;
+    readWord = w;
+    return (ok, w);
+}
+
 // the caller sends enough gas: every `gasleft()` read is held at or above the push's floor (HubBackstop.spec)
 persistent ghost uint256 pushFloor;
 hook GAS uint256 g {
@@ -143,10 +166,18 @@ rule aFullRepayMustExecute(env e, uint256 id, uint256 amount) {
 }
 
 // once the record says distress held for the settle window, finalize completes, and closes the loan
+// band on, a DARK price read may hold it until SETTLE_DARK_GRACE past expiry; a live read must still settle
 rule finalizeMustExecute(env e, uint256 id) {
     liveLoanScene(e, id);
-    require marketRecordOf(loanMarket(id)) != 0; // finalize opens only where a record is wired: a recordless loan settles at tenor
+    bytes32 m = loanMarket(id);
+    require marketRecordOf(m) != 0; // finalize opens only where a record is wired: a recordless loan settles at tenor
+    require !readSeen; // no read yet in this transaction
+    uint256 eps; uint256 band; uint256 target; uint256 stop; uint256 cut;
+    eps, band, target, stop, cut = marketDeleverageOf(m);
+    mathint graceEnd = to_mathint(loanExpiryOf(id)) + to_mathint(settleDarkGrace()); // read BEFORE the call: a later call resets lastReverted
     finalize@withrevert(e, id);
-    assert !lastReverted, "finalize refused a loan whose record said settle";
-    assert closedAtOf(id) != 0, "finalize returned without closing the loan";
+    bool refused = lastReverted;
+    bool darkWait = band != 0 && readSeen && (!readOk || readWord == 0) && to_mathint(e.block.timestamp) < graceEnd;
+    assert !refused || darkWait, "finalize refused a loan whose record said settle";
+    assert !refused => closedAtOf(id) != 0, "finalize returned without closing the loan";
 }

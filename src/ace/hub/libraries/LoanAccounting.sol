@@ -169,10 +169,11 @@ library LoanAccounting {
 
     /// @notice Book a draw's or an extension's fee: the protocol cut to revenue, the tick cut to `owed` and the escrow cut to the escrow.
     /// @dev Storage only: the caller moves the cash after this. The debt is never written here: a fee never enters it.
-    function bookFee(LoanBook storage B, Market storage M, uint256 id, uint256 fee) internal {
-        accrueProtocolFee(M, LoanMath.protocolCut(fee));
-        creditLenderShare(M, id, LoanMath.tickCut(fee));
-        B.feeEscrowOf[id] += LoanMath.escrowCut(fee);
+    /// @dev `shareBps` is the share the fee was priced at, so the split closes on the fee it splits.
+    function bookFee(LoanBook storage B, Market storage M, uint256 id, uint256 fee, uint256 shareBps) internal {
+        accrueProtocolFee(M, LoanMath.protocolCut(fee, shareBps));
+        creditLenderShare(M, id, LoanMath.tickCut(fee, shareBps));
+        B.feeEscrowOf[id] += LoanMath.escrowCut(fee, shareBps);
     }
 
     /// @dev Settlement earns the whole fee escrow: the lender bore the outcome, so none of it is refundable.

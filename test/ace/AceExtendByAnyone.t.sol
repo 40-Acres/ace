@@ -217,12 +217,16 @@ contract AceExtendByAnyoneTest is DrawMoreRig {
 
     /* ============================== #884, flipped ============================== */
 
-    /// @notice #884 flipped: the granted lender cannot keep an in-band loan crankable past its expiry, and the holder keeps book settlement.
-    /// @notice A 70,000 loan at a seventy percent trigger, the record at ninety percent of the price: in the band and not distressed.
+    /// @notice #884 flipped: the granted lender cannot extend a loan past its expiry under the price, and the holder keeps book settlement.
+    /// @notice A 70,000 loan at a seventy percent trigger, the record at ninety percent of the price, not distressed.
+    /// @dev On a BAND-OFF market, where settlement at expiry is still the need: band on it takes the debt at the record.
     function test_884_TheGrantedLenderCannotTakeTheBookSettlementAway() public {
-        _deposit(id, alice, 7 * P);
+        MarketParams memory p = _params(alice);
+        (p.deleverageFloorEpsBps, p.deleverageBandBps, p.deleverageTargetBps, p.deleverageStopBps, p.deleverageProtocolBps) = (0, 0, 0, 0, 0);
+        bytes32 bandOff = ace.createMarket(p);
+        _deposit(bandOff, alice, 7 * P);
         uint256 debt = 70_000e6;
-        uint256 loanId = _open(debt, TEN7, 7000);
+        uint256 loanId = _openIn(bandOff, borrower, debt, TEN7, 7000);
         vm.prank(borrower);
         ace.setCreditOperator(alice, true);
         uint256 v = FullMath.mulDiv(par, 9, 10);
@@ -241,8 +245,8 @@ contract AceExtendByAnyoneTest is DrawMoreRig {
         uint256 repayEq = FullMath.mulDiv(units, v, S) - debt;
         assertGt(FullMath.mulDiv(kept, v, S), repayEq, "PREMISE: under the price, settlement at book is the holder's best outcome");
         uint256 need = FullMath.mulDivRoundingUp(debt, S, par);
-        assertEq(kept + read.invPotOf(id, loanId) + read.unitsOwedOf(loanId, keeper), units, "the lot split three ways");
-        assertEq(read.invPotOf(id, loanId), need, "the lender took exactly the book need");
+        assertEq(kept + read.invPotOf(bandOff, loanId) + read.unitsOwedOf(loanId, keeper), units, "the lot split three ways");
+        assertEq(read.invPotOf(bandOff, loanId), need, "the lender took exactly the book need");
     }
 
     /// @notice #884 at or above the price: in the band the granted lender is refused `BufferBelowMin` in the loan's last second.

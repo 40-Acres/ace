@@ -39,7 +39,7 @@ contract AceMoneyPathTest is Test {
     address internal borrower = address(0xB0110);
 
     uint256 internal constant COLL = 10_000e18;
-    uint256 internal constant PROTOCOL_SHARE = Constants.PROTOCOL_SHARE_BPS;
+    uint256 internal constant PROTOCOL_SHARE = Constants.MAX_PROTOCOL_SHARE_BPS;
 
     function setUp() public {
         usdc = new MockERC20("USD Coin", "USDC", 6);

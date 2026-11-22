@@ -2,9 +2,12 @@
 //
 // `forceClose` is the one settle verb at tenor. From a loan's expiry second it settles the loan whatever the record, the
 // quote, the collateral, the lender or the treasury do, and only the caller's own gas limit can refuse it. It asks no roll
-// policy (Extend.spec `forceCloseAsksNoPolicy`) and calls no record: whether a record is WIRED is a param compare. Its
-// external calls are the custodian's `retireCustody`, the swallowed lender push and the best-effort revenue sweep. Nothing
-// else checks this: the fuzz handler swallows a refusal.
+// policy (Extend.spec `forceCloseAsksNoPolicy`). BAND ON (#944, #945) it reads the record's price under the policy budget,
+// and a DARK answer refuses until `SETTLE_DARK_GRACE` past expiry: that is the one refusal the rule admits, and a live
+// answer inside the grace must still settle. The read is summarized as any answer, never reverting, recorded in persistent
+// ghosts so the assert can see what a reverted call read; its gas floor is assumed met, as the push's is. Its other external calls are the custodian's
+// `retireCustody`, the swallowed lender push and the best-effort revenue sweep. Nothing else checks this: the fuzz handler
+// swallows a refusal.
 //
 // A LIVENESS rule, so every premise is a refusal the property allows or a fact about reachable states, and NO summary
 // may assume a call succeeds. That is why this spec is standalone rather than importing HubLoans.spec: an
@@ -40,7 +43,13 @@ methods {
     function marketTotalsOf(bytes32) external returns (uint256, uint256) envfree; // AceHarness
     function marketRailsOf(bytes32) external returns (uint256, uint256, uint256) envfree; // AceHarness
     function marketSettleBountyBpsOf(bytes32) external returns (uint256) envfree; // AceHarness
+    function marketBandBpsOf(bytes32) external returns (uint256) envfree; // AceHarness
     function marketLastSweptAtOf(bytes32) external returns (uint64) envfree; // AceHarness
+
+    function settleDarkGrace() external returns (uint256) envfree; // AceHarness: Constants.SETTLE_DARK_GRACE
+
+    // the band-on settlement's record read: any answer, never reverting, RECORDED; the gas floor before it is assumed met
+    function Borrower.cappedPrice(AceHarness.Cfg memory c) internal returns (bool, uint256) => readAsked();
     function marketUnsoldUnitsOf(bytes32) external returns (uint256) envfree; // AceHarness
     function marketPotCountsOf(bytes32) external returns (uint256, uint256) envfree; // AceHarness
     function notEntered() external returns (bool) envfree;
@@ -73,6 +82,19 @@ function mulDivUpChecked(uint256 a, uint256 b, uint256 d) returns uint256 {
     return require_uint256(r);
 }
 
+// the band-on read, RECORDED in persistent ghosts so a reverted call still says what it read
+persistent ghost bool readSeen;
+persistent ghost bool readOk;
+persistent ghost uint256 readWord;
+
+function readAsked() returns (bool, uint256) {
+    bool ok; uint256 w;
+    readSeen = true;
+    readOk = ok;
+    readWord = w;
+    return (ok, w);
+}
+
 // THE ONE ALLOWED REFUSAL is a caller whose gas limit leaves less than the push's floor (`PushGasShort`). The prover
 // reads `gasleft()` as arbitrary, so every read is held at or above that floor: a caller who sends enough gas.
 persistent ghost uint256 pushFloor;
@@ -89,6 +111,7 @@ rule forceCloseMustExecute(env e, uint256 id) {
     require to_mathint(e.block.timestamp) >= to_mathint(loanExpiryOf(id));
     require e.block.timestamp > 0 && e.block.timestamp < 2^64;     // the chain's clock: a close stamps a nonzero uint64
     bytes32 m = loanMarket(id);
+    require !readSeen; // no read yet in this transaction
     // SCAFFOLDING, each to be replaced by a proven fact before this rule counts:
     require loanClaimOf(id) == loanDebtOf(id) && loanDebtOf(id) > 0; // O10: the claim is the debt, and positive
     require marketLentOf(m) >= loanClaimOf(id);                      // O4 per loan: the pool's lent covers the claim
@@ -110,7 +133,13 @@ rule forceCloseMustExecute(env e, uint256 id) {
     require loanPotOf(id) < 2^254 && marketUnsoldUnitsOf(m) < 2^254 && unsoldPots < 2^127 && settledPots < 2^127;
     // THE CLOCK again, for the sweep: every stamp is a past block's, and no chain's timestamp is within a period of 2^64
     require to_mathint(marketLastSweptAtOf(m)) + 86400 < 2^64;
+    bool bandOn = marketBandBpsOf(m) != 0; // read BEFORE the call: a later call resets lastReverted
+    mathint graceEnd = to_mathint(loanExpiryOf(id)) + to_mathint(settleDarkGrace());
     forceClose@withrevert(e, id);
-    assert !lastReverted, "forceClose refused a matured loan";
-    assert closedAtOf(id) != 0, "forceClose returned without closing the loan";
+    bool refused = lastReverted;
+    // THE ONE ALLOWED WAIT: a band-on market whose record read DARK holds the door until SETTLE_DARK_GRACE past expiry; a
+    // live read inside the grace must still settle
+    bool darkWait = bandOn && readSeen && (!readOk || readWord == 0) && to_mathint(e.block.timestamp) < graceEnd;
+    assert !refused || darkWait, "forceClose refused a matured loan";
+    assert !refused => closedAtOf(id) != 0, "forceClose returned without closing the loan";
 }

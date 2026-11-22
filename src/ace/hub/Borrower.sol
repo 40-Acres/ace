@@ -152,7 +152,7 @@ library Borrower {
     {
         _preChecks(c, a);
         _gateCheck(c, a);
-        uint256 fee = LoanMath.originationFee(a.principal, a.tenor, c.p.lenderAprBps);
+        uint256 fee = LoanMath.originationFee(a.principal, a.tenor, c.p.lenderAprBps, c.protocolShareBps);
         _payoutCheck(c, a, fee);
         id = _record(B, c, a, fee);
 
@@ -178,8 +178,9 @@ library Borrower {
     /// @dev The refundable half never reaches the pool, so no share prices revenue the term has not earned.
     /// @dev `Funded` is logged HERE rather than in `_fund`, because this is the frame that holds the payee.
     function _splitAndDraw(LoanBook storage B, Market storage M, Cfg memory c, OpenArgs memory a, uint256 id, uint256 fee, uint256 recycle) private {
-        B.feeEscrowOf[id] = LoanMath.escrowCut(fee);
-        _fundAndCheck(M, c, B.loans[id], id, a.principal, LoanMath.tickCut(fee), LoanMath.protocolCut(fee), a.bnd.minBufferWad, recycle);
+        uint256 shareBps = c.protocolShareBps;
+        B.feeEscrowOf[id] = LoanMath.escrowCut(fee, shareBps);
+        _fundAndCheck(M, c, B.loans[id], id, a.principal, LoanMath.tickCut(fee, shareBps), LoanMath.protocolCut(fee, shareBps), a.bnd.minBufferWad, recycle);
         emit Funded(id, a.principal, a.payee);
     }
 
@@ -249,8 +250,8 @@ library Borrower {
     function previewOpen(Market storage M, Cfg memory c, OpenArgs memory a) public view returns (Quote memory q) {
         _preChecks(c, a);
         _gateCheck(c, a); // the same position `open` runs it in: after every local refusal, before the draw
-        q.fee = LoanMath.originationFee(a.principal, a.tenor, c.p.lenderAprBps);
-        q.protocolFee = LoanMath.protocolCut(q.fee);
+        q.fee = LoanMath.originationFee(a.principal, a.tenor, c.p.lenderAprBps, c.protocolShareBps);
+        q.protocolFee = LoanMath.protocolCut(q.fee, c.protocolShareBps);
         q.payout = _payoutCheck(c, a, q.fee);
 
         q.postDrawFloor = _previewFloor(M, c, a.principal);
@@ -373,7 +374,7 @@ library Borrower {
         bytes4 reason;
         (reason, fee) = _extendable(B, c, id, minBufferWad, data, msg.sender);
         _raise(reason);
-        _applyExtension(B, M, id, fee);
+        _applyExtension(B, M, id, fee, c.protocolShareBps);
         Transfers.pullQuotePermit(c, msg.sender, fee, permit2); // balance-checked; after every write, as `repay` pulls
     }
 
@@ -416,7 +417,7 @@ library Borrower {
         e.newExpiry = uint64(block.timestamp) + B.loans[id].tenor;
         bad = _extendLegs(c, e);
         if (bad != bytes4(0)) return (bad, 0);
-        fee = LoanMath.originationFee(e.debt, e.newExpiry - e.expiry, c.p.lenderAprBps);
+        fee = LoanMath.originationFee(e.debt, e.newExpiry - e.expiry, c.p.lenderAprBps, c.protocolShareBps);
         bad = _recordLeg(c, e, minBufferWad);
         if (bad != bytes4(0)) return (bad, 0);
         if (!_askPolicy(c, e, data)) return (PolicyRefused.selector, 0);
@@ -468,10 +469,10 @@ library Borrower {
     /// @dev The extension's writes: earn the escrow and re-anchor the term at now, book the cash fee, bump the draw counter, and log the time added.
     /// @dev The counter moves because the lender's position did, as at a draw: it is a lender contract's change detector.
     /// @dev So the holder or its title operator can bump it once a second a loan for an atom's fee, a stranger once in three quarters of a tenor.
-    function _applyExtension(LoanBook storage B, Market storage M, uint256 id, uint256 fee) private {
+    function _applyExtension(LoanBook storage B, Market storage M, uint256 id, uint256 fee, uint256 shareBps) private {
         uint64 expiry = B.loans[id].expiry;
         LoanAccounting.respread(B, M, id);
-        LoanAccounting.bookFee(B, M, id, fee);
+        LoanAccounting.bookFee(B, M, id, fee, shareBps);
         M.s.drawCount++;
         uint64 newExpiry = B.loans[id].expiry;
         emit Extended(id, newExpiry - expiry, newExpiry, fee, msg.sender);
@@ -512,7 +513,7 @@ library Borrower {
         _raise(bad);
         Loan storage L = B.loans[id];
         LoanAccounting.reanchor(B, M, id);
-        LoanAccounting.bookFee(B, M, id, fee);
+        LoanAccounting.bookFee(B, M, id, fee, c.protocolShareBps);
         _takeCash(M, amount);
         M.claim[id] += amount;
         LoanAccounting.addLent(M, amount);
@@ -559,7 +560,7 @@ library Borrower {
         if (amount < c.p.minPrincipal) return (BelowMinPrincipal.selector, 0, 0);
         if (!gateAdmits(c.p.borrower, L.borrower)) return (GateRefused.selector, 0, 0);
         term = L.expiry - uint64(block.timestamp);
-        fee = LoanMath.originationFee(amount, term, c.p.lenderAprBps);
+        fee = LoanMath.originationFee(amount, term, c.p.lenderAprBps, c.protocolShareBps);
         bytes4 bad = _drawLegs(M, c, L, amount, fee, bnd);
         if (bad != bytes4(0)) return (bad, 0, 0);
         return (bytes4(0), fee, term);
@@ -747,7 +748,7 @@ library Borrower {
     /// @dev Every term is the SAME token, which `refinance`'s quote rail establishes before any state moves.
     /// @return out The net out, for `refinance` to pay after the release.
     function _net(Cfg memory cd, MigrateArgs memory a, uint256 debtOld, uint256 refundOld) private pure returns (uint256 out) {
-        uint256 feeNew = LoanMath.originationFee(a.newPrincipal, a.newTenor, cd.p.lenderAprBps);
+        uint256 feeNew = LoanMath.originationFee(a.newPrincipal, a.newTenor, cd.p.lenderAprBps, cd.protocolShareBps);
         uint256 credit = a.newPrincipal - feeNew + refundOld; // `_openNew` already ran `_payoutCheck` on this pair, so the fee cannot exceed it
         if (credit < debtOld) revert DrawBelowDebt(); // repay the gap first, then refinance, in one multicall
         out = credit - debtOld;
@@ -797,6 +798,15 @@ library Borrower {
         (bool ok, uint256 word) = Probe.askWord(c.p.record, data);
         if (!ok) revert RecordUnreadable();
         return word;
+    }
+
+    /// @notice THE capped read of the windowed minimum, ONE for the crank and a band-on settlement, so both clear the debt at one price.
+    /// @dev Under `policyGas`: a record over the budget is DARK to both, never sold at by the crank while settlement cannot read it.
+    /// @dev `answered` false is no answer, `RecordUnreadable` (a revert, a short return, no code, a burned budget); an answered zero is `NoRecordPrice`.
+    /// @dev A limit that cannot hand the record the whole budget reverts `RecordGasShort`, so no caller can starve the read dark.
+    function cappedPrice(Cfg memory c) internal view returns (bool answered, uint256 price) {
+        bytes memory data = abi.encodeCall(IPersistenceRecord.minPrice, (c.p.quote, c.p.collateral));
+        return Probe.askWordCapped(c.p.record, data, c.policyGas);
     }
 
     /// @dev persistedPrice() that reports an unusable record instead of reverting.

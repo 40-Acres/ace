@@ -13,7 +13,7 @@ import {AllInFeeSpec} from "../utils/AllInFeeSpec.sol";
 /// @dev a test that asked `LoanMath` what `LoanMath` computes would compare the code to itself.
 /// @dev THE RAIL IS `1e4 * rate * maxTenor * (10000 + PS) <= 2500 * 1e8 * 365 days`; the rate is bps a year.
 contract AceAllInFeeArithmeticTest is Test {
-    uint256 internal constant PS = Constants.PROTOCOL_SHARE_BPS;
+    uint256 internal constant PS = Constants.MAX_PROTOCOL_SHARE_BPS;
 
     /// @dev The minimum-slack pair: rate 10 bps a year over 28,669,090,909 seconds.
     /// @dev Its slack `D' - N'` is 10000, which is the SMALLEST a pair can have (see the quantisation test).

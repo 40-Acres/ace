@@ -6,10 +6,12 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
+import {IAceProtocolShare} from "../../interfaces/IAceProtocolShare.sol";
 
 /// @title RevenueRouter
 /// @notice The hub's fixed revenue destination: an owned pointer to a sink, and a permissionless sweep to it.
-/// @notice The owner can redirect all future protocol revenue until it renounces; renouncing makes the sink final.
+/// @notice It is also each bound hub's treasury, so its owner alone sets that hub's origination share, at or under 10%.
+/// @notice The owner can redirect all future protocol revenue until it renounces; renouncing makes the sink and every share final.
 /// @dev The hub pays in with a plain ERC-20 transfer, so nothing here runs on the way in and there is no ledger.
 /// @dev ERC-20 only: no receive or fallback, so ETH is refused rather than stranded.
 /// @dev The inherited ownership verbs carry no guard: each only writes owner storage and calls nothing out.
@@ -35,6 +37,15 @@ contract RevenueRouter is Ownable2Step, ReentrancyGuardTransient {
     /// @param s The new sink.
     function setSink(address s) external onlyOwner nonReentrant {
         _setSink(s);
+    }
+
+    /// @notice Set `hub`'s origination share; the hub takes it only from its own treasury, and refuses one over its ceiling.
+    /// @dev The hub is named because one router serves many; the hub's `ProtocolShareSet` is the record, so none is emitted here.
+    /// @dev `onlyOwner` runs before the guard, so a non-owner's call reverts by name even inside a static call.
+    /// @param hub The hub to set.
+    /// @param shareBps The new share, in bps of the lender fee.
+    function setProtocolShareBps(address hub, uint256 shareBps) external onlyOwner nonReentrant {
+        IAceProtocolShare(hub).setProtocolShareBps(shareBps);
     }
 
     /// @notice Send each listed token's whole balance to the sink.

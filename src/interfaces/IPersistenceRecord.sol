@@ -32,6 +32,8 @@ interface IPersistenceRecord {
 
     /// @notice Minimum price observed over the DISTRESS window; 0 when the record cannot answer over it.
     /// @dev Wick-spoof resistant: the draw cap and the deleverage floor size off what HELD, never off a print.
-    /// @dev THE ONE NUMBER a decline sale turns on once the band admits it: it must clear the stop, sizes the sale, and IS the floor the keeper pays.
+    /// @dev In a band-on market THE ONE NUMBER the debt clears at: a sale must clear the stop at it, is sized at it and paid at it, less eps.
+    /// @dev Title transfer there takes the debt's worth at it too, at both settle doors, so a low answer seizes more and a spot answer is the caller's moment.
+    /// @dev OBLIGATION: answer within the hub's policy budget (`Ace.POLICY_GAS`) read cold, or a band-on market settles at the need after a grace.
     function minPrice(address quote, address collateral) external view returns (uint256);
 }

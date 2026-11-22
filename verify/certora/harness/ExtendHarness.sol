@@ -49,9 +49,14 @@ contract ExtendHarness is Ace {
     }
 
     /// @notice The origination fee market `m` charges on `debt` for `added` seconds, as the hub prices an extension.
-    /// @dev `LoanMath.originationFee` on the market's stored rate a year, unsummarized past the spec's mulDiv.
+    /// @dev `LoanMath.originationFee` on the market's stored rate a year at the hub's live share, unsummarized past the spec's mulDiv.
     function originationFeeOf(bytes32 m, uint256 debt, uint64 added) external view returns (uint256) {
-        return LoanMath.originationFee(debt, added, Storage.markets()[m].p.lenderAprBps);
+        return LoanMath.originationFee(debt, added, Storage.markets()[m].p.lenderAprBps, Storage.protocol().shareBps);
+    }
+
+    /// @notice The hub's treasury, the one address that may set the origination share.
+    function treasuryOf() external view returns (address) {
+        return TREASURY;
     }
 
     /// @notice The origination fee a loan's own open charged, as `_record` stored it.
@@ -127,18 +132,18 @@ contract ExtendHarness is Ace {
         return bytes32(IRollPolicy.admitsExtension.selector);
     }
 
-    /// @notice The protocol's share of a fee.
-    function protocolCut(uint256 fee) external pure returns (uint256) {
-        return LoanMath.protocolCut(fee);
+    /// @notice The protocol's share of a fee, at the hub's live share.
+    function protocolCut(uint256 fee) external view returns (uint256) {
+        return LoanMath.protocolCut(fee, Storage.protocol().shareBps);
     }
 
-    /// @notice The refundable escrow share of a fee.
-    function escrowCut(uint256 fee) external pure returns (uint256) {
-        return LoanMath.escrowCut(fee);
+    /// @notice The refundable escrow share of a fee, at the hub's live share.
+    function escrowCut(uint256 fee) external view returns (uint256) {
+        return LoanMath.escrowCut(fee, Storage.protocol().shareBps);
     }
 
-    /// @notice The lender's at-once share of a fee.
-    function tickCut(uint256 fee) external pure returns (uint256) {
-        return LoanMath.tickCut(fee);
+    /// @notice The lender's at-once share of a fee, at the hub's live share.
+    function tickCut(uint256 fee) external view returns (uint256) {
+        return LoanMath.tickCut(fee, Storage.protocol().shareBps);
     }
 }

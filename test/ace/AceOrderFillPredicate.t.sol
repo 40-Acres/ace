@@ -224,6 +224,14 @@ contract AceFillPredicateOrderLegsTest is AceFillPredicateBase {
         _bothRefuse(orderId, small, _proRata(o, small), FillBelowMin.selector, "under the maker's fill floor");
     }
 
+    /// @notice Leg 3 on a DEFAULT order: a zero floor resolves to the whole principal, so both doors refuse a partial fill.
+    function test_tryFillOrder_APartialFillOfADefaultOrder_NamesFillBelowMin() public {
+        uint256 orderId = _post(P, LIQ, LIQ_HIGH, 0, TEN, _far());
+        Order memory o = ace.orderOf(orderId);
+        _bothRefuse(orderId, MINFILL, _proRata(o, MINFILL), FillBelowMin.selector, "a default order takes only the whole fill");
+        _bothAdmit(orderId, o.principal, o.collateralUnits);
+    }
+
     /// @notice Leg 4: more collateral per unit of principal than the order's own posted ratio, by one unit.
     function test_tryFillOrder_OverCollateralized_NamesFillOverCollateralized() public {
         uint256 orderId = _postDefault();

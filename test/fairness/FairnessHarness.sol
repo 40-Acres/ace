@@ -18,7 +18,8 @@ abstract contract FairnessHarness is ExtendRig {
     enum Kind {
         BandOff,
         BandOn,
-        Recordless
+        Recordless,
+        BandOnNoCut // the band-on market with no protocol cut on a restore, the case most markets run
     }
 
     enum Act {
@@ -78,17 +79,23 @@ abstract contract FairnessHarness is ExtendRig {
 
     bytes32 internal bandOff;
     bytes32 internal recordless;
+    bytes32 internal bandOnNoCut;
 
     function setUp() public virtual override {
         super.setUp();
         bandOff = ace.createMarket(_classParams(Kind.BandOff));
         recordless = ace.createMarket(_classParams(Kind.Recordless));
+        bandOnNoCut = ace.createMarket(_classParams(Kind.BandOnNoCut));
     }
 
     /// @notice The rig's params for one class: the band-on market is the rig's own, the others zero the band and, recordless, the record.
     function _classParams(Kind k) internal view returns (MarketParams memory p) {
         p = _params(alice);
         if (k == Kind.BandOn) return p;
+        if (k == Kind.BandOnNoCut) {
+            p.deleverageProtocolBps = 0;
+            return p;
+        }
         (p.deleverageFloorEpsBps, p.deleverageBandBps, p.deleverageTargetBps) = (0, 0, 0);
         (p.deleverageStopBps, p.deleverageProtocolBps) = (0, 0);
         if (k == Kind.Recordless) p.record = address(0);
@@ -96,6 +103,7 @@ abstract contract FairnessHarness is ExtendRig {
 
     function _mid(Kind k) internal view returns (bytes32) {
         if (k == Kind.BandOn) return id;
+        if (k == Kind.BandOnNoCut) return bandOnNoCut;
         return k == Kind.BandOff ? bandOff : recordless;
     }
 
@@ -201,7 +209,7 @@ abstract contract FairnessHarness is ExtendRig {
     /// @notice The keeper after one print: a deleverage crank where the band is on, then a settlement attempt.
     function _keepStep(Run memory r, Outcome memory o, uint256 px) internal {
         if (_closed(o.loanId)) return;
-        if (r.kind == Kind.BandOn && !r.noCranks) _crank(o);
+        if ((r.kind == Kind.BandOn || r.kind == Kind.BandOnNoCut) && !r.noCranks) _crank(o);
         if (_closed(o.loanId)) {
             o.settlePx = px;
             return;
@@ -284,6 +292,13 @@ abstract contract FairnessHarness is ExtendRig {
         uint256 sliver = FullMath.mulDiv(debt * BOUNTY, S, 10000 * par);
         if (sliver > lot) sliver = lot;
         return take < lot - sliver ? take : lot - sliver;
+    }
+
+    /// @notice F2.3b's ruled bound on what a crank melting `melt` of `debt` may cost the borrower: the eps-and-cut haircut, plus `debt / 1e4` of dust.
+    /// @dev The rig's eps is 100 bps; its cut is 500 bps, or none on the no-cut market.
+    function _feeBound(uint256 melt, uint256 debt, Kind k) internal pure returns (uint256) {
+        uint256 cutBps = k == Kind.BandOnNoCut ? 0 : 500;
+        return melt * 1e8 / ((10000 - 100) * (10000 - cutBps)) - melt + debt / 1e4;
     }
 
     /// @notice The borrower's wealth at the path's last price.

@@ -16,7 +16,7 @@ import {AceReader} from "../utils/AceReader.sol";
 /// @title AcePermit2Fork
 /// @notice The Permit2 flows against CANONICAL Permit2 and real USDC on a mainnet fork.
 /// @notice This is the proof the mock cannot give: real domain, real nonce bitmap, real spender binding.
-/// @dev Skipped cleanly when ALCHEMY_API_KEY is absent, exactly as the YB lifecycle fork suite is.
+/// @dev Skipped cleanly when ALCHEMY_API_KEY is absent, as every fork suite here is.
 contract AcePermit2ForkTest is WarpClock {
     address internal constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
     address internal constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;

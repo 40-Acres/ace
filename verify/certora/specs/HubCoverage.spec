@@ -10,8 +10,8 @@
 //     price the line is the max sentinel (`requiredAtIsTheCoverageCeiled`), the need and the sliver fall with the debt
 //     (`theNeedAndSliverFallWithTheDebt`), and a sale inside `securedBase` keeps them (`aSaleWithinTheSecuredBaseKeepsTheCover`).
 //   - THE WIRING, here: which lot, which debt and which price each door compares, and that nothing else moves them.
-//     `loanLotAndDebtMoveOnlyThroughGatedVerbs` says no verb but a withdrawal and a deleverage lowers a live loan's lot or
-//     raises its debt. `aWithdrawalLeavesTheLotOnTheCoverageLine`, `aBirthOpensOnTheCoverageLine` and
+//     `loanLotAndDebtMoveOnlyThroughGatedVerbs` says no verb but a withdrawal, a deleverage and a top-up lowers a live loan's
+//     lot or raises its debt. `aWithdrawalLeavesTheLotOnTheCoverageLine`, `aTopUpLeavesTheLotOnTheCoverageLine`, `aBirthOpensOnTheCoverageLine` and
 //     `aRefinanceLeavesTheSuccessorOnTheCoverageLine` say each door compares the lot it leaves with the line at the loan's
 //     own debt, its own market's dials and a price at or under that market's price. `aRestoreSellsOnlyTheSecuredBase`
 //     says a crank that leaves the loan live takes at most what `securedBase` allowed.
@@ -44,15 +44,18 @@ methods {
 
     // the read-only gates, "returns anything, never reverts": a superset of every real behaviour of a view
     function Borrower.tryRecordState(HubCoverageHarness.Cfg memory) internal returns (bool, HubCoverageHarness.RecordState, uint256) => NONDET;
-    function Borrower._admissibleLeg(HubCoverageHarness.Cfg memory, uint256, uint256, uint256, uint256) internal returns (bytes4) => NONDET;
+    // `_admissibleLeg` is NOT summarized: it is pure, its line is the recorded one above, and a top-up's gate is its body
     function Probe.askBool(address, bytes memory, uint256, bytes32) internal returns (bool) => NONDET;
+    // THE ONE CAPPED PRICE READ (#944, #945), RECORDED and answering anything: the crank sizes, gates and bills at it and a
+    // band-on settlement takes the claim at it. Its floor check is assumed met (sufficient gas): a starved caller reverts.
+    function Borrower.cappedPrice(HubCoverageHarness.Cfg memory) internal returns (bool, uint256) => takeAsked();
     function Borrower._preChecks(HubCoverageHarness.Cfg memory, Borrower.OpenArgs memory) internal => NONDET;
     function Borrower._gateCheck(HubCoverageHarness.Cfg memory, Borrower.OpenArgs memory) internal => NONDET;
     function Borrower._payoutCheck(HubCoverageHarness.Cfg memory, Borrower.OpenArgs memory, uint256) internal returns (uint256) => NONDET;
     function Borrower._gate(uint256, uint256, uint256) internal returns (uint256) => NONDET;
     // `Borrower.triggerPrice` is NOT summarized: the crank's stop gate reads it, and `aCrankSellsOnlyAboveTheStopLevel`
     // compares that gate with the harness's `stopLevelOf`, which reads it too. The record's windowed minimum is RECORDED and
-    // answers anything: the price the crank gated, sized and billed at.
+    // answers anything, for the verbs that read it with all gas; the crank reads it through `cappedPrice` above.
     function Borrower.persistedPrice(HubCoverageHarness.Cfg memory) internal returns (uint256) => priceAsked();
     function Borrower.inDistress(HubCoverageHarness.Loan storage, HubCoverageHarness.Cfg memory) internal returns (bool) => NONDET;
     // the record's below-questions, on the one decoder both share: via-IR inlines `persistedBelowOrRevert` into `deleverage`
@@ -100,6 +103,21 @@ function priceAsked() returns uint256 {
     return p;
 }
 
+persistent ghost mathint takeAsks;
+persistent ghost bool takeOk;
+persistent ghost uint256 takeWord;
+
+// the crank's price ghosts move with it, so the crank rules read the one price it sized, billed and gated at
+function takeAsked() returns (bool, uint256) {
+    bool ok; uint256 w;
+    takeAsks = takeAsks + 1;
+    takeOk = ok;
+    takeWord = w;
+    priceAsks = priceAsks + 1;
+    priceSeen = w;
+    return (ok, w);
+}
+
 // ---- the coverage line, recorded. PERSISTENT, so no call between the gate and the assert can erase it ----
 
 persistent ghost mathint covAsks;
@@ -145,10 +163,11 @@ function scene(env e) {
 
 definition notAGatedVerb(method f) returns bool =
     f.selector != sig:withdrawCollateral(uint256,uint256,address).selector
-    && f.selector != sig:deleverage(uint256,uint256,bytes).selector;
+    && f.selector != sig:deleverage(uint256,uint256,bytes).selector
+    && f.selector != sig:drawMore(uint256,uint256,HubCoverageHarness.OpenBounds).selector;
 
-// THE EULER CLASS: outside a withdrawal and a deleverage, no verb lowers a loan's lot or raises its debt while it stays
-// live. A new verb that does fails here, whatever else it does. A birth is outside it: a fresh id was never live.
+// THE EULER CLASS: outside a withdrawal, a deleverage and a top-up, no verb lowers a loan's lot or raises its debt while it
+// stays live. A new verb that does fails here, whatever else it does. A birth is outside it: a fresh id was never live.
 rule loanLotAndDebtMoveOnlyThroughGatedVerbs(env e, method f, calldataarg args, uint256 id)
     filtered { f -> freshIdVerb(f) && notAGatedVerb(f) }
 {
@@ -171,6 +190,15 @@ rule aWithdrawalLeavesTheLotOnTheCoverageLine(env e, uint256 id, uint256 units, 
     withdrawCollateral(e, id, units, to);
     assert covAsks == 1, "a withdrawal asked no coverage line";
     assert live(id) && onItsOwnLine(id), "a withdrawal left the lot under its own coverage line";
+}
+
+// a top-up leaves the loan on its own line at the debt it raised to, at the market's price
+rule aTopUpLeavesTheLotOnTheCoverageLine(env e, uint256 id, uint256 amount, HubCoverageHarness.OpenBounds bnd) {
+    scene(e);
+    require covAsks == 0;
+    drawMore(e, id, amount, bnd);
+    assert covAsks == 1, "a top-up asked no coverage line";
+    assert live(id) && onItsOwnLine(id), "a top-up left the lot under its own coverage line";
 }
 
 definition isBirth(method f) returns bool =
@@ -284,9 +312,9 @@ rule aSettlementConservesTheLot(env e, uint256 id, bool viaFinalize) {
 
 // O50: the keeper is credited exactly the sliver `sliverUnits` prices off the loan as it stood, and the lender's pot takes
 // at least the claim's need `collateralNeeded`, or all the lot past the sliver can pay. With a record it takes exactly the
-// ruled take, capped at the lot past the sliver: inside the term the claim at the trigger, ceil(lot * 1e18 / k), held
-// between the need and the coverage line the settlement asked on the loan's own dials and debt; from the expiry second the
-// need; with no need, nothing. The line's value is CoverageMath.spec's (`theCoverageLineIsRequiredPlusOne`): here it is
+// ruled take, capped at the lot past the sliver. Band on, the claim at the record's price, ceiled, never under the need, at
+// either door. Band off, inside the term the claim at the trigger, ceil(lot * 1e18 / k), held between the need and the
+// coverage line the settlement asked on the loan's own dials and debt; from the expiry second the need; with no need, nothing. The line's value is CoverageMath.spec's (`theCoverageLineIsRequiredPlusOne`): here it is
 // the RECORDED answer, so the take is checked against the line the code used rather than a CVL copy of its formula.
 rule aSettlementPaysTheSliverAndTheNeed(env e, uint256 id, bool viaFinalize) {
     scene(e);
@@ -308,22 +336,33 @@ rule aSettlementPaysTheSliverAndTheNeed(env e, uint256 id, bool viaFinalize) {
     mathint pot0 = loanPotOf(id);
     mathint owedK0 = unitsOwedOf(id, keeper);
     mathint asks0 = covAsks;
+    uint256 eps; uint256 band; uint256 target; uint256 stop; uint256 cut;
+    eps, band, target, stop, cut = marketDeleverageOf(loanMarket(id));
+    uint256 claim0 = loanClaimOf(id);
     settle(e, id, viaFinalize);
     mathint dPot = loanPotOf(id) - pot0;
     mathint afterSliver = u0 - sliver;
     bool inTerm = e.block.timestamp < exp0;
+    // BAND ON (#944, #945): the take is the claim at the recorded price `takeWord`, ceiled, never under the need, whenever the
+    // capped read answered a live word; a print so low the claim at it passes a word takes the whole lot (the saturating
+    // branch). A dark read past the grace leaves the band-off rule below; inside it the door reverts, so no state is checked.
+    bool priced = band != 0 && marketRecordOf(loanMarket(id)) != 0 && need != 0 && takeOk && takeWord != 0;
+    mathint atRecord = takeWord <= fmDown(claim0, s, max_uint256) ? max_uint256
+        : fmDown(claim0, s, takeWord) + ((claim0 * s) % (takeWord == 0 ? 1 : takeWord) > 0 ? 1 : 0);
     // the code's `mulDivRoundingUp(lot, 1e18, k)` under this file's `mulDiv` (`fmDown`). `fmDown` is unconstrained, so this
     // holds for every value of it, the exact floor included; with the floor, floor + (remainder != 0) is the ceil
     // (CoverageMath.spec `theFloorsAndCeilsBindBothWays`), which makes this rule O50's exact form
     mathint atTrigger = fmDown(lot, 10^18, k) + ((u0 * 10^18) % k > 0 ? 1 : 0);
     mathint capped = atTrigger < to_mathint(covLine) ? atTrigger : to_mathint(covLine);
-    mathint take = need == 0 ? 0 : (inTerm ? (capped > need ? capped : need) : need);
+    mathint take = need == 0 ? 0 : (priced ? (atRecord > need ? atRecord : need) : (inTerm ? (capped > need ? capped : need) : need));
     assert keeper != b => unitsOwedOf(id, keeper) - owedK0 == sliver, "the keeper was not credited the sliver the loan's debt prices";
     assert dPot >= (need < afterSliver ? need : afterSliver), "the lender's pot took less than the need the lot could pay";
     assert dPot <= afterSliver, "the lender's pot ate into the keeper's sliver";
-    assert marketRecordOf(loanMarket(id)) != 0 && need != 0 && inTerm =>
+    assert marketRecordOf(loanMarket(id)) != 0 && need != 0 && inTerm && band == 0 =>
         covAsks > asks0 && covK == k && covS == s && to_mathint(covDebt) == d0 && covPrice <= p,
-        "a record-backed settlement inside the term did not cap at the coverage line of the loan's own dials and debt";
+        "a band-off record-backed settlement inside the term did not cap at the coverage line of the loan's own dials and debt";
+    assert band != 0 && marketRecordOf(loanMarket(id)) != 0 && need != 0 && (!takeOk || takeWord == 0) => !inTerm,
+        "a band-on settlement moved value inside the term on a dark record";
     assert marketRecordOf(loanMarket(id)) != 0 => dPot == (take < afterSliver ? take : afterSliver),
         "a record-backed settlement's pot is not min(the ruled take, lot past the sliver)";
 }

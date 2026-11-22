@@ -4,6 +4,7 @@ pragma solidity 0.8.36;
 import {Constants} from "../Constants.sol";
 
 error PolicyGasShort(); // the caller's limit leaves the roll-policy ask less than its fixed budget past EIP-150's 1/64: resend with more gas
+error RecordGasShort(); // the caller's limit leaves a band-on settlement's price read less than its fixed budget: resend with more gas
 
 /// @title Probe
 /// @notice The hub's shape for asking a creator-chosen contract a one-word question.
@@ -15,6 +16,7 @@ error PolicyGasShort(); // the caller's limit leaves the roll-policy ask less th
 /// @dev A caller that reverts today on a sick dependency must still revert on `!ok`, by name.
 /// @dev `askWord` forwards all gas, so a callee that burns its allowance leaves this frame EIP-150's remainder.
 /// @dev `askBool` is the one CONSENT question, where every failure IS the answer no, under a fixed budget it must hand over whole.
+/// @dev `askWordCapped` is `askWord` under such a budget, for a read a caller must not be able to starve into a failure.
 /// @dev Prior art for the bound: Nomad's `ExcessivelySafeCall`, Curve's `max_outsize`; this is the one-word static case.
 library Probe {
     /// @notice Ask `target` for one word, copying at most 32 bytes of whatever it returns.
@@ -45,7 +47,7 @@ library Probe {
     /// @return ok Whether the target consented.
     function askBool(address target, bytes memory data, uint256 gasCap, bytes32 yes) internal view returns (bool ok) {
         if (target.code.length == 0) return false;
-        uint256 floor = (gasCap * 64 + 62) / 63 + Constants.POLICY_TAIL;
+        uint256 floor = gasFloor(gasCap);
         bytes4 short = PolicyGasShort.selector;
         assembly ("memory-safe") {
             if lt(gas(), floor) {
@@ -55,5 +57,36 @@ library Probe {
             ok := staticcall(gasCap, target, add(data, 0x20), mload(data), 0, 0x20)
             ok := and(ok, and(eq(returndatasize(), 0x20), eq(mload(0), yes)))
         }
+    }
+
+    /// @notice Ask `target` for one word with exactly `gasCap` gas, copying at most 32 bytes; a limit that cannot hand over `gasCap` reverts `RecordGasShort`.
+    /// @dev The code probe runs FIRST and warms the target, and the floor is `askBool`'s, checked LAST, as there.
+    /// @param target The contract being asked.
+    /// @param data The ABI-encoded call, built before the check so its memory is paid for.
+    /// @param gasCap The gas the callee receives.
+    /// @return ok True only if the call succeeded within `gasCap` AND returned at least one word.
+    /// @return word The first returned word, zero when `ok` is false.
+    function askWordCapped(address target, bytes memory data, uint256 gasCap) internal view returns (bool ok, uint256 word) {
+        if (target.code.length == 0) return (false, 0);
+        uint256 floor = gasFloor(gasCap);
+        bytes4 short = RecordGasShort.selector;
+        assembly ("memory-safe") {
+            if lt(gas(), floor) {
+                mstore(0, short)
+                revert(0, 4)
+            }
+            ok := staticcall(gasCap, target, add(data, 0x20), mload(data), 0, 0)
+            if lt(returndatasize(), 0x20) { ok := 0 }
+            if ok {
+                returndatacopy(0, 0, 0x20)
+                word := mload(0)
+            }
+        }
+    }
+
+    /// @notice THE one floor both capped asks check: `gasCap` past EIP-150's 1/64, plus `POLICY_TAIL`, the gas between the check and the opcode.
+    /// @dev `floor(64g/63)` already makes EIP-150 forward exactly `g`; the ceil adds one gas of margin.
+    function gasFloor(uint256 gasCap) internal pure returns (uint256) {
+        return (gasCap * 64 + 62) / 63 + Constants.POLICY_TAIL;
     }
 }

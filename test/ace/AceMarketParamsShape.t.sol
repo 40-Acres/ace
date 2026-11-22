@@ -21,7 +21,7 @@ contract AceMarketParamsShapeTest is Test {
     }
 
     /// @notice One word per field is the whole of a market's identity, and it is why every id moves here.
-    /// @dev Not tautological: it pins the preimage width independently of any hash pasted into PocMarketsConfig.
+    /// @dev Not tautological: it pins the preimage width independently of any pinned market id.
     function test_MarketParams_PreimageIsOneWordPerField() public {
         MarketParams memory p;
         assertEq(abi.encode(p).length, PREIMAGE_FIELDS * 32, "market id preimage is one word per field");

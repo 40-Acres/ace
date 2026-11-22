@@ -45,7 +45,7 @@ contract CuratorVaultInstantHandler is CuratorVaultBase {
 
     struct Pre {
         bool draining;
-        uint256 free; // the free supply the verb's last-out test reads for this exiter, as `_free(holder, supply)` counts it
+        uint256 free; // the free supply the verb's last-out test reads for this exiter, as `_freeSupply(holder, supply)` counts it
         uint256 quote; // the preview: assets for a redeem, shares for a withdraw
         uint256 a;
         uint256 q;

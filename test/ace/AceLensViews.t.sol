@@ -291,8 +291,8 @@ contract AceLensViewsTest is WarpClock {
     }
 
     /// @dev Ties `MarketInit`'s rail to the lens: band-on with no record is UNCONSTRUCTIBLE.
-    /// @dev That rail is why `deleverageEligible`'s record reads stay raw rather than being sentinelled.
-    /// @dev If anyone ever loosens it this fails, and the raw reads are revisited then.
+    /// @dev That rail is why `deleverageEligible` never reaches `persistedPrice`'s no-record max, which would read as eligible.
+    /// @dev If anyone ever loosens it this fails, and that view's price read is revisited then.
     function test_DeleverageBandImpliesRecord_ForbidsTheZeroRecordRead() public {
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(vault));
         p.record = address(0);

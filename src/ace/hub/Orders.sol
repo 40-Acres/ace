@@ -33,7 +33,7 @@ library Orders {
         uint256 principal;
         uint256 liqLow; // the escrow is sized here, plus the fill slack; fills follow the REMAINING escrow, so a full take triggers at or under it
         uint256 liqHigh; // the worst trigger the maker will accept; equal to `liqLow` pins one price
-        uint256 minFillPrincipal;
+        uint256 minFillPrincipal; // the floor on one fill; zero means `principal`; a floor splits only if at most half of `principal`, else fills whole
         uint64 tenor;
         uint64 expiry;
     }
@@ -55,6 +55,7 @@ library Orders {
     /// @notice Escrows the collateral the band's LOW end implies, and rests the terms.
     /// @dev Ids come from the SAME counter as loans, which is what makes every loan verb fail closed on one.
     /// @dev The escrow is pulled LAST, after the record exists: no half-created order can be observed.
+    /// @dev A zero fill floor stores and logs the order's principal: a default order fills whole, with the one-atom escrow slack of a whole fill.
     /// @param B The loan book, which allocates the id and holds the order.
     /// @param M The market this ask is against.
     /// @param c The market's config cache.
@@ -66,7 +67,8 @@ library Orders {
         if (a.tenor < c.p.minTenor || a.tenor > c.p.maxTenor) revert TenorOutOfRange();
         /// @dev Rejected here rather than at the derivation, which answers a zero price with a max-units sentinel.
         if (a.liqLow == 0 || a.liqHigh < a.liqLow) revert BadLiquidationBand();
-        uint256 minFill = a.minFillPrincipal == 0 ? c.p.minPrincipal : a.minFillPrincipal;
+        /// @dev ZERO IS ALL-OR-NOTHING: the floor resolves to the whole principal, so no filler picks the split of a default order.
+        uint256 minFill = a.minFillPrincipal == 0 ? a.principal : a.minFillPrincipal;
         if (minFill < c.p.minPrincipal || minFill > a.principal) revert MinFillOutOfRange();
         /// @dev Sized at the LOW end, so the escrow covers the fattest fill the band admits.
         uint256 units = collateralFor(c, a.principal, a.liqLow, minFill);

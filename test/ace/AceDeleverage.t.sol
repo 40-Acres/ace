@@ -524,12 +524,6 @@ contract AceDeleverageTest is WarpClock {
         record.setMinPrice(ps);
     }
 
-    /// @dev `Borrower.requiredAt` at the loan's frozen funding floor: the cap leg, and the ONLY leg with no lens surface to read.
-    function _requiredAt(Clamp memory c) private view returns (uint256) {
-        uint256 k = c.hub.idToMarketParams(c.mid).minCoverageWad;
-        return FullMath.mulDivRoundingUp(k * c.r.debtOf(c.loanId), UNIT_SCALE, c.r.fundingFloor(c.mid, c.loanId) * 1e18);
-    }
-
     /// @dev `securedBase` clamps the decline channel to the debt-securing portion, less what settlement must keep.
     /// @dev The base is read off the FROZEN funding floor, so a keeper cannot crash the print to widen it.
     /// @dev THIS ROW IS THE CAP ARM: a high funding floor makes bare `requiredAt` the smaller of the two legs.
@@ -539,7 +533,7 @@ contract AceDeleverageTest is WarpClock {
         Clamp memory c = _clampFixture(AceFixtures.priceAt(address(usdc), address(vault), 9600), PRINCIPAL, PS_BAND); // ~2.61 quote per token
         uint256 units = c.r.loan(c.loanId).collateralUnits;
         uint256 keep = c.lens.collateralNeeded(c.mid, c.loanId);
-        uint256 req = _requiredAt(c);
+        uint256 req = c.lens.requiredAtFloor(c.loanId);
         assertLt(req, units - keep, "fixture: this row means to sit on the cap arm, so the reserve must be the larger leg");
 
         (uint256 sold,) = c.k.crankDeleverage(c.loanId);
@@ -551,12 +545,12 @@ contract AceDeleverageTest is WarpClock {
     /// @dev The OTHER arm of the same clamp: a flat tick-0 ladder makes the claims cost most of the position.
     /// @dev The reserve is then the smaller leg, so the sale stops at what settlement must keep and not at `requiredAt`.
     /// @dev The pair exists because `securedBase` is a MIN, and a row on one arm asserts nothing whatever about the other.
-    /// @dev The reserve is read from the LENS, so unlike a copied formula it cannot go stale against a hub edited elsewhere.
+    /// @dev Both legs are read from the LENS, so unlike a copied formula neither can go stale against a hub edited elsewhere.
     function test_Deleverage_SizingClampedToTheSettlementReserve() public {
         Clamp memory c = _clampFixture(T, RESERVE_PRINCIPAL, RESERVE_PS);
         uint256 units = c.r.loan(c.loanId).collateralUnits;
         uint256 keep = c.lens.collateralNeeded(c.mid, c.loanId);
-        assertGt(_requiredAt(c), units - keep, "fixture: this row means to sit on the reserve arm, so the cap must be the larger leg");
+        assertGt(c.lens.requiredAtFloor(c.loanId), units - keep, "fixture: this row means to sit on the reserve arm, so the cap must be the larger leg");
 
         (uint256 sold,) = c.k.crankDeleverage(c.loanId);
 

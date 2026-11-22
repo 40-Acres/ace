@@ -22,7 +22,7 @@ import {AceReader} from "../utils/AceReader.sol";
 /// @dev `feeFundable` is `b * maxTenor * 11000 <= 2500 * 1e4 * 365 days`: at a one-year `maxTenor` that is 2272 against 2273.
 /// @dev So 2272 admits and 2273 refuses at a one-year `maxTenor` whatever the `minTenor`; nothing here is the 7-day fixture's.
 /// @dev 2272 and 2273 are spelled as LITERALS on purpose: a mirror of the implementation cannot disagree with it.
-/// @dev That makes this file the tripwire if `MAX_FEE_SHARE_BPS` or `PROTOCOL_SHARE_BPS` ever moves.
+/// @dev That makes this file the tripwire if `MAX_FEE_SHARE_BPS` or `MAX_PROTOCOL_SHARE_BPS` ever moves.
 contract AceRateDensityRailTest is WarpClock {
     Ace internal ace;
     PositionManager internal pm;

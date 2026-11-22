@@ -116,6 +116,12 @@ methods {
     function _.lenderByCollateral(address, address, address) external => DISPATCHER(true);
     function _.restingOf(bytes32) external => DISPATCHER(true);
     function _.deposit(bytes32, uint256) external => DISPATCHER(true);
+    // the refinance's market creation and its title pull, AUTO-summarized the same way, havocked the hub stand-in (`emv-50`)
+    function _.createMarket(VaultBoundaryHarness.MarketParams) external => DISPATCHER(true);
+    function _.transferFrom(address f, address t, uint256 v) external with (env e) => moveFrom(e, calledContract, f, t, v) expect bool;
+    // the extension's Permit2 fee pull, AUTO-summarized, havocked the hub stand-in too (`emv-58`); Permit2 is out of the scene,
+    // so its call is the catch-all's NONDET, stated by name
+    function _.permitTransferFrom(IPermit2.PermitTransferFrom, IPermit2.SignatureTransferDetails, address, bytes) external => NONDET;
     function _.balanceOf(address a) external => cashBalance(calledContract, a) expect uint256;
     function _.approve(address s, uint256 v) external with (env e) => cashApprove(e, calledContract, s, v) expect bool;
     function _.allowance(address o, address s) external => cashAllowance(calledContract, o, s) expect uint256;
@@ -146,6 +152,20 @@ function cashAllowance(address c, address o, address s) returns uint256 {
 function cashApprove(env e, address c, address s, uint256 v) returns bool {
     if (c == token) {
         return token.approve(e, s, v);
+    }
+    bool b;
+    return b;
+}
+
+// The asset's or the title's own move, as the callee is; the title returns nothing, so its leg answers true, which an
+// IERC721 caller never reads. Another callee's moves nothing and answers freely, as NONDET would.
+function moveFrom(env e, address c, address f, address t, uint256 v) returns bool {
+    if (c == token) {
+        return token.transferFrom(e, f, t, v);
+    }
+    if (c == title) {
+        title.transferFrom(e, f, t, v);
+        return true;
     }
     bool b;
     return b;
@@ -775,6 +795,8 @@ rule aRefinanceHandsBothTitlesBack(
 // No verb leaves a loan title on the vault: from none held, every verb ends holding none.
 rule noVerbLeavesATitleOnTheVault(method f, env e, calldataarg args) filtered { f -> !f.isView } {
     scene(e);
+    // the vault never calls its own verbs from outside; a borrow it made to itself would hand the title back to itself (`emv-74`)
+    require e.msg.sender != currentContract;
     require title.heldBy(currentContract) == 0;
 
     f(e, args);

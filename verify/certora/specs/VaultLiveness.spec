@@ -120,7 +120,7 @@ definition instantExit(method f) returns bool =
 // ---- the exit gate: no extension past a loan's expiry while the standing requests are uncovered ----
 
 // The vault consents to an extension that runs a loan past its expiry only while idle covers the standing requests' worth,
-// or a stored trough hold already shuts entry (`_holdOnly`, which the harness restates since it is private).
+// or a stored trough hold already shuts entry (`_shutByHoldAlone`, which the harness restates as `holdOnly` since it is private).
 rule anExtensionPastExpiryNeedsCoveredExits(env e, VaultLivenessHarness.Extension x, bytes data) {
     scene(e);
 

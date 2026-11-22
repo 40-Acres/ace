@@ -76,22 +76,22 @@ library AceVaultCaps {
         _change($, key, Cap(cap, true), cap <= effective($, key));
     }
 
-    /// @notice Delist collateral `c`, so the wildcard's cap applies: at once unless the wildcard is above its row, else after the timelock.
-    function submitDelist(address c) external {
+    /// @notice Delist `collateral`, so the wildcard's cap applies: at once unless the wildcard is above its row, else after the timelock.
+    function submitDelist(address collateral) external {
         VaultLayout storage $ = AceVaultFlows.layout();
-        Cap memory w = $.caps[c];
-        if (!w.listed || _special(c)) revert NotListed();
-        _change($, c, Cap(0, false), $.caps[address(0)].cap <= w.cap);
+        Cap memory row = $.caps[collateral];
+        if (!row.listed || _special(collateral)) revert NotListed();
+        _change($, collateral, Cap(0, false), $.caps[address(0)].cap <= row.cap);
     }
 
     /// @notice Make `key`'s pending change live once it has waited out the timelock. PERMISSIONLESS.
     function acceptCap(address key) external {
         VaultLayout storage $ = AceVaultFlows.layout();
-        PendingCap memory p = $.pendingCaps[key];
-        if (p.validAt == 0 || block.timestamp < p.validAt) revert NothingDue();
+        PendingCap memory pending = $.pendingCaps[key];
+        if (pending.validAt == 0 || block.timestamp < pending.validAt) revert NothingDue();
         delete $.pendingCaps[key];
-        $.caps[key] = p.value;
-        emit SetCap(msg.sender, key, p.value.cap, p.value.listed);
+        $.caps[key] = pending.value;
+        emit SetCap(msg.sender, key, pending.value.cap, pending.value.listed);
     }
 
     /// @notice Drop `key`'s pending change. The curator or the guardian.
@@ -101,31 +101,31 @@ library AceVaultCaps {
         emit RevokePendingCap(msg.sender, key);
     }
 
-    /// @notice The room a new placement against collateral `c` has under its row and under the total, when the hub holds `held` and the drawdown is `dd`.
-    /// @dev The row counts the hub's lent against `c` and the value its goods at a door still hold; the total counts all lent plus the drawdown.
+    /// @notice The room a new placement against `collateral` has under its row and under the total, when the hub holds `held` with `drawdown` standing.
+    /// @dev The row counts the hub's lent against `collateral` and the value its goods at a door still hold; the total counts all lent plus the drawdown.
     /// @dev Nothing rests between calls, so what the hub holds less what it owes the vault is what is lent.
     /// @return row The row's room.
     /// @return total The total's room.
-    function room(address ace, address asset, address c, uint256 held, uint256 dd) external view returns (uint256 row, uint256 total) {
+    function room(address ace, address asset, address collateral, uint256 held, uint256 drawdown) external view returns (uint256 row, uint256 total) {
         VaultLayout storage $ = AceVaultFlows.layout();
         IAceLenderOps hub = IAceLenderOps(ace);
-        (uint256 lent,) = hub.lenderByCollateral(address(this), asset, c);
-        row = rowRoom(effective($, c), lent, $.seized[c].value);
-        total = totalRoom($.caps[address(this)].cap, held, hub.lenderOwed(address(this), asset), dd);
+        (uint256 lent,) = hub.lenderByCollateral(address(this), asset, collateral);
+        row = rowRoom(effective($, collateral), lent, $.seized[collateral].value);
+        total = totalRoom($.caps[address(this)].cap, held, hub.lenderOwed(address(this), asset), drawdown);
     }
 
-    /// @notice A row's room: its effective cap `eff` less what is lent against it, less what its goods at a door still hold; zero, never below.
-    function rowRoom(uint256 eff, uint256 lent, uint256 seized) internal pure returns (uint256) {
-        return Math.saturatingSub(Math.saturatingSub(eff, lent), seized);
+    /// @notice A row's room: `effectiveCap` less what is lent against it, less what its goods at a door still hold; zero, never below.
+    function rowRoom(uint256 effectiveCap, uint256 lent, uint256 seized) internal pure returns (uint256) {
+        return Math.saturatingSub(Math.saturatingSub(effectiveCap, lent), seized);
     }
 
-    /// @notice The total's room: its cap less what is lent, the hub's `held` less what it `owed`, and the drawdown `dd`; zero, never below.
-    function totalRoom(uint256 cap, uint256 held, uint256 owed, uint256 dd) internal pure returns (uint256) {
-        return Math.saturatingSub(cap, held - owed + dd);
+    /// @notice The total's room: its cap less what is lent, the hub's `held` less what it `owed`, and the `drawdown`; zero, never below.
+    function totalRoom(uint256 cap, uint256 held, uint256 owed, uint256 drawdown) internal pure returns (uint256) {
+        return Math.saturatingSub(cap, held - owed + drawdown);
     }
 
     /// @notice Whether a vault recovers seized goods through the hub's inventory ask: neither in kind nor in door mode.
-    /// @dev The one spelling the door's check and the lens's preview both take.
+    /// @dev The one spelling the core door's check and the lens's preview both take.
     function hubAsk(bool inKind, address door) internal pure returns (bool) {
         return !inKind && door == address(0);
     }
@@ -134,44 +134,44 @@ library AceVaultCaps {
     /// @dev The market takes the collateral asked; the draw takes no more principal or units than asked, and the term asked whenever one is.
     /// @dev The market's tenors and the drawn term, zero meaning the market's shortest, sit inside `[minTenor, maxTenor]`.
     /// @return The draw to place, its buffer the larger of the ask's and the product's.
-    function admit(BorrowRequest calldata r, MarketParams calldata mp, Terms calldata t, bool hubAsk, uint64 minTenor, uint64 maxTenor)
+    function admit(BorrowRequest calldata request, MarketParams calldata mp, Terms calldata draw, bool hubAsk, uint64 minTenor, uint64 maxTenor)
         external
         pure
         returns (Terms memory)
     {
         if (mp.inventoryAsk != hubAsk) revert WrongInventoryMode();
-        if (mp.collateral != r.collateral) revert CollateralNotAsked();
-        if (t.principal > r.principal || t.units > r.units) revert OverAsk();
-        if (r.tenor != 0 && t.tenor != r.tenor) revert TenorNotAsked();
-        uint64 drawn = t.tenor == 0 ? mp.minTenor : t.tenor;
+        if (mp.collateral != request.collateral) revert CollateralNotAsked();
+        if (draw.principal > request.principal || draw.units > request.units) revert OverAsk();
+        if (request.tenor != 0 && draw.tenor != request.tenor) revert TenorNotAsked();
+        uint64 drawn = draw.tenor == 0 ? mp.minTenor : draw.tenor;
         if (mp.minTenor < minTenor || mp.maxTenor > maxTenor || drawn < minTenor || drawn > maxTenor) revert TenorOutOfRail();
-        return Terms(t.units, t.principal, t.tenor, Math.max(r.minBufferWad, t.minBufferWad));
+        return Terms(draw.units, draw.principal, draw.tenor, Math.max(request.minBufferWad, draw.minBufferWad));
     }
 
     /// @notice `key`'s effective cap: the wildcard and the total are their own; a collateral's is its row while listed, else the wildcard's.
     function effective(VaultLayout storage $, address key) internal view returns (uint256) {
-        Cap memory w = $.caps[key];
-        return (w.listed || _special(key)) ? w.cap : $.caps[address(0)].cap;
+        Cap memory entry = $.caps[key];
+        return (entry.listed || _special(key)) ? entry.cap : $.caps[address(0)].cap;
     }
 
-    /// @dev Land `v` on `key` at once when `lands`, by the curator or the guardian, dropping any pending change; else queue it, curator only.
+    /// @dev Land `next` on `key` at once when `lands`, by the curator or the guardian, dropping any pending change; else queue it, curator only.
     /// @dev A forwarded verb's helper: the keys and the timelock are the vault's, from the suffix it appended.
-    function _change(VaultLayout storage $, address key, Cap memory v, bool lands) private {
+    function _change(VaultLayout storage $, address key, Cap memory next, bool lands) private {
         address curator = AceVaultTail.curator();
         if (lands) {
             if (msg.sender != curator && msg.sender != AceVaultTail.guardian()) revert NotCurator();
-            $.caps[key] = v;
+            $.caps[key] = next;
             if ($.pendingCaps[key].validAt != 0) {
                 delete $.pendingCaps[key];
                 emit RevokePendingCap(msg.sender, key);
             }
-            emit SetCap(msg.sender, key, v.cap, v.listed);
+            emit SetCap(msg.sender, key, next.cap, next.listed);
             return;
         }
         if (msg.sender != curator) revert NotCurator();
         uint64 validAt = uint64(block.timestamp) + AceVaultTail.capTimelock();
-        $.pendingCaps[key] = PendingCap(v, validAt);
-        emit SubmitCap(key, v.cap, v.listed, validAt);
+        $.pendingCaps[key] = PendingCap(next, validAt);
+        emit SubmitCap(key, next.cap, next.listed, validAt);
     }
 
     /// @dev The wildcard and the total, which are their own effective caps and never delist.

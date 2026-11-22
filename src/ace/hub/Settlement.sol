@@ -5,7 +5,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
-import {Borrower} from "./Borrower.sol";
+import {Borrower, NoRecordPrice, RecordUnreadable} from "./Borrower.sol";
+import {Constants} from "./Constants.sol";
 
 import {LoanAccounting} from "./libraries/LoanAccounting.sol";
 import {Recipients} from "./libraries/Recipients.sol";
@@ -41,7 +42,8 @@ library Settlement {
     /* ====== 1. SETTLE: the terminal crank ====== */
 
     /// @notice Settle a loan whose distress has persisted for the full settle window. Final.
-    /// @notice Inside the term the market takes the claim at the trigger, `lot / k`, capped at the coverage line; from expiry the need, as `forceClose` does.
+    /// @notice Band off, inside the term the take is the claim at the trigger, `lot / k`, capped at the coverage line; from expiry the need.
+    /// @notice Band on, the claim at the record's `minPrice`, the price the crank sells at; a dark price refuses, as `_takePrice` names it.
     /// @dev The ONLY precondition is the derived one: a recovery print makes this revert, no verb.
     /// @dev POLICY-BLIND, deliberately: persistent distress is what the lenders' settlement right is for.
     function finalize(LoanBook storage B, Market storage M, Cfg memory c, uint256 id) public {
@@ -50,27 +52,45 @@ library Settlement {
         if (c.p.record == address(0)) revert NoRecord();
         /// @dev A record that cannot answer is UNREADABLE, never not-yet-settleable: the two are different facts.
         if (!Borrower.persistedBelowSettleOrRevert(c, Borrower.triggerPrice(L, c))) revert NotSettleable();
+        uint256 ps = _takePrice(M, c, id, L.expiry);
         uint256 units = L.collateralUnits;
         L.collateralUnits = 0;
         L.closedAt = uint64(block.timestamp);
-        (uint256 bad, uint256 left) = _settle(B, M, c, id, L.borrower, units);
+        (uint256 bad, uint256 left) = _settle(B, M, c, id, L.borrower, units, ps);
         emit Finalized(id, left, bad, msg.sender);
     }
 
     /// @notice Settle an expired loan by claim conversion; equity above what the market takes is CREDITED to the borrower. Final.
     /// @notice A RECORDLESS market takes the whole coverage line rather than the claims' need, so its borrower may keep nothing.
+    /// @notice A BAND-ON market takes the claim at the record's `minPrice`, never under the need; band off, the need.
     /// @notice THE one settle verb at tenor, from the expiry second; it extends nothing, and from that second no extension or refinance lands.
-    /// @dev MUST EXECUTE: it asks no roll policy and calls no record; it reads only whether a record is WIRED, which widens the bound.
-    /// @dev Its one external call is `retireCustody`, a storage hop; what can stop it is the caller's own limit, an id naming no loan, or the guard.
+    /// @dev MUST EXECUTE, band on from `SETTLE_DARK_GRACE` past expiry: until then a dark record refuses, after it the need is taken.
+    /// @dev It asks no roll policy; band off it calls no record and reads only whether one is WIRED, which widens the bound.
+    /// @dev Its external calls are that capped price read and `retireCustody`, a storage hop; else only the caller's limit, a bad id or the guard stop it.
     function forceClose(LoanBook storage B, Market storage M, Cfg memory c, uint256 id) public {
         Loan storage L = B.loans[id];
         if (L.closedAt != 0) revert LoanClosed();
         if (block.timestamp < L.expiry) revert NotExpired();
+        uint256 ps = _takePrice(M, c, id, L.expiry);
         uint256 units = L.collateralUnits;
         L.collateralUnits = 0;
         L.closedAt = uint64(block.timestamp);
-        (uint256 bad, uint256 left) = _settle(B, M, c, id, L.borrower, units);
+        (uint256 bad, uint256 left) = _settle(B, M, c, id, L.borrower, units, ps);
         emit ForceClosed(id, left, bad, msg.sender);
+    }
+
+    /// @dev A band-on market's settlement price: the record's `minPrice`, read ONCE under the policy budget, before any effect.
+    /// @dev Zero, with no read, band off, recordless or with no live claim: there the take reads only the class and the clock.
+    /// @dev The read is `Borrower.cappedPrice`, the crank's own, so a record the crank can price settlement can price, and one it cannot, neither can.
+    /// @dev A dark read refuses until `SETTLE_DARK_GRACE` past expiry, then reads zero: `NoRecordPrice` if it answered zero, else `RecordUnreadable`.
+    /// @dev So darkness closes the door and moves no value: inside the term the seizure waits, from expiry it waits out the grace and takes the need.
+    function _takePrice(Market storage M, Cfg memory c, uint256 id, uint64 expiry) private view returns (uint256 ps) {
+        if (c.p.deleverageBandBps == 0 || c.p.record == address(0) || M.claim[id] == 0) return 0;
+        (bool answered, uint256 word) = Borrower.cappedPrice(c);
+        if (answered && word != 0) return word;
+        if (block.timestamp >= uint256(expiry) + Constants.SETTLE_DARK_GRACE) return 0;
+        if (answered) revert NoRecordPrice();
+        revert RecordUnreadable();
     }
 
     /// @notice The CLEAN close: credit the collateral to the holder, credit the unearned fee escrow.
@@ -91,8 +111,8 @@ library Settlement {
     /// @dev The claim bears its own write-down; what the market's bound leaves is CREDITED to the borrower.
     /// @dev MAKES NO EXTERNAL COLLATERAL TRANSFER: every leg is a ledger write, so settlement is total.
     /// @dev A short close RECORDS what the claim did not get, post-sliver: per loan, plus the market's total.
-    /// @dev `retireCustody` is the ONE external call, and both records are written AFTER it, never before.
-    function _settle(LoanBook storage B, Market storage M, Cfg memory c, uint256 id, address borrower, uint256 units)
+    /// @dev `retireCustody` is the ONE external call, and both records are written AFTER it, never before; `ps` was read by the door, before any effect.
+    function _settle(LoanBook storage B, Market storage M, Cfg memory c, uint256 id, address borrower, uint256 units, uint256 ps)
         private
         returns (uint256 badDebt, uint256 unitsAfterSliver)
     {
@@ -105,7 +125,7 @@ library Settlement {
         uint256 sliver = LoanAccounting.sliverUnits(B, M, c, id, units);
         if (sliver > 0) LoanAccounting.creditUnits(B, id, msg.sender, sliver);
         uint256 need = LoanAccounting.collateralNeeded(M, c, id);
-        uint256 toMarket = Math.min(_marketBound(B, M, c, id, need, units), units - sliver); // the bound reads the whole lot, as the trigger did
+        uint256 toMarket = Math.min(_marketBound(B, M, c, id, need, units, ps), units - sliver); // the bound reads the whole lot, as the trigger did
         units -= sliver;
         uint256 toClaims = Math.min(toMarket, need);
         LoanAccounting.creditUnits(B, id, borrower, units - toMarket);
@@ -178,21 +198,30 @@ library Settlement {
         }
     }
 
-    /// @dev The market side's take, before the caller caps it at the post-sliver lot: recordless, the coverage line; recorded from expiry, the need.
-    /// @dev Recorded inside the term, `ceil(lot / k)` capped at that line: the claim at the trigger while `triggerPrice` stays `k * debt / lot`.
+    /// @dev The market's take, before the caller caps it at the post-sliver lot; `ps` zero: recordless, the coverage line; recorded from expiry, the need.
+    /// @dev `ps` zero, recorded inside the term, `ceil(lot / k)` capped at that line: the claim at the trigger while `triggerPrice` stays `k * debt / lot`.
+    /// @dev BAND ON with a live price `ps`, at either door and any instant: `ceil(claim / ps)`, never under the need, the price the crank sells at.
+    /// @dev That take is the debt's worth at `ps` plus one ceil atom, and under the withdraw line there; what passes the need is surplus, never reserved.
+    /// @dev A `ps` so low the claim at it passes a word takes everything, which the caller caps at the lot: the ceil itself never reverts.
     /// @dev `lot` is the pledge BEFORE the sliver, the units the trigger was priced on.
     /// @dev Keyed on the clock, never the door: from expiry `finalize` and `forceClose` are both open and must give one take.
-    /// @dev CLASS, NEVER LIVENESS: this turns on whether a record was ever WIRED and on the loan's own expiry, never on what the record says.
-    /// @dev A RECORDLESS LENDER HAS NO EARLY SEIZURE AT ALL and prices that when they rest; the coverage is what pays for it.
+    /// @dev BAND OFF, CLASS, NEVER LIVENESS: it turns on whether a record was ever WIRED and on the loan's own expiry, never on what the record says.
     /// @dev A recordless loan reaches this bound only by its tenor running out: `finalize` refuses `NoRecord` there.
-    /// @dev A wired record that stops answering closes every judgment-spending door -- draw, extension, withdrawal, deleverage -- and moves no value.
-    /// @dev Some classes keep answering the below-question through silence, so title can still move; that is theirs to rule, not this bound's.
-    /// @dev Reading liveness HERE would price a loan off a transient answer whose moment the settling caller picks.
+    /// @dev Some classes keep answering the below-question through silence, so title can still move band off; band on, the dark price refuses it.
     /// @dev Priced BEFORE `_finalizeLoanFor`, which deletes the funding floor this reads.
     /// @dev A loan with no live claim takes nothing: there is nothing a forfeit could be spread over.
-    /// @dev The need floor is belt-and-braces: admission and every later verb hold the line at or above the need, and the trigger at or under the price.
-    function _marketBound(LoanBook storage B, Market storage M, Cfg memory c, uint256 id, uint256 need, uint256 lot) private view returns (uint256) {
+    /// @dev Band off the need floor is belt-and-braces: every verb holds the line at or above the need, and the trigger at or under the price.
+    function _marketBound(LoanBook storage B, Market storage M, Cfg memory c, uint256 id, uint256 need, uint256 lot, uint256 ps)
+        private
+        view
+        returns (uint256)
+    {
         if (need == 0) return 0;
+        if (ps != 0) {
+            uint256 claim = M.claim[id];
+            if (ps <= FullMath.mulDiv(claim, c.unitScale, type(uint256).max)) return type(uint256).max;
+            return Math.max(FullMath.mulDivRoundingUp(claim, c.unitScale, ps), need);
+        }
         Loan storage L = B.loans[id];
         uint256 bound;
         if (c.p.record == address(0) || block.timestamp < L.expiry) {

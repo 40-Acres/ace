@@ -31,8 +31,8 @@ library PocDeployConfig {
     uint64 internal constant LAUNCH_MIN_TENOR = 7 days; // the launch range's floor; every term pays lenderAprBps a year pro-rata, so APR is flat
     uint64 internal constant LAUNCH_MAX_TENOR = 30 days; // the launch range's ceiling; CONTINUOUS, a borrower names any term between and nothing quantises it
     address internal constant BTC_USD_DAPI_PROXY = 0xCAc4d304032a46C8D0947396B7cBb07986826A36; // API3 BTC/USD; it prices no wrapper
-    address internal constant MAINNET_USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48; // Ethereum's native USDC, the one quote a yb market takes at par
-    address internal constant MAINNET_CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf; // what the mainnet yb-cbBTC LT redeems into
+    address internal constant MAINNET_USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48; // Ethereum's native USDC
+    address internal constant MAINNET_CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf; // Coinbase Wrapped BTC on Ethereum mainnet
     address internal constant CBBTC_USD_FEED = 0x2665701293fCbEB223D11A08D826563EDcCE423A; // Chainlink cbBTC / USD, 8 decimals, a 24h heartbeat
 }
 

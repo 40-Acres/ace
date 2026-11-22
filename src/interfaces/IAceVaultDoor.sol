@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 /// @title IAceVaultDoor
-/// @notice An AceVault's door-mode surface: what its DOOR calls to take seized goods and return their cash, the write-off, and the lending doors.
+/// @notice An AceVault's door-mode surface: what its DOOR calls to take seized goods and return their cash, the write-off, and the other lending doors.
 /// @notice Entry stays shut while any key is open, as while a hub pot is unsold, so a door closes a key once it holds none of its goods.
 /// @dev The vault never calls the door; it calls its terms only through `IVaultTerms`, and the hub only for its own loans.
 /// @dev A door reads key `c`'s record by `extsload` at `keccak256(abi.encode(c, ROOT + 9))` and the open count at `ROOT + 10`, ROOT `AceVaultFlows.ROOT`.

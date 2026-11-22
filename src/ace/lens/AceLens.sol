@@ -6,11 +6,12 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {Storage, Cfg, Loan, MarketParams, MarketState, OpenBounds, Order, RecordState} from "../hub/Types.sol";
 import {LoanMath} from "../hub/libraries/LoanMath.sol";
 import {Constants} from "../hub/Constants.sol";
-import {Borrower, NoRecordPrice} from "../hub/Borrower.sol";
+import {Borrower, NoRecordPrice, RecordUnreadable} from "../hub/Borrower.sol";
 import {FillBelowMin, FillOverCollateralized, FillOverOrder, FillUnderCollateralized, OrderClosed, RemainderBelowMin} from "../hub/Orders.sol";
 import {Probe} from "../hub/libraries/Probe.sol";
 import {MarketInit} from "../hub/MarketInit.sol";
 import {HubLoanTerm} from "../../interfaces/HubLoanTerm.sol";
+import {HubProtocolShare} from "../../interfaces/HubProtocolShare.sol";
 import {HubRatePeriod} from "../../interfaces/HubRatePeriod.sol";
 import {IPersistenceRecord} from "../../interfaces/IPersistenceRecord.sol";
 import {Mul512} from "../../utils/Mul512.sol";
@@ -31,6 +32,7 @@ interface IAceHub {
     function marketLoans(bytes32 id, uint256 offset, uint256 limit) external view returns (uint256[] memory);
     function tryExtend(uint256 id, uint256 minBufferWad, bytes calldata data, address caller) external view returns (bool ok, bytes4 reason, uint256 fee);
     function orderOf(uint256 id) external view returns (Order memory);
+    function POLICY_GAS() external view returns (uint256);
     function previewOpen(bytes32 id, uint256 collateralUnits, uint256 principal, uint64 tenor, address borrower, OpenBounds calldata bnd)
         external
         view
@@ -209,10 +211,10 @@ contract AceLens {
     /// @dev Zeros for a market that does not exist, which is what the neighbouring views answer rather than reverting.
     /// @param id The market.
     /// @return lenderAprBps What the lender earns, per year.
-    /// @return allInAprBps The borrower's fee per unit of face, per year, protocol share included.
+    /// @return allInAprBps The borrower's fee per unit of face, per year, at the hub's live protocol share.
     function rateBps(bytes32 id) external view returns (uint256 lenderAprBps, uint256 allInAprBps) {
         lenderAprBps = ACE.idToMarketParams(id).lenderAprBps;
-        allInAprBps = lenderAprBps * (10000 + Constants.PROTOCOL_SHARE_BPS) / 10000;
+        allInAprBps = lenderAprBps * (10000 + HubProtocolShare.shareOf(address(ACE))) / 10000;
     }
 
     /// @notice The market's scalar state: the O(1) aggregate mirrors plus the derived scales.
@@ -444,7 +446,8 @@ contract AceLens {
 
     /// @notice Collateral this loan must deliver to fill its live claim, at its funding price.
     /// @notice What the coverage line has to keep covered at both doors, which is why that line derives off this.
-    /// @notice Settlement takes at least this where the lot allows: a recordless market and a recorded one inside the term forfeit up to the coverage line.
+    /// @notice Settlement takes at least this where the lot allows: a recordless market and a band-off one inside the term forfeit up to the coverage line.
+    /// @notice A band-on market takes the claim at the record's price instead, which is not previewed here: read the pot after `Finalized` or `ForceClosed`.
     /// @dev ONE CEIL, matching settlement: `LoanAccounting.collateralNeeded` takes the same one, and the two must agree.
     /// @dev Zero once the claim is gone, which reads the same for a repaid loan and a settled one.
     /// @param id The market.
@@ -454,6 +457,19 @@ contract AceLens {
         uint256 amt = claimOf(id, loanId);
         if (amt == 0) return 0;
         return FullMath.mulDivRoundingUp(amt, marketState(id).unitScale, ACE.idToMarketParams(id).price);
+    }
+
+    /// @notice Units this loan's debt needs at its funding floor: the cap leg of the deleverage sale's clamp.
+    /// @notice The clamp's keep leg is `collateralNeeded` plus the keeper sliver, which no view here exposes.
+    /// @notice Zero on a closed loan: settlement retires the claim and leaves the debt word, which would read as the max sentinel.
+    /// @dev The hub's own `Borrower.requiredAt` at this lens's `fundingFloor`, so the arithmetic is called, never restated.
+    /// @dev Takes the loan alone and reads its market from it, so no caller can pair one market's params with another's loan.
+    /// @param loanId The loan.
+    /// @return The units, ceiled against the borrower.
+    function requiredAtFloor(uint256 loanId) external view returns (uint256) {
+        Loan memory l = loan(loanId);
+        if (l.closedAt != 0) return 0;
+        return Borrower.requiredAt(_gateCfg(l.market), l.debt, fundingFloor(l.market, loanId));
     }
 
     /// @notice What the holder may still take out: the units above this loan's coverage line.
@@ -478,8 +494,8 @@ contract AceLens {
         return Math.saturatingSub(l.collateralUnits, line);
     }
 
-    /// @dev The gate's config, and ONLY the gate's: `p` in full plus `unitScale`, which is all the line reads.
-    /// @dev `positionTitle` and `positionManager` stay ZERO -- a caller needing one must fill it.
+    /// @dev A PARTIAL config: `p` in full plus `unitScale`, all that the line, `requiredAt` and the record helpers read.
+    /// @dev `positionTitle`, `positionManager`, `policyGas` and `protocolShareBps` stay ZERO -- a caller needing one must fill it.
     function _gateCfg(bytes32 id) private view returns (Cfg memory c) {
         c.p = ACE.idToMarketParams(id);
         c.unitScale = marketState(id).unitScale;
@@ -490,29 +506,47 @@ contract AceLens {
     /// @notice False on a closed loan, without asking the record: `finalize` refuses `LoanClosed` before it reads one.
     /// @notice False with no record: finalize is unreachable there, and the hub answers `NoRecord`.
     /// @notice That is the DISTRESS channel only: a record-less loan still settles at tenor via `forceClose`.
+    /// @notice Band on, also needs the door's price: false while it is dark inside the term or the grace past expiry, true once the grace has run.
+    /// @notice Reverts `RecordUnreadable` where `finalize` would: the hub's own reads, one word copied.
     function settleable(uint256 loanId) external view returns (bool) {
-        (MarketParams memory p, uint256 trig, bool closed) = _riskView(loanId);
-        if (closed || p.record == address(0)) return false;
-        return IPersistenceRecord(p.record).persistedBelowSettle(p.quote, p.collateral, trig);
+        (Cfg memory c, uint256 trig, bool closed) = _riskView(loanId);
+        if (closed || c.p.record == address(0)) return false;
+        if (!Borrower.persistedBelowSettleOrRevert(c, trig)) return false;
+        return _priceAdmits(loanId, c);
+    }
+
+    /// @dev Band on, the price read `finalize` makes, under the hub's budget: live, or the grace run out; an answered zero inside it is false.
+    /// @dev It restates `Settlement._takePrice`'s dark rule as a bool, which is private to the hub's library; the read itself is shared.
+    function _priceAdmits(uint256 loanId, Cfg memory c) private view returns (bool) {
+        if (c.p.deleverageBandBps == 0) return true;
+        Loan memory l = loan(loanId);
+        if (claimOf(l.market, loanId) == 0) return true;
+        (bool answered, uint256 word) = _cappedPrice(c);
+        if (answered && word != 0) return true;
+        if (block.timestamp >= uint256(l.expiry) + Constants.SETTLE_DARK_GRACE) return true;
+        if (!answered) revert RecordUnreadable();
+        return false;
     }
 
     /// @notice Distress: the record has held below this loan's trigger for the guard window.
     /// @notice False on a closed loan, as the hub's own distress test is.
     /// @notice False with no record: distress cannot be EARNED where nothing persists.
+    /// @notice Reverts `RecordUnreadable` where the hub's distress guard would: the hub's own read, one word copied.
     function inDistress(uint256 loanId) public view returns (bool) {
-        (MarketParams memory p, uint256 trig, bool closed) = _riskView(loanId);
-        if (closed || p.record == address(0)) return false;
-        return IPersistenceRecord(p.record).persistedBelowDistress(p.quote, p.collateral, trig);
+        (Cfg memory c, uint256 trig, bool closed) = _riskView(loanId);
+        if (closed || c.p.record == address(0)) return false;
+        return Borrower.persistedBelowOrRevert(c, trig);
     }
 
     /// @notice Persistence-grade health: the record holds this loan above its trigger. INFORMATIONAL: no hub verb asks it.
     /// @notice False on a closed loan, exactly as `inDistress` is: a closed loan has no trigger left, which any record holds above.
     /// @notice False with no record, exactly as `inDistress` is: neither is PROVABLE, so neither is claimed.
     /// @notice Both false is not proof of a record-less market: a closed loan or a straddling window denies both; ask `recordStateOf`.
+    /// @dev Unlike `inDistress`, an unreadable record reads false here rather than reverting: no hub verb asks this question.
     function isHealthy(uint256 loanId) external view returns (bool) {
-        (MarketParams memory p, uint256 trig, bool closed) = _riskView(loanId);
-        if (closed || p.record == address(0)) return false;
-        return _probeAbove(p, trig);
+        (Cfg memory c, uint256 trig, bool closed) = _riskView(loanId);
+        if (closed || c.p.record == address(0)) return false;
+        return _probeAbove(c.p, trig);
     }
 
     /// @dev The recovery question, probed by SIGNATURE: it is not an interface member, so a record may not answer it.
@@ -523,11 +557,11 @@ contract AceLens {
         return ok && word == 1;
     }
 
-    /// @dev One read of the loan for the three risk predicates: its market's params, its trigger, and whether it has closed.
-    function _riskView(uint256 loanId) private view returns (MarketParams memory p, uint256 trig, bool closed) {
+    /// @dev One read of the loan for the three risk predicates: its market's config, its trigger, and whether it has closed.
+    function _riskView(uint256 loanId) private view returns (Cfg memory c, uint256 trig, bool closed) {
         Loan memory l = loan(loanId);
-        p = ACE.idToMarketParams(l.market);
-        trig = LoanMath.triggerPrice(l.debt, l.collateralUnits, p.minCoverageWad, marketState(l.market).unitScale);
+        c = _gateCfg(l.market);
+        trig = LoanMath.triggerPrice(l.debt, l.collateralUnits, c.p.minCoverageWad, c.unitScale);
         closed = l.closedAt != 0;
     }
 
@@ -567,7 +601,8 @@ contract AceLens {
 
     /// @notice Whether this market's record currently proves any price at all.
     /// @notice False from a record that cannot price closes every price-gated verb: draws, withdrawal, deleverage, the ask.
-    /// @notice `finalize` is NOT one: a record answering ZERO may still persist below-ness, so title can move while this reads false.
+    /// @notice Band off, `finalize` is NOT one: a record answering ZERO may still persist below-ness, so title can move while this reads false.
+    /// @notice Band on, both settle doors are: a dark price refuses them inside the term and for `SETTLE_DARK_GRACE` past expiry.
     /// @notice False from NO record is a different market entirely -- draws are UNCAPPED, not closed.
     /// @dev `recordStateOf` tells the two apart directly; this is the bool projection of it, nothing more.
     function recordLive(bytes32 id) external view returns (bool) {
@@ -629,18 +664,26 @@ contract AceLens {
     /// @notice Whether a deleverage crank would pass the channel's entry gates right now.
     /// @dev Gate mirror: band on, open, unexpired, not distressed, persistently in the band, above the stop.
     /// @dev True means admitted, not selling: at or above target, on a dust restore, or with the reserve holding the whole sale, it sells 0.
-    /// @dev The record reads below are RAW, deliberately: a live band implies a non-zero record at genesis.
-    /// @dev The `no record -> max` sentinel would read as ELIGIBLE with no price source: fail-OPEN, so never apply it.
+    /// @dev Each record read is the crank's, one word copied, so an unreadable record reverts `RecordUnreadable` here as it does there.
+    /// @dev The stop read is the crank's own capped read under `POLICY_GAS`, so an over-budget record reverts `RecordUnreadable` here as there.
+    /// @dev A minimum ANSWERED as zero reads ineligible here, where the crank refuses `NoRecordPrice`.
+    /// @dev A live band implies a record at genesis, so the band read refuses before the capped read could meet a codeless record.
     function deleverageEligible(uint256 loanId) external view returns (bool) {
         Loan memory l = loan(loanId);
-        MarketParams memory p = ACE.idToMarketParams(l.market);
-        if (p.deleverageBandBps == 0 || l.closedAt != 0) return false;
+        Cfg memory c = _gateCfg(l.market);
+        if (c.p.deleverageBandBps == 0 || l.closedAt != 0) return false;
         if (block.timestamp >= l.expiry) return false;
         if (inDistress(loanId)) return false;
-        if (!IPersistenceRecord(p.record).persistedBelowDistress(p.quote, p.collateral, deleverageBandLevel(loanId))) return false;
-        /// @dev mirror the crank's stop gate: below the stop floor the trade channel refuses
-        uint256 ps = IPersistenceRecord(p.record).minPrice(p.quote, p.collateral);
-        return ps > deleverageStopLevel(loanId);
+        if (!Borrower.persistedBelowOrRevert(c, deleverageBandLevel(loanId))) return false;
+        (bool answered, uint256 ps) = _cappedPrice(c);
+        if (!answered) revert RecordUnreadable();
+        return ps > deleverageStopLevel(loanId); // the crank's stop gate: at or below the stop the channel refuses
+    }
+
+    /// @dev THE lens's copy of the crank's and settlement's price read: `Borrower.cappedPrice` under the hub's own `POLICY_GAS`.
+    function _cappedPrice(Cfg memory c) private view returns (bool answered, uint256 price) {
+        c.policyGas = ACE.POLICY_GAS();
+        return Borrower.cappedPrice(c);
     }
 
     // ---- ask headroom, activity and lender credit ----

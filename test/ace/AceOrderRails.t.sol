@@ -546,13 +546,13 @@ contract AceOrderPostRailTest is AceOrderFixture {
         ace.postOrder(id, P, LIQ, LIQ_HIGH, MINFILL, TEN - 1, _far());
     }
 
-    /// @notice THE SENTINEL, and it is a WRITE: `minFillPrincipal == 0` resolves to `minPrincipal` and the RESOLVED value stores.
+    /// @notice THE SENTINEL, and it is a WRITE: `minFillPrincipal == 0` resolves to the order's `principal` and the RESOLVED value stores.
     /// @dev The shape `open` already uses for `tenor == 0`, so no read site ever branches on a sentinel.
     /// @dev It must resolve BEFORE the derivation, which divides the principal by it to bound the fill count.
-    function test_post_ZeroMinFillResolvesToMinDebt_AndStoresTheResolvedValue() public {
+    function test_post_ZeroMinFillResolvesToThePrincipal_AndStoresTheResolvedValue() public {
         uint256 orderId = _post(P, LIQ, LIQ_HIGH, 0, TEN, _far());
 
-        assertEq(ace.orderOf(orderId).minFillPrincipal, _minDebt(), "the sentinel resolved before it reached storage");
+        assertEq(ace.orderOf(orderId).minFillPrincipal, P, "the sentinel resolved to the whole principal before it reached storage");
     }
 
     /// @notice A one-second expiry posts. The expiry is wholly the maker's, and no TTL floor exists to add.

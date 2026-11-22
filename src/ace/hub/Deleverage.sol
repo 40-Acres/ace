@@ -5,7 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IAceDeleverageCallback} from "../../interfaces/IAceDeleverageCallback.sol";
-import {Borrower, LoanMatured, NoRecordPrice} from "./Borrower.sol";
+import {Borrower, LoanMatured, NoRecordPrice, RecordUnreadable} from "./Borrower.sol";
 import {Settlement} from "./Settlement.sol";
 import {LoanAccounting} from "./libraries/LoanAccounting.sol";
 import {LoanMath} from "./libraries/LoanMath.sol";
@@ -81,7 +81,9 @@ library Deleverage {
             uint256 bandLevel = FullMath.mulDivRoundingUp(trig, 1e18, 1e18 - c.p.deleverageBandBps * 1e14);
             /// @dev A record that cannot answer is UNREADABLE, never out of band: the band never spoke.
             if (!Borrower.persistedBelowOrRevert(c, bandLevel)) revert NotInBand();
-            ps = Borrower.persistedPrice(c); // ONE read: it sizes the sale and it is the disposal floor
+            bool answered;
+            (answered, ps) = Borrower.cappedPrice(c); // ONE read, settlement's own under its budget: it sizes the sale and is the disposal floor
+            if (!answered) revert RecordUnreadable();
             if (ps == 0) revert NoRecordPrice();
             /// @dev Ceiled against the borrower and STRICT (`ps > stopLevel`): with the sell-max rail it caps the sizing at `u <= C`.
             /// @dev `u == C` is admitted, not excluded, and benign.

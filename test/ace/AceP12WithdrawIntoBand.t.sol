@@ -51,7 +51,7 @@ contract AceP12WithdrawIntoBandTest is WarpClock {
         MarketParams memory p = AceFixtures.marketParams(address(usdc), address(coll));
         p.record = address(record);
         p.deleverageFloorEpsBps = ProtocolPolicy.DELEVERAGE_FLOOR_EPS_BPS;
-        p.deleverageBandBps = 3000; // the fold-flip rig's dials, which are PocMarkets.ybBtcDemoParams'
+        p.deleverageBandBps = 3000; // the fold-flip rig's dials: opens below 30% margin
         p.deleverageTargetBps = 5000;
         p.deleverageStopBps = 1000;
         p.deleverageProtocolBps = 500;

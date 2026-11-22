@@ -199,10 +199,10 @@ contract AceEarlyExitRebateTest is WarpClock {
     }
 
     /// @notice Plan test 6: the escrow is a strict subset of the lender share at the split a market ships.
-    /// @notice ONE split is reachable now -- the share is a hub constant, so no market can express another.
+    /// @notice At the ceiling share, the one a fresh hub is born at; every share the treasury can set is AceProtocolShare.t.sol's.
     /// @dev A real market, not arithmetic over a helper; the all-splits property is the fuzz below.
     function test_Escrow_NeverExceedsTheLenderShare() public {
-        uint256 shareBps = Constants.PROTOCOL_SHARE_BPS;
+        uint256 shareBps = Constants.MAX_PROTOCOL_SHARE_BPS;
         MarketParams memory p = _params();
         // distinct id: settleBountyBps 51 keeps this market from colliding with setUp's
         p.settleBountyBps = 51;
@@ -249,7 +249,7 @@ contract AceEarlyExitRebateTest is WarpClock {
     }
 
     /// @notice The headline identity, as integers, to the wei.
-    /// @dev cost/P = (rate / 365 days) * [ (T + t)/2 + s * T ], s = Constants.PROTOCOL_SHARE_BPS/10000.
+    /// @dev cost/P = (rate / 365 days) * [ (T + t)/2 + s * T ], s = Constants.MAX_PROTOCOL_SHARE_BPS/10000.
     /// @dev The borrower pays the midpoint of term booked and used, PLUS the share on the WHOLE term.
     /// @dev Denominators cleared: 2*cost*1e8*365 days == P*rate*(1e4*(T+t) + 2*shareBps*T).
     /// @dev Restating it in a form the source never takes is the point: this is not a mirror.
@@ -260,7 +260,7 @@ contract AceEarlyExitRebateTest is WarpClock {
 
         uint256 elapsed = 15 days;
         uint256 lhs = 2 * _cost(borrowerA) * 10000 * 10000 * Constants.SECONDS_PER_YEAR;
-        uint256 rhs = P * RATE * (10000 * (uint256(TEN30) + elapsed) + 2 * Constants.PROTOCOL_SHARE_BPS * uint256(TEN30));
+        uint256 rhs = P * RATE * (10000 * (uint256(TEN30) + elapsed) + 2 * Constants.MAX_PROTOCOL_SHARE_BPS * uint256(TEN30));
         assertEq(lhs, rhs, "the midpoint identity does not hold");
     }
 

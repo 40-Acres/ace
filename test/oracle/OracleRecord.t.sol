@@ -6,6 +6,7 @@ import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {NotSettleable} from "../../src/ace/hub/Settlement.sol";
+import {Constants} from "../../src/ace/hub/Constants.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
 import {OracleRecord} from "../../src/oracle/OracleRecord.sol";
 import {MockAggregatorV3} from "../mocks/MockAggregatorV3.sol";
@@ -208,7 +209,7 @@ contract OracleRecordTest is WarpClock, DeleverageCrank {
     function test_DeadFeed_MarketDegradesToTermedLoans() public {
         uint256 loanId = _open();
         feed.setReverting(true); // the feed dies outright
-        _warpBy(uint256(read.loan(loanId).tenor) + 1);
+        _warpBy(uint256(read.loan(loanId).tenor) + Constants.SETTLE_DARK_GRACE + 1); // band on, a dark record holds the doors for the grace
 
         ace.forceClose(loanId); // reverts on failure
 

@@ -367,7 +367,7 @@ contract AceGenesisRailsTest is Test {
     /// @notice THE ONLY CEILING ON THE RATE IS THE FEE-VS-PRINCIPAL RAIL, and this row is where that is said.
     /// @notice At a one-year maxTenor the rail's boundary is 2272 against 2273, whatever the minTenor.
     /// @dev 2272 and 2273 are LITERALS: a mirror of the implementation cannot disagree with it.
-    /// @dev So this row is the tripwire if `MAX_FEE_SHARE_BPS` or `PROTOCOL_SHARE_BPS` ever moves.
+    /// @dev So this row is the tripwire if `MAX_FEE_SHARE_BPS` or `MAX_PROTOCOL_SHARE_BPS` ever moves.
     function test_Rail_FeeShareIsTheOnlyCeiling() public {
         MarketParams memory p = _base();
         p.maxTenor = 365 days;

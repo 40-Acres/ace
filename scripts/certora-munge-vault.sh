@@ -94,7 +94,7 @@ swap() {
 
 I='    '
 swap "$CUR/AceVaultCaps.sol" "${I}function submitCap(address key, uint192 cap) external {" "${I}function submitCap(address key, uint192 cap) internal {"
-swap "$CUR/AceVaultCaps.sol" "${I}function submitDelist(address c) external {" "${I}function submitDelist(address c) internal {"
+swap "$CUR/AceVaultCaps.sol" "${I}function submitDelist(address collateral) external {" "${I}function submitDelist(address collateral) internal {"
 swap "$CUR/AceVaultCaps.sol" "${I}function acceptCap(address key) external {" "${I}function acceptCap(address key) internal {"
 swap "$CUR/AceVaultCaps.sol" "${I}function revokePendingCap(address key) external {" "${I}function revokePendingCap(address key) internal {"
 swap "$CUR/AceVaultInKind.sol" "${I}function collectForfeited(uint256[] calldata ids) external returns (uint256[] memory out) {" \
@@ -103,11 +103,11 @@ swap "$CUR/AceVaultInKind.sol" "${I}function claim(address[] calldata tokens, ad
   "${I}function claim(address[] memory tokens, address to) internal returns (uint256[] memory paid) {"
 swap "$CUR/AceVaultFlows.sol" "${I}function collectForfeited(uint256[] calldata ids) external returns (uint256[] memory out) {" \
   "${I}function collectForfeited(uint256[] memory ids) internal returns (uint256[] memory out) {"
-swap "$CUR/AceVaultFlows.sol" "${I}function returnProceeds(address c, uint256 cash, bool closes) external {" \
-  "${I}function returnProceeds(address c, uint256 cash, bool closes) internal {"
-swap "$CUR/AceVaultFlows.sol" "${I}function submitWriteOff(address c) external {" "${I}function submitWriteOff(address c) internal {"
-swap "$CUR/AceVaultFlows.sol" "${I}function acceptWriteOff(address c) external {" "${I}function acceptWriteOff(address c) internal {"
-swap "$CUR/AceVaultFlows.sol" "${I}function revokeWriteOff(address c) external {" "${I}function revokeWriteOff(address c) internal {"
+swap "$CUR/AceVaultFlows.sol" "${I}function returnProceeds(address collateral, uint256 cash, bool closes) external {" \
+  "${I}function returnProceeds(address collateral, uint256 cash, bool closes) internal {"
+swap "$CUR/AceVaultFlows.sol" "${I}function submitWriteOff(address collateral) external {" "${I}function submitWriteOff(address collateral) internal {"
+swap "$CUR/AceVaultFlows.sol" "${I}function acceptWriteOff(address collateral) external {" "${I}function acceptWriteOff(address collateral) internal {"
+swap "$CUR/AceVaultFlows.sol" "${I}function revokeWriteOff(address collateral) external {" "${I}function revokeWriteOff(address collateral) internal {"
 swap "$CUR/AceVaultFlows.sol" \
   "${I}function extendFor(uint256 loanId, uint256 maxFee, uint256 minBufferWad, bytes calldata data, bytes calldata permit2) external returns (uint256 fee) {" \
   "${I}function extendFor(uint256 loanId, uint256 maxFee, uint256 minBufferWad, bytes calldata data, bytes calldata permit2) internal returns (uint256 fee) {"
@@ -121,8 +121,8 @@ for r in 'ace() internal pure returns (address)' 'capTimelock() internal pure re
   'minTenor() internal pure returns (uint64)' 'maxTenor() internal pure returns (uint64)' '_word(uint256 i) private pure returns (uint256 w)'; do
   swap "$CUR/AceVaultTail.sol" "${I}function $r {" "${I}function ${r/ pure / view } {"
 done
-swap "$CUR/AceVault.sol" "${I}${I}(ok, r) = lib.delegatecall(abi.encodePacked(msg.data, TAIL0, TAIL1, TAIL2, TAIL3, TAIL4));" \
-  "${I}${I}(ok, r) = (true, AceVaultMunged.forward(lib, TAIL0, TAIL1, TAIL2, TAIL3, TAIL4));"
+swap "$CUR/AceVault.sol" "${I}${I}(ok, ret) = lib.delegatecall(abi.encodePacked(msg.data, TAIL0, TAIL1, TAIL2, TAIL3, TAIL4));" \
+  "${I}${I}(ok, ret) = (true, AceVaultMunged.forward(lib, TAIL0, TAIL1, TAIL2, TAIL3, TAIL4));"
 swap "$CUR/AceVault.sol" 'import {AceVaultTail} from "./AceVaultTail.sol";' \
   'import {AceVaultTail} from "./AceVaultTail.sol";'$'\n''import {AceVaultMunged} from "./AceVaultMunged.sol";'
 cp "$TEMPLATE" "$CUR/AceVaultMunged.sol"
@@ -142,7 +142,17 @@ if [ -n "$PIN" ]; then
     drawMoreFor) SEL=DRAW_MORE_FOR ;;
     refinanceFor) SEL=REFINANCE_FOR ;;
     extendFor) SEL=EXTEND_FOR ;;
-    *) echo "certora-munge-vault: no pin for '$PIN' -- refusing (drawMoreFor, refinanceFor or extendFor)." >&2; exit 1 ;;
+    submitCap) SEL=SUBMIT_CAP ;;
+    submitDelist) SEL=SUBMIT_DELIST ;;
+    acceptCap) SEL=ACCEPT_CAP ;;
+    revokePendingCap) SEL=REVOKE_PENDING_CAP ;;
+    collectForfeited) SEL=COLLECT ;;
+    claim) SEL=CLAIM ;;
+    returnProceeds) SEL=RETURN_PROCEEDS ;;
+    submitWriteOff) SEL=SUBMIT_WRITE_OFF ;;
+    acceptWriteOff) SEL=ACCEPT_WRITE_OFF ;;
+    revokeWriteOff) SEL=REVOKE_WRITE_OFF ;;
+    *) echo "certora-munge-vault: no pin for '$PIN' -- refusing (one of the thirteen forwarded verbs, by name)." >&2; exit 1 ;;
   esac
   swap "$CUR/AceVaultMunged.sol" "${I}${I}bytes4 s = msg.sig;" \
     "${I}${I}if (msg.sig != $SEL) revert NoForward();"$'\n'"${I}${I}bytes4 s = $SEL; // PINNED by scripts/certora-munge-vault.sh"

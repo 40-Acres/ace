@@ -81,9 +81,10 @@ These are design choices, documented so they are not reported as findings.
   the loan; no liquidator buys it. `deleverage` is the only sale against a live loan.
 - **There is no utilization cap.** A lender's exit liquidity is bounded by tenor: a fully lent market drains as its
   loans expire.
-- **The fee surface is two items.** An origination fee, of which the protocol's share is a fixed 10%, and a
-  per-market protocol share of deleverage proceeds, which a market's creator sets and may set to zero. Settlement
-  pays only the keeper's bounty.
+- **The fee surface is two items.** An origination fee, of which the protocol's share is set by the hub's `TREASURY`
+  alone and never above 10% (`MAX_PROTOCOL_SHARE_BPS`), so no market's creator can move it, and a per-market protocol
+  share of deleverage proceeds, which a market's creator sets and may set to zero. Settlement pays only the keeper's
+  bounty.
 - **A loan's funding floor is set once, at the draw.** Neither trades nor idle cash move it afterwards.
 - **Recordless markets have no price record.** Title on such a market moves at or after expiry only, and they
   cannot take a deleverage band.

@@ -47,6 +47,8 @@ error RetitleToTreasury(); // the treasury, in production a revenue router, can 
 error PushGasShort(); // the caller's limit leaves a push less than its fixed budget plus the tail: resend with more gas
 error PushGasOutOfRange(); // the constructor's push budget sits outside the rail
 error PolicyGasOutOfRange(); // the constructor's roll-policy budget sits outside the rail
+error NotTreasury(); // only this hub's treasury sets the origination share; a hub with no treasury keeps the ceiling for good
+error ShareOverCeiling(); // the asked origination share is over `MAX_PROTOCOL_SHARE_BPS`
 
 /* ========================================================================= */
 /*  TABLE OF CONTENTS                                                        */
@@ -72,12 +74,13 @@ error PolicyGasOutOfRange(); // the constructor's roll-policy budget sits outsid
 /// @dev The named borrower and lender are ADDRESS compares, never calls: `GateRefused` means a wrong party, never a sick dependency.
 /// @dev The borrower rule refuses NEW credit alone, an extension and a top-up included; it never blocks an exit, an add or a settlement.
 /// @dev `collect` checks neither, and pays the caller's own pool unconditionally.
-/// @dev A RECORD that cannot answer refuses six verbs by name with `RecordUnreadable`.
-/// @dev Draw, deposit, collateral withdrawal, deleverage, finalize and the inventory ask, and those six exactly.
+/// @dev A RECORD that cannot answer refuses seven verbs by name with `RecordUnreadable`.
+/// @dev Draw, deposit, collateral withdrawal, deleverage, finalize, the inventory ask, and band-on `forceClose` inside its grace: those seven exactly.
 /// @dev The extension and top-up predicates read it through the TRY twin instead, so `extend` and `drawMore` refuse by their selectors.
 /// @dev `addCollateral` reads no record, so no record can block a cure.
 /// @dev So a record CAN close a borrower's exit; the lender's exit reads no record and stays open.
-/// @dev It can NEVER stop settlement at tenor: `forceClose` CALLS no record.
+/// @dev It can NEVER stop settlement at tenor for long: band off, `forceClose` CALLS no record.
+/// @dev Band on, settlement prices the take at the record under the policy budget, and a dark one holds both doors `SETTLE_DARK_GRACE` past expiry.
 /// @dev Whether a record is WIRED is still read at every settle, and it sets how much of the lot the lenders take.
 /// @dev A QUOTE that reverts on transfer refuses `open` and a borrower's cash-out refinance, which pay their caller in the call.
 /// @dev It refuses `withdraw`, `collect`, `claimOwed`, the revenue sweep and the lender push at a terminal close.
@@ -99,14 +102,16 @@ contract Ace is ReentrancyGuardTransient {
     event RevenueSweepFailed(bytes32 indexed market, address indexed to, uint256 amount, uint64 at);
     /// @notice A lender named the contract its loans' extensions ask; zero consents to none.
     event RollPolicySet(address indexed lender, address indexed policy);
+    /// @notice The origination share moved from `previous` to `shareBps`; the constructor announces the first, from zero.
+    event ProtocolShareSet(uint256 previous, uint256 shareBps);
 
-    address internal immutable TREASURY; // revenue destination, fixed at deploy; zero ships an inert sweep
+    address internal immutable TREASURY; // revenue destination and the one setter of the origination share, fixed at deploy; zero ships an inert sweep
     address public immutable POSITION_MANAGER; // the ONE custodian for every market's loans; never per market
     address public immutable POSITION_TITLE; // the one ERC-721 over every position, hub-scoped; tokenId == loanId
     uint256 public immutable PUSH_GAS; // the gas each swallowed push hands its callee, fixed per deploy inside the rail
     uint256 public immutable PUSH_FLOOR; // the gas a lender push demands at its read: the budget past EIP-150's 1/64, plus its tail
     uint256 public immutable SWEEP_FLOOR; // the same for the keeper piggyback's sweep, whose tail also carries its stamp and counter writes
-    uint256 public immutable POLICY_GAS; // the gas a roll-policy ask hands its callee, fixed per deploy inside the rail
+    uint256 public immutable POLICY_GAS; // the gas a capped ask (a roll policy, a band-on settlement's price) hands its callee, fixed per deploy
 
     bytes32 private immutable CACHED_SEPARATOR; // the domain built at construction, valid for as long as the chain id holds
     uint256 private immutable CACHED_CHAIN_ID; // the chain constructed on; a change re-derives rather than replays
@@ -122,10 +127,10 @@ contract Ace is ReentrancyGuardTransient {
         return Storage.book();
     }
 
-    /// @param treasury Where swept revenue lands; zero ships an inert sweep.
+    /// @param treasury Where swept revenue lands, and the one setter of the origination share; zero ships an inert sweep and a share fixed at the ceiling.
     /// @param positionManager The one positionManager, deployed FIRST at this hub's predicted address.
     /// @param pushGas The fixed gas each swallowed push hands its callee, chosen per chain from that chain's measured transfer cost.
-    /// @param policyGas The fixed gas each roll-policy ask hands its callee, chosen per chain from the heaviest shipped policy's measured cost.
+    /// @param policyGas The fixed gas each capped ask hands its callee, a roll policy or a band-on record's price, chosen per chain from the heaviest measured.
     /// @dev THE BINDING RAIL, and it is why the deploy order is positionManager-then-hub.
     /// @dev At this point the positionManager already has code, so the hub verifies the binding itself.
     /// @dev A wrong prediction fails closed HERE, with no operator trust and no genesis rail.
@@ -145,6 +150,27 @@ contract Ace is ReentrancyGuardTransient {
         PUSH_FLOOR = whole + Constants.PUSH_TAIL;
         SWEEP_FLOOR = whole + Constants.SWEEP_TAIL;
         POLICY_GAS = policyGas;
+        Storage.protocol().shareBps = Constants.MAX_PROTOCOL_SHARE_BPS;
+        emit ProtocolShareSet(0, Constants.MAX_PROTOCOL_SHARE_BPS);
+    }
+
+    /// @notice Set the origination share every later fee is priced at, from zero to `MAX_PROTOCOL_SHARE_BPS`, at once.
+    /// @notice THE HUB'S ONE ADMIN POWER, and only TREASURY holds it; in production a router whose owner is a 72h timelock.
+    /// @notice It moves the borrower's cost and ACE's take; a lender's cut is the same at every share, to within a wei.
+    /// @dev A booked fee never moves: escrow and revenue are stored as amounts, and no later step re-prices one.
+    /// @dev The zero test refuses a zero-treasury hub's setter outright, so no caller from the zero address can ever move it.
+    /// @param shareBps The new share, in bps of the lender fee.
+    function setProtocolShareBps(uint256 shareBps) external nonReentrant {
+        if (msg.sender != TREASURY || TREASURY == address(0)) revert NotTreasury();
+        if (shareBps > Constants.MAX_PROTOCOL_SHARE_BPS) revert ShareOverCeiling();
+        emit ProtocolShareSet(Storage.protocol().shareBps, shareBps);
+        Storage.protocol().shareBps = shareBps;
+    }
+
+    /// @notice The origination share every fee door now prices at, in bps of the lender fee.
+    /// @dev Unguarded: its one writer takes the guard every verb holds, so a read inside a verb sees the share that verb priced at.
+    function protocolShareBps() external view returns (uint256) {
+        return Storage.protocol().shareBps;
     }
 
     /// @notice The EIP-712 domain this hub verifies credit-delegation signatures against.
@@ -194,7 +220,7 @@ contract Ace is ReentrancyGuardTransient {
         nonReentrantView
         returns (Borrower.Quote memory)
     {
-        Cfg memory c = _cache(id);
+        Cfg memory c = _feeCache(id);
         tenor = Borrower.tenorOrMin(tenor, c.p.minTenor); // the open doors' sentinel; a quote that skipped it refused a legal draw
         return Borrower.previewOpen(_market()[id], c, Borrower.OpenArgs(id, borrower, msg.sender, msg.sender, collateralUnits, principal, tenor, bnd));
     }
@@ -224,7 +250,7 @@ contract Ace is ReentrancyGuardTransient {
         nonReentrant
         returns (uint256)
     {
-        Cfg memory c = _cache(id);
+        Cfg memory c = _feeCache(id);
         tenor = Borrower.tenorOrMin(tenor, c.p.minTenor);
         return _open(c, Borrower.OpenArgs(id, borrower, msg.sender, msg.sender, collateralUnits, principal, tenor, bnd));
     }
@@ -250,7 +276,7 @@ contract Ace is ReentrancyGuardTransient {
         OpenBounds calldata bnd,
         bytes calldata permit2
     ) external nonReentrant returns (uint256) {
-        Cfg memory c = _cache(id);
+        Cfg memory c = _feeCache(id);
         Borrower.pullCollateralPermit(c, collateralUnits, permit2);
         tenor = Borrower.tenorOrMin(tenor, c.p.minTenor);
         return _open(c, Borrower.OpenArgs(id, borrower, address(this), msg.sender, collateralUnits, principal, tenor, bnd));
@@ -291,7 +317,7 @@ contract Ace is ReentrancyGuardTransient {
     /// @notice Re-anchor a live loan in place at its own tenor from now: same id, same title, the debt unchanged, the fee on the time added, in cash.
     /// @notice The new expiry is now plus the loan's own tenor, and the extended loan is admitted as a new one at `min(price, record)`.
     /// @notice It lands only before expiry and never in the second its term began, `expiry - tenor`: those refuse `LoanMatured` and `ExtensionAddsNoTime`.
-    /// @notice The fee never exceeds the fee on the loan's whole tenor: a caller signing for a later landing signs for that.
+    /// @notice The fee never exceeds the fee on the loan's whole tenor at the ceiling share: a caller signing for a later landing signs for that.
     /// @notice It needs the market lender's roll policy to return its selector; no policy, or any other answer, refuses `PolicyRefused`.
     /// @notice The policy sees the lot at the ask, and a withdrawal to the coverage line may follow in one call: a lot condition above the line is advisory.
     /// @notice ANYONE may extend, and whoever calls pays the fee; the holder and an operator of its title meet only the legs above.
@@ -322,7 +348,7 @@ contract Ace is ReentrancyGuardTransient {
     /// @dev Both extend doors funnel here.
     function _extend(uint256 id, uint256 minBufferWad, bytes calldata data, bytes calldata permit2) private returns (uint256) {
         bytes32 mid = _book().loans[id].market;
-        return Borrower.extend(_book(), _market()[mid], _cache(mid), id, minBufferWad, data, permit2);
+        return Borrower.extend(_book(), _market()[mid], _feeCache(mid), id, minBufferWad, data, permit2);
     }
 
     /// @notice What `extend` would do if `caller` sent it now.
@@ -339,7 +365,7 @@ contract Ace is ReentrancyGuardTransient {
         nonReentrantView
         returns (bool ok, bytes4 reason, uint256 fee)
     {
-        return Borrower.tryExtend(_book(), _cache(_book().loans[id].market), id, minBufferWad, data, caller);
+        return Borrower.tryExtend(_book(), _feeCache(_book().loans[id].market), id, minBufferWad, data, caller);
     }
 
     /// @notice Draw `amount` more on a live loan from its own market's resting cash at the one price: debt and claim rise by it, the term holds.
@@ -354,7 +380,7 @@ contract Ace is ReentrancyGuardTransient {
     /// @return The top-up's fee.
     function drawMore(uint256 id, uint256 amount, OpenBounds calldata bnd) external nonReentrant returns (uint256) {
         bytes32 mid = _book().loans[id].market;
-        return Borrower.drawMore(_book(), _market()[mid], _cache(mid), id, amount, bnd);
+        return Borrower.drawMore(_book(), _market()[mid], _feeCache(mid), id, amount, bnd);
     }
 
     /// @notice What `drawMore` would do if `caller` sent it now: whether it lands, why not, its fee and the term charged.
@@ -372,7 +398,7 @@ contract Ace is ReentrancyGuardTransient {
         returns (bool ok, bytes4 reason, uint256 fee, uint64 term)
     {
         bytes32 mid = _book().loans[id].market;
-        return Borrower.tryDrawMore(_book(), _market()[mid], _cache(mid), id, amount, bnd, caller);
+        return Borrower.tryDrawMore(_book(), _market()[mid], _feeCache(mid), id, amount, bnd, caller);
     }
 
     /// @notice Add `units` of collateral to a live loan, paid by the caller: anyone may, and only the lot moves; it cures distress as a repay does.
@@ -457,7 +483,7 @@ contract Ace is ReentrancyGuardTransient {
     /// @param principal Quote wanted.
     /// @param liqLow The trigger the escrow is sized at, plus a fill slack; fills follow the REMAINING escrow, so a full take triggers at or under it.
     /// @param liqHigh The worst trigger the maker accepts; equal to `liqLow` pins a single price.
-    /// @param minFillPrincipal The maker's floor on a single fill; equal to `principal` is all-or-nothing.
+    /// @param minFillPrincipal The maker's floor on one fill; zero means `principal`; a floor splits only at or under half of `principal`, else it fills whole.
     /// @param tenor The term each fill opens for, or 0 for `minTenor`.
     /// @param expiry When the ask dies; the maker's own choice, bounded by nothing, and zero never expires.
     /// @return The new order id.
@@ -478,7 +504,7 @@ contract Ace is ReentrancyGuardTransient {
     /// @return The loan this fill created.
     function fillOrder(uint256 id, uint256 principalOut, uint256 unitsOut) external nonReentrant returns (uint256) {
         bytes32 m = _book().orders[id].market;
-        return Orders.fill(_book(), _market()[m], _cache(m), id, principalOut, unitsOut);
+        return Orders.fill(_book(), _market()[m], _feeCache(m), id, principalOut, unitsOut);
     }
 
     /// @notice Retires a resting order and returns whatever escrow is left to an address of the maker's choosing.
@@ -708,15 +734,16 @@ contract Ace is ReentrancyGuardTransient {
     function refinanceTo(MigrateArgs calldata m) external nonReentrant returns (uint256) {
         MigrateArgs memory a = m;
         bytes32 src = _book().loans[a.id].market;
-        Cfg memory cd = _cache(a.dst);
+        Cfg memory cd = _feeCache(a.dst);
         a.newTenor = Borrower.tenorOrMin(a.newTenor, cd.p.minTenor); // the successor and `Refinanced` carry the real term
-        return Borrower.refinance(_book(), _market(), _cache(src), cd, a);
+        return Borrower.refinance(_book(), _market(), _cache(src), cd, a); // only the successor prices a fee, at `cd`'s share
     }
 
     /// @notice Settle a loan whose distress has persisted for the full settle window. Final.
     /// @notice The keeper's in-kind sliver is CREDITED, never paid inline: `claimOwed` collects it.
     /// @notice The LENDER's pooled quote credit is pushed here instead, swallowed; only the quote side moves.
     /// @notice That push is STRICT: a limit short of its fixed budget plus the tail reverts `PushGasShort`.
+    /// @notice Band on, the take is the debt at the record's price, read under the policy budget (`RecordGasShort`); a dark one refuses.
     /// @dev No revenue sweep rides this door, unlike `forceClose` and `deleverage`: `sweepRevenue` is the standalone door.
     function finalize(uint256 id) external nonReentrant {
         bytes32 mid = _book().loans[id].market;
@@ -727,12 +754,14 @@ contract Ace is ReentrancyGuardTransient {
 
     /// @notice Settle an expired loan by claim conversion; equity above what the market takes is CREDITED to the borrower.
     /// @notice A RECORDLESS market takes the whole coverage line rather than the claims' need, so its borrower may keep nothing.
-    /// @notice THE one settle verb at tenor, permissionless from the expiry second; it extends nothing, and asks no policy and no record.
+    /// @notice THE one settle verb at tenor, permissionless from the expiry second; it extends nothing and asks no policy.
+    /// @notice Band on, it takes the debt at the record's price, read under the policy budget: a limit that cannot hand it over reverts `RecordGasShort`.
+    /// @notice Band on, a dark price refuses until `SETTLE_DARK_GRACE` past expiry, then the need is taken: zero is `NoRecordPrice`, none `RecordUnreadable`.
     /// @notice The keeper's in-kind sliver is CREDITED, priced at the loan's funding floor; `claimOwed` collects it.
     /// @notice It pays the market's lender their pooled quote credit, swallowed, so no quote or lender can fail this door.
     /// @notice That push is STRICT: a limit short of its fixed budget plus the tail reverts `PushGasShort`.
     /// @notice THEN it sweeps any due protocol revenue, BEST-EFFORT on what the push left: a limit that cannot fund it skips it.
-    /// @dev Whether a record is WIRED is still read, as a param compare: a recordless market forfeits the coverage line to its lender.
+    /// @dev Band off, whether a record is WIRED is read as a param compare: a recordless market forfeits the coverage line to its lender.
     /// @dev Settleability at tenor survives by CONSTRUCTION on the units side, never by the swallowed legs' grace: never give it a units-side call.
     /// @dev The two token legs run LAST, after every state write: a view reached from a hook sees settled state.
     function forceClose(uint256 id) external nonReentrant {
@@ -949,6 +978,12 @@ contract Ace is ReentrancyGuardTransient {
         c.positionTitle = POSITION_TITLE; // immutable read; only the open body uses it, but the cache is built once
         c.positionManager = POSITION_MANAGER;
         c.policyGas = POLICY_GAS;
+    }
+
+    /// @dev `_cache` plus the live origination share, for the doors that price a fee; every other door leaves it zero and skips the read.
+    function _feeCache(bytes32 id) internal view returns (Cfg memory c) {
+        c = _cache(id);
+        c.protocolShareBps = Storage.protocol().shareBps;
     }
 
     /* ====== 9. VIEWS: the ones on-chain callers read from the hub, not a lens ====== */

@@ -11,7 +11,7 @@ import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 /// @dev Characterised as floors and ceilings, never re-spelled as expressions, so it survives a rewrite.
 /// @dev `AceAllInFeeSeam` asserts the take rail on live draws; here it is unconditional over the domain.
 contract AceAllInFeeRoundingTest is Test {
-    uint256 internal constant PS = Constants.PROTOCOL_SHARE_BPS;
+    uint256 internal constant PS = Constants.MAX_PROTOCOL_SHARE_BPS;
     uint256 internal constant PHI = Constants.REBATE_PHI_BPS;
 
     /// @dev Every product this file forms stays under 2^256 at or below it, so no fuzz needs FullMath.

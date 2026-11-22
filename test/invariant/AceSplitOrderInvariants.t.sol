@@ -51,6 +51,16 @@ abstract contract AceSplitOrderInvariantsBase is StdInvariant, Test {
         _invariant_escrowIsConserved();
         _invariant_theRemainingRatioNeverFalls();
         _invariant_aRemainderIsZeroOrFillable();
+        _invariant_aZeroFloorStoresTheWholePrincipal();
+    }
+
+    /// @notice A zero-floor post stores its whole principal as the floor, so it fills all-or-nothing.
+    function _invariant_aZeroFloorStoresTheWholePrincipal() public view {
+        uint256[] memory ids = handler.orderIds();
+        for (uint256 i; i < ids.length; i++) {
+            if (!handler.zeroFloorPosted(ids[i])) continue;
+            assertEq(ace.orderOf(ids[i]).minFillPrincipal, handler.postedPrincipal(ids[i]), "zero floor: the stored floor is not the whole principal");
+        }
     }
 
     /// @notice THE PROPERTY: no legal fill between the coverage line and the pro-rata cap was ever refused.
@@ -106,6 +116,7 @@ abstract contract AceSplitOrderInvariantsBase is StdInvariant, Test {
         console2.log("  splittable           ", handler.splittablePosted());
         console2.log("  whole-only           ", handler.wholeOnlyPosted());
         console2.log("  zero-minFill sentinel", handler.sentinelPosted());
+        console2.log("  stated whole floor   ", handler.wholeStatedPosted());
         console2.log("cap fills landed       ", handler.capFills());
         console2.log("  partial (split)      ", handler.partialCapFills());
         console2.log("  exactly minFill      ", handler.minFillCapFills());
