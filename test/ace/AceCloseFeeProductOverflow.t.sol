@@ -37,7 +37,7 @@ contract LoanAccountingHarness {
     }
 
     function protocolRevenue() external view returns (uint256) {
-        return M.s.protocolRevenue;
+        return Storage.revenue()[M.p.quote];
     }
 }
 

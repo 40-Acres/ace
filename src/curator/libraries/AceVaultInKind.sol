@@ -8,10 +8,10 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {Checkpoints} from "@openzeppelin/contracts/utils/structs/Checkpoints.sol";
 import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
-import {EmptyPot} from "../ace/hub/Lender.sol";
-import {MarketParams} from "../ace/hub/Types.sol";
-import {IAceLenderOps} from "../interfaces/IAceLenderOps.sol";
-import {IAceVaultOps} from "../interfaces/IAceVaultOps.sol";
+import {EmptyPot} from "../../ace/hub/Lender.sol";
+import {MarketParams} from "../../ace/hub/Types.sol";
+import {IAceLenderOps} from "../../interfaces/IAceLenderOps.sol";
+import {IAceVaultOps} from "../../interfaces/IAceVaultOps.sol";
 import {AceVaultFlows} from "./AceVaultFlows.sol";
 import {AceVaultTail} from "./AceVaultTail.sol";
 
@@ -76,7 +76,7 @@ library AceVaultInKind {
     bytes32 internal constant CONTEXT = 0xbacc57cdbed839b845ee25e51e0ed6cdd2a7a2a19d2e15c45d890c30be236300; // erc7201:ace.inkind.context, transient
 
     /// @notice The library's state, at its ERC-7201 root.
-    function layout() internal pure returns (Layout storage $) {
+    function inKindLayout() internal pure returns (Layout storage $) {
         bytes32 slot = ROOT;
         assembly ("memory-safe") {
             $.slot := slot
@@ -95,7 +95,7 @@ library AceVaultInKind {
     /// @return out The units each id brought home.
     function collectForfeited(uint256[] calldata ids) external returns (uint256[] memory out) {
         (address ace, address asset) = (AceVaultTail.ace(), AceVaultTail.asset());
-        Layout storage $ = layout();
+        Layout storage $ = inKindLayout();
         _fold($);
         IAceLenderOps hub = IAceLenderOps(ace);
         out = new uint256[](ids.length);
@@ -147,7 +147,7 @@ library AceVaultInKind {
             if (from == address(0) || from == ctx) return;
             to = address(0);
         }
-        Layout storage $ = layout();
+        Layout storage $ = inKindLayout();
         _fold($);
         if (from == address(0)) $.trackedSupply += value;
         else _push($.bal[from], $.bal[from].latest() - value);
@@ -166,7 +166,7 @@ library AceVaultInKind {
         if (!AceVaultTail.inKind()) revert ModeUnbuilt();
         if (to == address(this)) revert ClaimToVault();
         address holder = msg.sender;
-        Layout storage $ = layout();
+        Layout storage $ = inKindLayout();
         _fold($);
         Checkpoints.Trace208 storage history = $.bal[holder];
         paid = new uint256[](tokens.length);

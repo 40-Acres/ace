@@ -6,7 +6,7 @@
 // and a DARK answer refuses until `SETTLE_DARK_GRACE` past expiry: that is the one refusal the rule admits, and a live
 // answer inside the grace must still settle. The read is summarized as any answer, never reverting, recorded in persistent
 // ghosts so the assert can see what a reverted call read; its gas floor is assumed met, as the push's is. Its other external calls are the custodian's
-// `retireCustody`, the swallowed lender push and the best-effort revenue sweep. Nothing else checks this: the fuzz handler
+// `retireCustody` and the swallowed lender push; no revenue sweep rides it. Nothing else checks this: the fuzz handler
 // swallows a refusal.
 //
 // A LIVENESS rule, so every premise is a refusal the property allows or a fact about reachable states, and NO summary
@@ -44,7 +44,6 @@ methods {
     function marketRailsOf(bytes32) external returns (uint256, uint256, uint256) envfree; // AceHarness
     function marketSettleBountyBpsOf(bytes32) external returns (uint256) envfree; // AceHarness
     function marketBandBpsOf(bytes32) external returns (uint256) envfree; // AceHarness
-    function marketLastSweptAtOf(bytes32) external returns (uint64) envfree; // AceHarness
 
     function settleDarkGrace() external returns (uint256) envfree; // AceHarness: Constants.SETTLE_DARK_GRACE
 
@@ -60,7 +59,7 @@ methods {
 
     // via-IR hides both the callee and the selector of the custodian call, so a signature summary never matches; the
     // dispatch runs the real custodian (its loan-manager and custody checks included) and the hub's own push self-call,
-    // which the lender push and the sweep both make. Any OTHER unresolved call takes the default, which assumes it
+    // which the lender push makes. Any OTHER unresolved call takes the default, which assumes it
     // succeeds, so the call-resolution report is read for them: a liveness proof is only as good as that list.
     unresolved external in _._ => DISPATCH [
         pm.retireCustody(uint256,uint256),
@@ -131,8 +130,6 @@ rule forceCloseMustExecute(env e, uint256 id) {
     uint256 unsoldPots; uint256 settledPots;
     unsoldPots, settledPots = marketPotCountsOf(m);
     require loanPotOf(id) < 2^254 && marketUnsoldUnitsOf(m) < 2^254 && unsoldPots < 2^127 && settledPots < 2^127;
-    // THE CLOCK again, for the sweep: every stamp is a past block's, and no chain's timestamp is within a period of 2^64
-    require to_mathint(marketLastSweptAtOf(m)) + 86400 < 2^64;
     bool bandOn = marketBandBpsOf(m) != 0; // read BEFORE the call: a later call resets lastReverted
     mathint graceEnd = to_mathint(loanExpiryOf(id)) + to_mathint(settleDarkGrace());
     forceClose@withrevert(e, id);

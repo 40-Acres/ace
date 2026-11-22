@@ -5,10 +5,10 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {AceVaultFlows, BorrowRequest, Terms} from "../../curator/AceVaultFlows.sol";
+import {AceVaultFlows, BorrowRequest, Terms} from "../../curator/libraries/AceVaultFlows.sol";
 import {AceVault} from "../../curator/AceVault.sol";
-import {AceVaultCaps} from "../../curator/AceVaultCaps.sol";
-import {PriceGrid} from "../../curator/PriceGrid.sol";
+import {AceVaultCaps} from "../../curator/libraries/AceVaultCaps.sol";
+import {PriceGrid} from "../../curator/libraries/PriceGrid.sol";
 import {Constants} from "../../ace/hub/Constants.sol";
 import {LoanMath} from "../../ace/hub/libraries/LoanMath.sol";
 import {Probe} from "../../ace/hub/libraries/Probe.sol";
@@ -68,12 +68,15 @@ struct CuratorTermsConfig {
 /// @notice A REFINANCE keeps the loan's market while the row names it and the buffered minimum covers its price, else today's; a top-up needs the first.
 /// @notice AS THE DOOR anyone collects a forfeit here, and the CURATOR sells it at once, to a buyer it names, at any price over the floor.
 /// @notice IN KIND there is no door: a collect here forwards to the vault's, which takes the pot home, and a sale or cash return refuses `NotDoor`.
-/// @notice THE FLOOR, on an open key, is the latest pot's market record minimum less `MAX_SALE_DISCOUNT_BPS`; a dark record or accepted write-off lifts it.
+/// @notice THE FLOOR is max(d, min(s, v)): s the units' share of their key's booked value, v their `saleRecord` value, d that less `MAX_SALE_DISCOUNT_BPS`.
+/// @notice Goods worth their booked share fetch at least it, others their record value; it binds on an open key, and an accepted write-off lifts it.
+/// @notice A DARK RECORD leaves the share alone as the floor, since the share reads no price; distressed goods behind one wait for the write-off.
 /// @notice No listing or timelock precedes a sale, and `minOut` is the curator's own bound: a sale under value moves it to the buyer, who may be the curator.
 /// @notice A sale's cash vests at the vault, and an exit while goods sit here prices them at zero.
 /// @dev A door vault must name a guardian; a lost curator key strands the goods here, with no sale and no write-off, while the exemption still reopens entry.
 /// @dev The sale runs under this contract's lock and outside the vault's: a buyer's callback finds the item's key still open, at its booked value.
-/// @dev A collect onto a key voids its pending write-off, so new defaults delay that escape; cutting the row stops new loans and bounds the delay.
+/// @dev A collect onto a key voids its pending write-off, so new defaults delay that escape; a zero cap stops new loans, not a re-term of a live one.
+/// @dev A product whose `borrowTerms` builds a recordless market pins no record, so its goods take the booked share alone, as behind a dark record.
 /// @dev `MIN_PRINCIPAL` and `COVERAGE_WAD` are every market's, fixed at deploy and checked against the hub's genesis rails.
 /// @dev The hub, the asset and the rail are copies of the vault's, taken before it existed; terms whose copy disagrees lend nothing.
 /// @dev A product overrides `borrowTerms`, `refinanceTerms`, `admitsExtension` and `room`, and may call the internal `_names`, `_buffered` and `_market`.
@@ -312,7 +315,7 @@ contract CuratorTerms is IVaultTerms, IVaultDoor, ReentrancyGuardTransient {
     // ---- the door ----
 
     /// @notice End each named loan of the vault's and take its pot to this door, or in kind home to the vault. PERMISSIONLESS and key-free.
-    /// @notice A repaid or already-collected id yields zero; one neither expired nor settleable on distress reverts the batch.
+    /// @notice A repaid or collected id, or one whose record cannot answer, yields zero; one neither expired nor settleable on distress reverts the batch.
     /// @notice Each pot pins its collateral's `saleRecord` to its own market's record, so a later row change moves no floor; in kind nothing reads it.
     function collectForfeited(uint256[] calldata loanIds) external nonReentrant returns (uint256[] memory out) {
         out = IAceVaultDoor(VAULT).collectForfeited(loanIds);
@@ -325,9 +328,9 @@ contract CuratorTerms is IVaultTerms, IVaultDoor, ReentrancyGuardTransient {
     }
 
     /// @notice Sell goods at this door for cash and return the cash to the vault against the item, closing it once none is left. CURATOR ONLY.
-    /// @notice While the item's key is open it refuses a sale under the floor; a dark record or an accepted write-off leaves none.
+    /// @notice While the item's key is open it refuses a sale under the floor; a dark record leaves the booked share, an accepted write-off none.
     /// @dev THE BUYER STATES WHAT IT PAYS AND THE DOOR PULLS EXACTLY THAT, after the callback, which is told the larger of `minOut`, the floor and one atom.
-    /// @dev `type(uint256).max` sells this door's whole balance at execution, so a dust donation cannot hold the key open.
+    /// @dev `type(uint256).max` sells this door's whole balance at execution, so a dust donation holds the key open only if the buyer sends units back.
     /// @param item The good to sell.
     /// @param units How much of it to offer up.
     /// @param buyer Who receives the goods and owes the cash.
@@ -356,7 +359,7 @@ contract CuratorTerms is IVaultTerms, IVaultDoor, ReentrancyGuardTransient {
     }
 
     /// @notice Send the cash this door holds to the vault, as a counted donation that vests. PERMISSIONLESS.
-    /// @dev Through the vault's own `returnProceeds`, under the asset's key, which no market names: it takes the vault's lock, so no lending door can count it.
+    /// @dev Through the vault's own `returnProceeds`, under the asset's key, which no market names: it takes the vault's lock, so no lending verb can count it.
     /// @return cash The cash forwarded.
     function forwardCash() external nonReentrant returns (uint256 cash) {
         cash = IERC20(ASSET).balanceOf(address(this));
@@ -370,21 +373,28 @@ contract CuratorTerms is IVaultTerms, IVaultDoor, ReentrancyGuardTransient {
         IAceVaultDoor(VAULT).returnProceeds(key, cash, closes);
     }
 
-    /// @dev The least a sale of `units` of `item` takes: zero unless its key is open and its `saleRecord` answers a price, else that less the discount, up.
+    /// @dev The least a sale of `units` of `item` takes: zero on a closed key, else max(d, min(s, v)), each rounded up.
+    /// @dev s is the units' pro-rata share of the key's booked value over the door's balance, v their record value, d that less the discount.
+    /// @dev A `saleRecord` that cannot answer, starved of gas included, leaves the share, which reads no price.
     /// @dev A price too large to discount sets an unpayable floor, so every sale refuses until the write-off.
     function _floor(address item, uint256 units) private view returns (uint256) {
-        if (!_keyOpen(item)) return 0;
+        (bool open, uint256 booked) = _key(item);
+        if (!open) return 0;
+        uint256 share = Math.mulDiv(booked, units, Math.max(units, IERC20(item).balanceOf(address(this))), Math.Rounding.Ceil);
         (bool ok, uint256 m) = Probe.askWord(saleRecord[item], abi.encodeCall(IPersistenceRecord.minPrice, (ASSET, item)));
-        if (!ok || m == 0) return 0;
+        if (!ok || m == 0) return share;
         uint256 keep = 10_000 - MAX_SALE_DISCOUNT_BPS;
         if (m > type(uint256).max / keep) return type(uint256).max;
-        return Math.mulDiv(units, m * keep, Q96 * 10_000, Math.Rounding.Ceil);
+        uint256 discounted = Math.mulDiv(units, m * keep, Q96 * 10_000, Math.Rounding.Ceil);
+        if (discounted >= share) return discounted;
+        return Math.min(share, Math.mulDiv(units, m, Q96, Math.Rounding.Ceil)); // `discounted` is under `share`, so the record value cannot overflow
     }
 
-    /// @dev Whether `item`'s key at the vault is open: its seized record's bit 248, read raw at the slot `IAceVaultDoor` names for a door.
-    function _keyOpen(address item) private view returns (bool) {
+    /// @dev `item`'s key at the vault, read raw at the slot `IAceVaultDoor` names for a door: the open flag at bit 248, the booked value in bits 0-183.
+    function _key(address item) private view returns (bool open, uint256 booked) {
         bytes32[] memory s = new bytes32[](1);
         s[0] = keccak256(abi.encode(item, uint256(AceVaultFlows.ROOT) + SEIZED));
-        return (uint256(AceVault(VAULT).extsload(s)[0]) >> 248) & 1 != 0;
+        uint256 word = uint256(AceVault(VAULT).extsload(s)[0]);
+        return ((word >> 248) & 1 != 0, word & type(uint184).max);
     }
 }

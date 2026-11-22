@@ -90,7 +90,7 @@ contract AceAskBudgetOverpayTest is WarpClock {
     /// @dev The quote the hub's books say it holds: resting cash + revenue + the lender's uncollected credit + quote owed to claimants.
     /// @dev The one loan here is settled, so its fee escrow is zero and no term is left to refund.
     function _booked() internal view returns (uint256) {
-        return read.poolResting(id) + read.protocolRevenue(id) + read.poolOwed(id) + read.quoteOwedTotal(id);
+        return read.poolResting(id) + read.revenuePot(address(usdc)) + read.poolOwed(id) + read.quoteOwedTotal(id);
     }
 
     /// @notice A leg that delivers ZERO units books nothing: the charge is a function of what left the pot.

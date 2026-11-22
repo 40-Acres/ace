@@ -22,7 +22,7 @@ import {LaunchOpsBudget} from "./LaunchOpsBudget.sol";
 import {LaunchTokenFactory} from "./LaunchTokenFactory.sol";
 import {LockAccount} from "./LockAccount.sol";
 import {RunwayHook} from "./RunwayHook.sol";
-import {PriceGrid} from "../../curator/PriceGrid.sol";
+import {PriceGrid} from "../../curator/libraries/PriceGrid.sol";
 
 /// @notice The hub as this vault holds it: the lender surface plus the in-kind redeem, the only door a forfeit's pot has here.
 interface ILaunchVaultHub is IAceLenderOps {

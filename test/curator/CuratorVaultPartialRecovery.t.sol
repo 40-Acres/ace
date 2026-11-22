@@ -4,7 +4,7 @@ pragma solidity 0.8.36;
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
 import {AceVault} from "../../src/curator/AceVault.sol";
-import {PriceGrid} from "../../src/curator/PriceGrid.sol";
+import {PriceGrid} from "../../src/curator/libraries/PriceGrid.sol";
 import {Storage} from "../../src/ace/hub/Types.sol";
 import {PriceFrame} from "../utils/PriceFrame.sol";
 import {PocDeployConfig} from "../../src/config/Defaults.sol";

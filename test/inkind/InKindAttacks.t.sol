@@ -3,9 +3,9 @@ pragma solidity 0.8.36;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
-import {AceVaultCaps} from "../../src/curator/AceVaultCaps.sol";
-import {AceVaultFlows} from "../../src/curator/AceVaultFlows.sol";
-import {PriceGrid} from "../../src/curator/PriceGrid.sol";
+import {AceVaultCaps} from "../../src/curator/libraries/AceVaultCaps.sol";
+import {AceVaultFlows} from "../../src/curator/libraries/AceVaultFlows.sol";
+import {PriceGrid} from "../../src/curator/libraries/PriceGrid.sol";
 import {IInKindTerms, IInKindVault, Listing, Quote, Row} from "./InKindSurface.sol";
 import {FlashCollector, ShareFlashLender} from "./InKindMocks.sol";
 import {InKindRig} from "./InKindRig.sol";

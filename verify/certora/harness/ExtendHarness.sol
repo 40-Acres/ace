@@ -79,10 +79,11 @@ contract ExtendHarness is Ace {
         return Storage.book().creditOperator[borrower][operator];
     }
 
-    /// @notice One market's quote token, and its three booked pots: resting cash, protocol revenue and the claims pot.
+    /// @notice One market's quote token, its resting cash, its quote's protocol revenue pot and its claims pot.
+    /// @dev The revenue pot is keyed by the market's quote, so every market in that quote reads the same one.
     function marketOf(bytes32 m) external view returns (address quote, uint256 cash, uint256 revenue, uint256 quoteOwedTotal) {
         Market storage M = Storage.markets()[m];
-        return (M.p.quote, M.s.cash, M.s.protocolRevenue, M.s.quoteOwedTotal);
+        return (M.p.quote, M.s.cash, Storage.revenue()[M.p.quote], M.s.quoteOwedTotal);
     }
 
     /// @notice One market's collateral, record and lender: the contracts and the party it names.

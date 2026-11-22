@@ -455,7 +455,7 @@ contract AceGenesisParamFuzzTest is WarpClock {
         for (uint256 i = 1; i <= read.loanCount(); i++) {
             pot += read.feeEscrowOf(i);
         }
-        assertEq(usdc.balanceOf(address(ace)), resting + m.protocolRevenue + pot + owed + m.quoteOwedTotal, "solvency identity");
+        assertEq(usdc.balanceOf(address(ace)), resting + read.revenuePot(address(usdc)) + pot + owed + m.quoteOwedTotal, "solvency identity");
     }
 
     /* ====================== assertion 6: DISCHARGED, there is no grid ====================== */

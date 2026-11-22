@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
-import {Ace} from "../../src/ace/hub/Ace.sol";
+import {Ace, PushRefused} from "../../src/ace/hub/Ace.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {LoanClosed, NotExpired} from "../../src/ace/hub/Settlement.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
@@ -253,7 +253,7 @@ contract AceExpirySettlesOnlyTest is WarpClock {
         assertEq(ret.length, 0, string.concat(name, " reverted with data: the selector still dispatches"));
     }
 
-    /* ============================== a hostile quote on the push and the sweep (review R-3) ============================== */
+    /* ============================== a hostile quote on the push, and a refusing treasury (review R-3) ============================== */
 
     /// @dev A loan in a market whose quote is the hostile mock, armed AFTER funding so only the closing push meets it.
     function _hostileLoan() internal returns (MockHostileGasERC20 hq, bytes32 mid, uint256 loanId) {
@@ -297,31 +297,32 @@ contract AceExpirySettlesOnlyTest is WarpClock {
         _settleHostile(mid, loanId);
     }
 
-    /// @notice A quote that refuses the treasury leaves the loan settled; the best-effort sweep keeps the revenue it could not send.
-    function test_ARefusingTreasuryOnTheSweepCannotStopIt() public {
+    /// @notice A quote that refuses the treasury leaves the loan settled, and its revenue pot keeps every atom.
+    /// @notice The refusal lands only on the sweep, which reverts `PushRefused` and leaves the pot whole.
+    function test_ABlacklistedTreasuryCannotStopSettlementAndOnlyTheSweepRefuses() public {
         MockBlacklistERC20 bq = new MockBlacklistERC20("Blacklist USD", "BUSD", 6);
         bytes32 mid = _market(address(bq), address(coll), false);
         uint256 loanId = _loanIn(mid);
         bq.setBlacklisted(AceFixtures.TREASURY, true);
-        uint256 rev0 = read.protocolRevenue(mid);
+        uint256 rev0 = read.revenuePot(address(bq));
         assertGt(rev0, 0, "PREMISE: revenue is due");
         _warpTo(read.loan(loanId).expiry);
-        vm.expectEmit(true, true, false, false, address(ace));
-        emit Ace.RevenueSweepFailed(mid, AceFixtures.TREASURY, rev0, 0);
         vm.prank(keeper);
         ace.forceClose(loanId);
-        assertTrue(ace.isClosed(loanId), "the refused sweep did not stop the settlement");
-        assertEq(read.protocolRevenue(mid), rev0, "and the revenue stays counted");
+        assertTrue(ace.isClosed(loanId), "a refusing treasury stopped the settlement");
+        assertEq(read.revenuePot(address(bq)), rev0, "and the revenue stays counted");
         _assertSolvent(mid);
+        vm.expectRevert(PushRefused.selector);
+        ace.sweepRevenue(address(bq));
+        assertEq(read.revenuePot(address(bq)), rev0, "the refused sweep reverted whole: the pot keeps every atom");
     }
 
-    /// @notice The least limit that clears the push's floor settles and pushes the lender, and the sweep behind it skips.
-    /// @notice A fat limit settles the same loan and sweeps too: the sweep rides the close, after the push.
-    function test_TheLeastLimitClearsThePushAndSkipsTheSweep() public {
+    /// @notice The least limit that clears the push's floor settles and pushes the lender, and moves no revenue.
+    /// @notice A fat limit settles the same loan and leaves the revenue unchanged too: no sweep rides the close.
+    function test_TheLeastLimitClearsThePushAndMovesNoRevenue() public {
         uint256 loanId = _loan();
         _warpTo(read.loan(loanId).expiry);
-        uint256 rev0 = read.protocolRevenue(id);
-        uint64 stamp0 = read.marketState(id).lastSweptAt;
+        uint256 rev0 = read.revenuePot(address(usdc));
         assertGt(rev0, 0, "PREMISE: revenue is due");
         uint256 g = _leastSettling(loanId);
         assertGe(g, ace.PUSH_FLOOR(), "no settling limit sits under the push's published floor");
@@ -334,14 +335,13 @@ contract AceExpirySettlesOnlyTest is WarpClock {
         (,, uint256 owed) = read.poolOf(id);
         assertEq(owed, 0, "and pushed the lender");
         assertGt(usdc.balanceOf(alice), bal0, "who was paid");
-        assertEq(read.protocolRevenue(id), rev0, "while the sweep skipped");
-        assertEq(read.marketState(id).lastSweptAt, stamp0, "and stamped nothing");
+        assertEq(read.revenuePot(address(usdc)), rev0, "while the revenue pot is unchanged");
         vm.revertToStateAndDelete(snap);
 
         vm.prank(keeper);
         ace.forceClose{gas: 3_000_000}(loanId);
         assertTrue(ace.isClosed(loanId), "the fat limit settled");
-        assertEq(read.protocolRevenue(id), 0, "and swept the revenue after the push");
+        assertEq(read.revenuePot(address(usdc)), rev0, "and a fat limit leaves the revenue unchanged too: no sweep rides the close");
     }
 
     /// @dev The least gas at which `forceClose` lands, by bisection; every probe runs in a snapshot.
@@ -404,8 +404,7 @@ contract AceExpirySettlesOnlyTest is WarpClock {
     /// @notice The lock is the HUB's, not this verb's: an unrelated hub call re-entered from the hop is refused too.
     function test_TheGuardCoversTheWholeHubSurface() public {
         (Ace hub, ReenterOnRetireManager manager, AceLens l, uint256 loanId) = _reentrantFixture();
-        bytes32 m = l.loan(loanId).market;
-        manager.arm(loanId, abi.encodeCall(Ace.sweepRevenue, (m)));
+        manager.arm(loanId, abi.encodeCall(Ace.sweepRevenue, (address(usdc))));
         _warpTo(l.loan(loanId).expiry);
         vm.prank(keeper);
         hub.forceClose(loanId);
@@ -413,7 +412,7 @@ contract AceExpirySettlesOnlyTest is WarpClock {
         assertFalse(manager.lastOk(), "GUARD: an unrelated hub verb ran from inside the custody hop");
         assertEq(manager.lastSelector(), GUARD_TRIP, "and the guard must be what refused it");
         vm.prank(keeper);
-        hub.sweepRevenue(m); // control: the same call succeeds from outside, so the refusal above is the guard
+        hub.sweepRevenue(address(usdc)); // control: the same call succeeds from outside, so the refusal above is the guard
     }
 
     /// @dev A hub whose custodian re-enters it from inside `retireCustody`; the manager comes first, at the predicted hub.
@@ -481,7 +480,7 @@ contract AceExpirySettlesOnlyTest is WarpClock {
         assertGt(read.invPotOf(mid, loanId), 0, "the claim converted into a pot");
     }
 
-    /// @notice A transfer-paused QUOTE leaves the loan settleable: the push and the sweep swallow the refusal.
+    /// @notice A transfer-paused QUOTE leaves the loan settleable: the push swallows the refusal.
     function test_PausedQuote_ItSettles() public {
         MockBlockableERC20 pq = new MockBlockableERC20("USD Coin", "USDC", 6);
         bytes32 mid = _market(address(pq), address(coll), false);

@@ -140,7 +140,7 @@ contract AceProtocolShareHardeningTest is Test {
         _setShare(s[0]);
         uint256 a = _open(P, TEN30);
         expected += AllInFeeSpec.protocolFee(AllInFeeSpec.feeAllIn(P, TEN30, RATE, s[0]), s[0]);
-        _assertRevenueAndSolvency(expected, away);
+        _assertRevenueAndSolvency(expected);
 
         vm.warp(block.timestamp + 3 days);
         _setShare(s[1]);
@@ -149,7 +149,7 @@ contract AceProtocolShareHardeningTest is Test {
         uint256 fee = ace.drawMore(a, TOP_UP, OFF);
         assertEq(fee, AllInFeeSpec.feeAllIn(TOP_UP, term, RATE, s[1]), "the top-up priced at the share live at its moment");
         expected += AllInFeeSpec.protocolFee(fee, s[1]);
-        _assertRevenueAndSolvency(expected, away);
+        _assertRevenueAndSolvency(expected);
 
         vm.warp(block.timestamp + 5 days);
         _setShare(s[2]);
@@ -158,7 +158,7 @@ contract AceProtocolShareHardeningTest is Test {
         fee = _extend(a);
         assertEq(fee, AllInFeeSpec.feeAllIn(debtNow, added, RATE, s[2]), "the extension priced at the share live at its moment");
         expected += AllInFeeSpec.protocolFee(fee, s[2]);
-        _assertRevenueAndSolvency(expected, away);
+        _assertRevenueAndSolvency(expected);
 
         vm.warp(block.timestamp + 2 days);
         _setShare(s[3]);
@@ -167,14 +167,14 @@ contract AceProtocolShareHardeningTest is Test {
         fee = AllInFeeSpec.feeAllIn(NEW_P, TEN30, RATE + 365, s[3]);
         assertEq(read.loan(b).lastFee, fee, "the successor priced at the share live at the refinance");
         expected += AllInFeeSpec.protocolFee(fee, s[3]);
-        _assertRevenueAndSolvency(expected, away);
+        _assertRevenueAndSolvency(expected);
 
         vm.warp(block.timestamp + 4 days);
         _setShare(s[4]);
         _repay(b, read.debtOf(b));
         assertFalse(ace.isLiveLoan(b), "fixture: the full repay closed the successor");
         assertEq(read.feeEscrowOf(b), 0, "a closed loan holds no escrow");
-        _assertRevenueAndSolvency(expected, away); // a repay prices no fee, so the last share books nothing
+        _assertRevenueAndSolvency(expected); // a repay prices no fee, so the last share books nothing
     }
 
     /* ============================== the router's share verb holds its guard ============================== */
@@ -244,8 +244,8 @@ contract AceProtocolShareHardeningTest is Test {
         _assertSolvent();
     }
 
-    function _assertRevenueAndSolvency(uint256 expected, bytes32 away) internal view {
-        assertEq(read.protocolRevenue(id) + read.protocolRevenue(away), expected, "revenue is the sum of each fee's slice at its own share");
+    function _assertRevenueAndSolvency(uint256 expected) internal view {
+        assertEq(read.revenuePot(address(usdc)), expected, "revenue is the sum of each fee's slice at its own share");
         _assertSolvent();
     }
 
@@ -264,7 +264,7 @@ contract AceProtocolShareHardeningTest is Test {
 
     function _snap(uint256 loanId) internal view returns (Snap memory x) {
         bytes32 m = read.loan(loanId).market;
-        x.revenue = read.protocolRevenue(m);
+        x.revenue = read.revenuePot(address(usdc));
         x.owed = read.poolOwed(m);
         x.escrow = read.feeEscrowOf(loanId);
         x.refundNow = read.earlyExitRefund(loanId);

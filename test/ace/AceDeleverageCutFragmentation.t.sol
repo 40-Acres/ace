@@ -49,7 +49,7 @@ contract FragmentingKeeper is IAceDeleverageCallback {
 /// @notice With a 0-decimal quote and the PoC 500 bps cut, a crank realizing 19 quote atoms pays `floor(0.95) = 0`.
 /// @notice MEASUREMENT ROWS, GREEN BY DESIGN: they pin the CURRENT behaviour and log the bound, they do not demand a fix.
 /// @dev The bound is under one quote atom of cut per crank, against a full deleverage transaction of gas per crank.
-/// @dev Treasury is zero, so the piggyback sweep is inert and `protocolRevenue` is a clean counter of the cut alone.
+/// @dev Treasury is zero and no keeper verb sweeps, so the quote's revenue pot is a clean counter of the cut alone.
 /// @dev The cut is ALSO read off the debt (`stableOut - melt`), which is the measure that survives a live sweep.
 contract AceDeleverageCutFragmentationTest is WarpClock {
     Ace internal ace;
@@ -127,7 +127,7 @@ contract AceDeleverageCutFragmentationTest is WarpClock {
     /// @dev Without the probe, `cut == 0` would also pass if every fragment were a cut-free re-size, which proves nothing about the floor.
     function test_FragmentedDeleverageAvoidsTheProtocolCut() public {
         keeper.setKeep(_unitsFor(FRAGMENT));
-        uint256 rev0 = read.protocolRevenue(id);
+        uint256 rev0 = read.revenuePot(address(q));
         uint256 debt0 = read.debtOf(loanId);
 
         for (uint256 i; i < CRANKS; ++i) {
@@ -138,7 +138,7 @@ contract AceDeleverageCutFragmentationTest is WarpClock {
         }
 
         uint256 melted = debt0 - read.debtOf(loanId);
-        uint256 cut = read.protocolRevenue(id) - rev0;
+        uint256 cut = read.revenuePot(address(q)) - rev0;
         emit log_named_uint("cranks", CRANKS);
         emit log_named_uint("proceeds realized (quote)", CRANKS * FRAGMENT);
         emit log_named_uint("debt melted (quote)", melted);
@@ -150,20 +150,20 @@ contract AceDeleverageCutFragmentationTest is WarpClock {
         assertEq(melted, CRANKS * FRAGMENT, "MEASURED: and every quote of the 380 proceeds melted debt");
 
         keeper.setKeep(_unitsFor(FRAGMENT + 1));
-        uint256 rev1 = read.protocolRevenue(id);
+        uint256 rev1 = read.revenuePot(address(q));
         (, uint256 last) = keeper.crank(loanId);
         assertEq(last, FRAGMENT + 1, "after the fragments, a 20-quote crank still realizes 20");
-        assertEq(read.protocolRevenue(id) - rev1, 1, "and still pays one atom: the loan never left the charging branch");
+        assertEq(read.revenuePot(address(q)) - rev1, 1, "and still pays one atom: the loan never left the charging branch");
     }
 
     /// @dev WITNESS, in a snapshot: from this exact state a 20-quote fill pays `floor(20 * 5%) = 1`, so this crank is CHARGED.
     function _assertThisStateCharges(uint256 i) internal {
         uint256 snap = vm.snapshotState();
         keeper.setKeep(_unitsFor(FRAGMENT + 1));
-        uint256 rev = read.protocolRevenue(id);
+        uint256 rev = read.revenuePot(address(q));
         (, uint256 out) = keeper.crank(loanId);
         assertEq(out, FRAGMENT + 1, "WITNESS: the probe realizes 20 quote");
-        assertEq(read.protocolRevenue(id) - rev, 1, string.concat("WITNESS: fragment ", vm.toString(i), " sits on the charging branch"));
+        assertEq(read.revenuePot(address(q)) - rev, 1, string.concat("WITNESS: fragment ", vm.toString(i), " sits on the charging branch"));
         vm.revertToState(snap);
     }
 
@@ -187,7 +187,7 @@ contract AceDeleverageCutFragmentationTest is WarpClock {
     /// @dev Same market, same loan, same sizing; only the keeper's fill differs, which is what makes the gap the floor's.
     function test_Control_OneCrankOfTheSameAggregatePaysTheCut() public {
         keeper.setKeep(_unitsFor(CRANKS * FRAGMENT));
-        uint256 rev0 = read.protocolRevenue(id);
+        uint256 rev0 = read.revenuePot(address(q));
         uint256 debt0 = read.debtOf(loanId);
 
         uint256 g = gasleft();
@@ -197,16 +197,16 @@ contract AceDeleverageCutFragmentationTest is WarpClock {
 
         assertGt(sold, 0, "the crank sold");
         assertEq(out, CRANKS * FRAGMENT, "and realized the same 380 quote the fragments did");
-        assertEq(read.protocolRevenue(id) - rev0, 19, "the protocol takes floor(380 * 500 / 1e4) = 19");
+        assertEq(read.revenuePot(address(q)) - rev0, 19, "the protocol takes floor(380 * 500 / 1e4) = 19");
         assertEq(debt0 - read.debtOf(loanId), 361, "and the debt melts by the rest");
     }
 
     /// @notice The edge: at 20 quote of proceeds the cut is one whole atom, so 19 is the largest cut-free crank.
     function test_Edge_TwentyQuoteOfProceedsPaysOneAtom() public {
         keeper.setKeep(_unitsFor(FRAGMENT + 1));
-        uint256 rev0 = read.protocolRevenue(id);
+        uint256 rev0 = read.revenuePot(address(q));
         (, uint256 out) = keeper.crank(loanId);
         assertEq(out, FRAGMENT + 1, "the crank realized 20 quote");
-        assertEq(read.protocolRevenue(id) - rev0, 1, "and paid floor(20 * 5%) = 1");
+        assertEq(read.revenuePot(address(q)) - rev0, 1, "and paid floor(20 * 5%) = 1");
     }
 }

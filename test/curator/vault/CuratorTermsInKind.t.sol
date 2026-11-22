@@ -7,8 +7,8 @@ import {NoInventoryAsk} from "../../../src/ace/hub/Ace.sol";
 import {NotSettleable} from "../../../src/ace/hub/Settlement.sol";
 import {MarketParams} from "../../../src/ace/hub/Types.sol";
 import {AceVault} from "../../../src/curator/AceVault.sol";
-import {ProductConfig} from "../../../src/curator/AceVaultCaps.sol";
-import {PriceGrid} from "../../../src/curator/PriceGrid.sol";
+import {ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
+import {PriceGrid} from "../../../src/curator/libraries/PriceGrid.sol";
 import {CuratorTerms, CuratorTermsConfig, Listing, Row} from "../../../src/entities/curated/CuratorTerms.sol";
 import {IAceVaultDoor} from "../../../src/interfaces/IAceVaultDoor.sol";
 import {IDoorSaleCallback} from "../../../src/interfaces/IDoorSaleCallback.sol";
@@ -287,7 +287,7 @@ contract CuratorTermsInKindTest is AceVaultBaseRig {
         assertEq(ct.room(mp), type(uint256).max, "the room still holds a pot that came home");
     }
 
-    // ---- the lending doors beyond the borrow ----
+    // ---- the lending verbs beyond the borrow ----
 
     /// @notice An extension consents while the record's minimum covers the market's price, and not once it falls under.
     function test_ExtensionsFollowTheRecord() public {
@@ -314,8 +314,8 @@ contract CuratorTermsInKindTest is AceVaultBaseRig {
         assertEq(titles.ownerOf(next), borrower, "the successor's title is not the holder's");
         assertEq(ace.loanMarket(next), ace.loanMarket(loanId), "a refinance the row still names left the loan's market");
         assertGt(read.loan(loanId).closedAt, 0, "the refinanced loan is still open");
-        assertEq(vlens.trackedSupply(address(vault)), supply, "a lending door moved the tracked supply");
-        assertEq(vlens.trackedOf(address(vault), alice), mine, "a lending door moved a holder's tracked balance");
+        assertEq(vlens.trackedSupply(address(vault)), supply, "a lending verb moved the tracked supply");
+        assertEq(vlens.trackedOf(address(vault), alice), mine, "a lending verb moved a holder's tracked balance");
     }
 
     /// @notice A refinance under a fallen record leaves the loan's market for today's, at the new gridded buffered minimum, still with the ask off.

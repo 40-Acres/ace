@@ -465,11 +465,11 @@ contract AceLenderByCollateralEdgesTest is WarpClock, DeleverageCrank {
         _borrow(my, PY);
         uint256 id = _borrow(dx, PX);
         _enterBand(dx, id, 110);
-        uint256 rev0 = read.protocolRevenue(dx.id);
+        uint256 rev0 = read.revenuePot(address(dx.quote));
 
         (uint256 sold, uint256 gross) = ace.deleverage(id, 0, "");
         assertGt(sold, 0, "PREMISE: the crank sold");
-        uint256 cut = read.protocolRevenue(dx.id) - rev0;
+        uint256 cut = read.revenuePot(address(dx.quote)) - rev0;
         assertGt(cut, 0, "PREMISE: and charged the cut");
         uint256 debt1 = read.debtOf(id);
         assertEq(PX - debt1, gross - cut, "PREMISE: the debt fell by the net melt");

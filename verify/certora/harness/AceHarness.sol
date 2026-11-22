@@ -13,9 +13,9 @@ import {Constants} from "../../../src/ace/hub/Constants.sol";
 contract AceHarness is Ace {
     constructor(address treasury, address positionManager, uint256 pushGas, uint256 policyGas) Ace(treasury, positionManager, pushGas, policyGas) {}
 
-    /// @notice One market's protocol revenue pot.
-    function protocolRevenueOf(bytes32 id) external view returns (uint256) {
-        return Storage.markets()[id].s.protocolRevenue;
+    /// @notice One quote token's protocol revenue pot, which every market in that quote shares.
+    function protocolRevenueOf(address quote) external view returns (uint256) {
+        return Storage.revenue()[quote];
     }
 
     /// @notice When a loan closed; zero while it is live.
@@ -129,11 +129,6 @@ contract AceHarness is Ace {
     function marketPotCountsOf(bytes32 id) external view returns (uint256 unsoldPots, uint256 settledPots) {
         LenderUnresolved storage u = Storage.unresolvedOf(Storage.markets()[id].p);
         return (u.unsoldPots, u.settledPots);
-    }
-
-    /// @notice When a market's protocol revenue was last swept, which the keeper piggyback adds its period to.
-    function marketLastSweptAtOf(bytes32 id) external view returns (uint64) {
-        return Storage.markets()[id].s.lastSweptAt;
     }
 
     /// @notice A market's keeper sliver rate, which every settlement prices off the debt.

@@ -4,7 +4,7 @@ pragma solidity 0.8.36;
 import {MarketParams} from "../../../src/ace/hub/Types.sol";
 import {Extension} from "../../../src/interfaces/IRollPolicy.sol";
 import {IVaultTerms, Lend, RefinanceRequest} from "../../../src/interfaces/IVaultTerms.sol";
-import {BorrowRequest, Terms} from "../../../src/curator/AceVaultFlows.sol";
+import {BorrowRequest, Terms} from "../../../src/curator/libraries/AceVaultFlows.sol";
 
 /// @notice The hostile shapes `MockTerms` has no mode for: a revert carrying a whole word, an empty success, write calls that revert, and a bad `VAULT()`.
 /// @dev Its borrow answer is honest and a row sets it, so a door can reach the leg under test; `word` is what every hostile view answers or reverts with.

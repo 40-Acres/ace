@@ -5,7 +5,7 @@
 //
 // THE SCENE, VaultSplit's (see VaultLiveness.spec): the MUNGED vault, DummyERC20 as its asset, AceLenderView as the hub, its
 // three linked libraries, the DISPATCH list routing the asset and the two stored hub reads, every other callee NONDET. So the
-// hub's writing verbs move no cash here: a borrow, a crank or a lending door is NAV-neutral in this scene, and what the rules
+// hub's writing verbs move no cash here: a borrow, a crank or a lending verb is NAV-neutral in this scene, and what the rules
 // test is the vault's own arithmetic, entry, exit, request, fee and vest. The hub's own books are the hub specs' to prove.
 //
 // Math.mulDiv IS EXACT, floor(x * y / d) in unbounded integers with its two revert cases pruned, as VaultSplit models it.

@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 /// @title IAceVaultDoor
-/// @notice An AceVault's door-mode surface: what its DOOR calls to take seized goods and return their cash, the write-off, and the other lending doors.
+/// @notice An AceVault's door-mode surface: what its DOOR calls to take seized goods and return their cash, the write-off, and the live-loan verbs.
 /// @notice Entry stays shut while any key is open, as while a hub pot is unsold, so a door closes a key once it holds none of its goods.
 /// @dev The vault never calls the door; it calls its terms only through `IVaultTerms`, and the hub only for its own loans.
 /// @dev A door reads key `c`'s record by `extsload` at `keccak256(abi.encode(c, ROOT + 9))` and the open count at `ROOT + 10`, ROOT `AceVaultFlows.ROOT`.
@@ -16,11 +16,11 @@ interface IAceVaultDoor {
     error NothingSeized(); // a write-off of a key that holds no value and is not open
     error NothingDue(); // no write-off on this key has waited out the timelock, or for a revoke none is pending
     error NotCurator();
-    error NotTheBorrower(); // a lending door on a live loan asked by anyone but its title holder
+    error NotTheBorrower(); // a lending verb on a live loan asked by anyone but its title holder
     error FeeOverMax(); // the renewal's fee is over the holder's maximum
     error FeePaidShort(); // the fee arrived short
     error FeeMismatch(); // the hub charged other than the fee the vault priced and pulled
-    error RequestsOutweighIdle(); // a lending door refused while the exit requests are worth more than idle
+    error RequestsOutweighIdle(); // a lending verb refused while the exit requests are worth more than idle
     error WithdrawToVault(); // collateral a refinance sheds never lands on the vault
     error TopUpRefused(); // the product's refinance answer is not the loan's own market admitting the whole new principal
 

@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {AceVault} from "../../../src/curator/AceVault.sol";
-import {AceVaultFlows} from "../../../src/curator/AceVaultFlows.sol";
+import {AceVaultFlows} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {AceVaultBaseRig} from "./AceVaultBaseRig.sol";
 import {MockTerms} from "./MockTerms.sol";
 

@@ -93,14 +93,14 @@ contract AceP8CutScalesSaleTest is WarpClock {
         record.setBandPrice(ps);
     }
 
-    function _crank(bytes32 id, uint256 loanId, uint256 ps) internal returns (Crank memory c) {
+    function _crank(uint256 loanId, uint256 ps) internal returns (Crank memory c) {
         uint256 units = read.loan(loanId).collateralUnits;
         uint256 debt = read.debtOf(loanId);
-        uint256 rev = read.protocolRevenue(id);
+        uint256 rev = read.revenuePot(address(usdc));
         (, uint256 stableOut) = keeper.crankDeleverage(loanId);
         c.unitsSold = units - read.loan(loanId).collateralUnits;
         c.debtMelted = debt - read.debtOf(loanId);
-        c.protocolCut = read.protocolRevenue(id) - rev;
+        c.protocolCut = read.revenuePot(address(usdc)) - rev;
         uint256 value = FullMath.mulDiv(c.unitsSold, ps, Q96);
         c.keeperMargin = value - stableOut;
         c.equityLost = value - c.debtMelted;
@@ -129,7 +129,7 @@ contract AceP8CutScalesSaleTest is WarpClock {
         record.setMinPrice(AceFixtures.px(2e18, address(usdc), address(coll)));
         bytes32 m = _market(d);
         uint256 l = _loan(m, d.k);
-        c = _crank(m, l, _placeRecord(l, xBps));
+        c = _crank(l, _placeRecord(l, xBps));
         _log(tag, c);
     }
 

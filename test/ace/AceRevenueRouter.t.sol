@@ -25,8 +25,7 @@ contract AceRevenueRouterTest is WarpClock {
     uint256 internal constant COLL = 10_000e18;
     uint256 internal constant PRINCIPAL = 4_500e6;
 
-    event RevenueSwept(bytes32 indexed market, address indexed to, uint256 amount, uint64 at);
-    event RevenueSweepFailed(bytes32 indexed market, address indexed to, uint256 amount, uint64 at);
+    event RevenueSwept(address indexed quote, address indexed to, uint256 amount);
 
     function setUp() public {
         _warpTo(1_000_000);
@@ -59,7 +58,7 @@ contract AceRevenueRouterTest is WarpClock {
         d.ace.open(d.id, COLL, PRINCIPAL, 0, borrower, OpenBounds(0, 0, 0));
         vm.stopPrank();
 
-        banked = d.read.protocolRevenue(d.id);
+        banked = d.read.revenuePot(address(quote));
         assertGt(banked, 0, "guard: origination banked a cut");
     }
 
@@ -69,10 +68,10 @@ contract AceRevenueRouterTest is WarpClock {
         (AceFixtures.Deployment memory d, uint256 banked) = _hubWithRevenue(usdc);
 
         vm.expectEmit(true, true, false, true, address(d.ace));
-        emit RevenueSwept(d.id, address(router), banked, uint64(_now()));
-        d.ace.sweepRevenue(d.id);
+        emit RevenueSwept(address(usdc), address(router), banked);
+        d.ace.sweepRevenue(address(usdc));
         assertEq(usdc.balanceOf(address(router)), banked, "the hub's push landed in the router");
-        assertEq(d.read.protocolRevenue(d.id), 0, "and cleared the hub's counter");
+        assertEq(d.read.revenuePot(address(usdc)), 0, "and cleared the hub's counter");
 
         router.sweep(_list(address(usdc)));
         assertEq(usdc.balanceOf(sink), banked, "the sink holds exactly what the hub banked");
@@ -87,8 +86,8 @@ contract AceRevenueRouterTest is WarpClock {
         (AceFixtures.Deployment memory d2, uint256 b2) = _hubWithRevenue(q2);
         assertTrue(address(d1.ace) != address(d2.ace), "guard: two distinct hubs");
 
-        d1.ace.sweepRevenue(d1.id);
-        d2.ace.sweepRevenue(d2.id);
+        d1.ace.sweepRevenue(address(q1));
+        d2.ace.sweepRevenue(address(q2));
         address[] memory both = new address[](2);
         (both[0], both[1]) = (address(q1), address(q2));
         router.sweep(both);
@@ -104,8 +103,8 @@ contract AceRevenueRouterTest is WarpClock {
         (AceFixtures.Deployment memory d, uint256 banked) = _hubWithRevenue(usdc);
         usdc.setBlocked(sink, true);
 
-        d.ace.sweepRevenue(d.id);
-        assertEq(d.read.protocolRevenue(d.id), 0, "the hub hop is unaffected by the sink");
+        d.ace.sweepRevenue(address(usdc));
+        assertEq(d.read.revenuePot(address(usdc)), 0, "the hub hop is unaffected by the sink");
 
         vm.expectEmit(true, true, false, true, address(router));
         emit RevenueRouter.SweepFailed(address(usdc), sink, banked);
@@ -126,12 +125,12 @@ contract AceRevenueRouterTest is WarpClock {
         usdc.setBlocked(address(router), true);
 
         vm.expectRevert(PushRefused.selector);
-        d.ace.sweepRevenue(d.id);
-        assertEq(d.read.protocolRevenue(d.id), banked, "the revert left the hub's counter whole");
+        d.ace.sweepRevenue(address(usdc));
+        assertEq(d.read.revenuePot(address(usdc)), banked, "the revert left the hub's counter whole");
         assertEq(usdc.balanceOf(address(router)), 0, "nothing reached the router");
 
         usdc.setBlocked(address(router), false);
-        d.ace.sweepRevenue(d.id);
+        d.ace.sweepRevenue(address(usdc));
         assertEq(usdc.balanceOf(address(router)), banked, "the next sweep delivers once the quote relents");
     }
 }

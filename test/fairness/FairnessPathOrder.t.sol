@@ -119,7 +119,7 @@ contract FairnessPathOrderTest is FairnessHarness {
         MockDeleverageKeeper other = new MockDeleverageKeeper(ace, address(usdc), address(coll), S);
         uint256 snap = vm.snapshotState();
         (uint256 u1, uint256 s1) = ace.deleverage(loanId, 0, "");
-        (uint256 debt1, uint256 units1, uint256 cut1) = (read.loan(loanId).debt, read.loan(loanId).collateralUnits, read.protocolRevenue(id));
+        (uint256 debt1, uint256 units1, uint256 cut1) = (read.loan(loanId).debt, read.loan(loanId).collateralUnits, read.revenuePot(address(usdc)));
         vm.revertToState(snap);
         (uint256 u2, uint256 s2) = other.crankDeleverage(loanId);
         assertGt(u1, 0, "fixture: the crank sells");
@@ -127,7 +127,7 @@ contract FairnessPathOrderTest is FairnessHarness {
         assertEq(s2, s1, "F4.3: the quote realized differs by cranker");
         assertEq(read.loan(loanId).debt, debt1, "F4.3: the debt left differs by cranker");
         assertEq(read.loan(loanId).collateralUnits, units1, "F4.3: the lot left differs by cranker");
-        assertEq(read.protocolRevenue(id), cut1, "F4.3: the protocol's cut differs by cranker");
+        assertEq(read.revenuePot(address(usdc)), cut1, "F4.3: the protocol's cut differs by cranker");
     }
 
     /* ================================ F4.5 the order of top-ups and an extension ================================ */

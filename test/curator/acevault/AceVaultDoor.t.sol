@@ -4,13 +4,13 @@ pragma solidity 0.8.36;
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {MarketParams} from "../../../src/ace/hub/Types.sol";
 import {AceVault} from "../../../src/curator/AceVault.sol";
-import {AceVaultFlows, BorrowRequest} from "../../../src/curator/AceVaultFlows.sol";
+import {AceVaultFlows, BorrowRequest} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {CuratorTerms} from "../../../src/entities/curated/CuratorTerms.sol";
 import {MockStakeVault} from "../../mocks/MockStakeVault.sol";
 import {IAceVaultLens, VaultLens} from "../../utils/VaultLens.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
 
-/// @notice The core borrow door: the vault opens to itself in its own market, withdraws every unit, and hands over.
+/// @notice The core `borrow`: the vault opens to itself in its own market, withdraws every unit, and hands over.
 contract AceVaultDoorTest is AceVaultRig {
     /// @notice The borrower leaves with the payout and the title; the vault keeps no collateral, no title and no allowance.
     function test_BorrowPaysAndHandsTheTitleOver() public {

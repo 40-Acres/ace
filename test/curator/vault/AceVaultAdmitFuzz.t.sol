@@ -3,8 +3,8 @@ pragma solidity 0.8.36;
 
 import {Test} from "forge-std/Test.sol";
 import {MarketParams} from "../../../src/ace/hub/Types.sol";
-import {AceVaultCaps} from "../../../src/curator/AceVaultCaps.sol";
-import {BorrowRequest, Terms} from "../../../src/curator/AceVaultFlows.sol";
+import {AceVaultCaps} from "../../../src/curator/libraries/AceVaultCaps.sol";
+import {BorrowRequest, Terms} from "../../../src/curator/libraries/AceVaultFlows.sol";
 
 /// @title AceVaultAdmitFuzz
 /// @notice `AceVaultCaps.admit`, the base's checks on every product answer, against the legs its NatSpec states: it admits exactly when all hold.

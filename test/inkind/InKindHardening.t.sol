@@ -11,7 +11,7 @@ import {Constants} from "../../src/ace/hub/Constants.sol";
 import {PolicyRefused} from "../../src/ace/hub/Borrower.sol";
 import {Loan, MarketParams} from "../../src/ace/hub/Types.sol";
 import {AceVault} from "../../src/curator/AceVault.sol";
-import {AceVaultFlows} from "../../src/curator/AceVaultFlows.sol";
+import {AceVaultFlows} from "../../src/curator/libraries/AceVaultFlows.sol";
 import {Extension, IRollPolicy} from "../../src/interfaces/IRollPolicy.sol";
 import {IInKindTerms, IInKindVault, InKindConfig, Listing, Quote, RollQuote, Row} from "./InKindSurface.sol";
 import {GasBurner1271} from "./InKindMocks.sol";

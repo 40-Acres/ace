@@ -22,7 +22,7 @@ import {AceReader} from "../utils/AceReader.sol";
 /// @notice It sells `u` and takes the cut when `u < C` and `u <= securedBase`; otherwise `min(free, securedBase)`, with no cut.
 /// @notice Where that sale's net melt would leave the debt under its debt floor the crank closes the loan instead, selling `uClose`.
 /// @dev `free` is the restore sized with no cut: the cut multiplies the sale, so a crank that takes none must not be sized as if it did.
-/// @dev "No cut" is read off the DEBT, `debt drop == stableOut`, never off `protocolRevenue`: the crank piggybacks the revenue sweep.
+/// @dev "No cut" is read off the DEBT, `debt drop == stableOut`, never off the revenue pot, which every market in the quote shares.
 contract AceDeleverageCutFreeResizeTest is Test {
     /// @dev Which branch one crank took, so the anti-vacuity count can tell the four apart.
     enum Arm {

@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {MarketParams} from "../../src/ace/hub/Types.sol";
-import {BorrowRequest, Terms} from "../../src/curator/AceVaultFlows.sol";
+import {BorrowRequest, Terms} from "../../src/curator/libraries/AceVaultFlows.sol";
 import {Extension} from "../../src/interfaces/IRollPolicy.sol";
 import {Lend, RefinanceRequest} from "../../src/interfaces/IVaultTerms.sol";
 import {InKindConfig, Listing, Row} from "../utils/InKindVaults.sol";

@@ -281,11 +281,12 @@ contract AceShareHandler is WarpClock {
         _tail();
     }
 
-    function sweep(uint256 marketSeed) external {
+    /// @dev Both markets quote usdc, so the one per-quote sweep drains both their cuts; the seed picks nothing.
+    function sweep(uint256) external {
         _bump("sweep");
         uint256 before = usdc.balanceOf(TREASURY);
         vm.prank(keeper);
-        try ace.sweepRevenue(mids[marketSeed % 2]) {
+        try ace.sweepRevenue(address(usdc)) {
             if (usdc.balanceOf(TREASURY) > before) _land("sweep");
         } catch {}
         _tail();
@@ -311,7 +312,7 @@ contract AceShareHandler is WarpClock {
         priceSlipTag = tag;
     }
 
-    /// @dev The revenue latch: what the markets hold plus what the treasury was swept never falls, and the treasury never does.
+    /// @dev The revenue latch: what the pot holds plus what the treasury was swept never falls, and the treasury never does.
     function _tail() internal {
         uint256 tre = usdc.balanceOf(TREASURY);
         uint256 sum = _revenue() + tre;
@@ -319,8 +320,9 @@ contract AceShareHandler is WarpClock {
         (_lastTreasury, _lastRevPlusTreasury) = (tre, sum);
     }
 
+    /// @dev The usdc pot, read ONCE: both markets book into it, so a per-market sum would count it twice.
     function _revenue() internal view returns (uint256) {
-        return read.protocolRevenue(mids[0]) + read.protocolRevenue(mids[1]);
+        return read.revenuePot(address(usdc));
     }
 
     function _bump(string memory tag) internal {
@@ -417,7 +419,7 @@ contract AceShareInvariantTest is StdInvariant, Test {
 
     /// @notice Revenue is every fee's slice at its own share, wherever it now sits; it leaves the markets only for the treasury.
     function invariant_revenueLeavesOnlyThroughTheSweep() public view {
-        uint256 held = read.protocolRevenue(handler.mids(0)) + read.protocolRevenue(handler.mids(1));
+        uint256 held = read.revenuePot(address(usdc)); // ONE read: both markets book into the usdc pot
         assertEq(held + usdc.balanceOf(handler.TREASURY()), handler.expectedRevenue(), "revenue is not the sum of each fee's live-share slice");
         assertFalse(handler.revenueFell(), "revenue fell other than into the treasury");
     }
@@ -473,7 +475,7 @@ contract AceShareInvariantTest is StdInvariant, Test {
         handler.repay(2, type(uint256).max);
         handler.settle(3);
         handler.open(1, 0, 10_000e6, TEN30_SEED); // a close is skipped on a book of one
-        handler.forceClose(4); // its piggyback sweeps market 0, so the bare sweep below takes market 1's
+        handler.forceClose(4); // no sweep rides it, so the bare sweep below takes the usdc pot whole
         handler.sweep(1);
         string[12] memory must =
             ["open", "drawMore", "extend", "refinanceHome", "refinanceAway", "repayPart", "repayClose", "settle", "forceClose", "setShare", "warp", "sweep"];

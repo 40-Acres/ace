@@ -19,8 +19,8 @@ import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
 import {Loan, MarketParams, OpenBounds} from "../../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../../src/ace/positions/PositionManager.sol";
 import {AceVault} from "../../../src/curator/AceVault.sol";
-import {AceVaultCaps, CapListing, ProductConfig} from "../../../src/curator/AceVaultCaps.sol";
-import {AceVaultFlows, BorrowRequest, Terms, VaultConfig} from "../../../src/curator/AceVaultFlows.sol";
+import {AceVaultCaps, CapListing, ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
+import {AceVaultFlows, BorrowRequest, Terms, VaultConfig} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {IAceVaultDoor} from "../../../src/interfaces/IAceVaultDoor.sol";
 import {Lend} from "../../../src/interfaces/IVaultTerms.sol";
 import {RefiTerms} from "./AceVaultRefinance.t.sol";
@@ -418,7 +418,7 @@ contract AceVaultDrawMoreForTest is WarpClock {
         _topReverts(loanId, AMOUNT, abi.encodeWithSelector(AceVaultCaps.OverAsk.selector));
     }
 
-    /// @notice A loan whose market reads as the vault's in another quote is `NotOurLoan`: the held-loan check the lending doors share reads the quote.
+    /// @notice A loan whose market reads as the vault's in another quote is `NotOurLoan`: the held-loan check the lending verbs share reads the quote.
     function test_AForeignQuoteIsNotOurLoan() public {
         uint256 loanId = _loan();
         bytes32 id = ace.loanMarket(loanId);
@@ -439,6 +439,28 @@ contract AceVaultDrawMoreForTest is WarpClock {
         vault.crank();
         _requestPast(vault.idle() - 100e6);
         uint256 room = vault.lendable();
+        assertGe(room, mpA.minPrincipal, "PREMISE: lendable clears the lot floor");
+        assertLt(room, AMOUNT, "PREMISE: lendable binds under the rig's amount");
+        _topReverts(loanId, room + 1, abi.encodeWithSelector(AceVaultFlows.OverLendable.selector));
+        _top(loanId, room);
+        assertEq(read.debtOf(loanId), PRINCIPAL + room, "a top-up of exactly lendable did not land");
+    }
+
+    /// @notice Lendable binds at the atom where the requests' worth sits just under a whole atom: the door prices that hold at NAV, not NAV plus one.
+    /// @dev The row above sizes its request by CEIL, which leaves the worth a hair over an atom, so a hold priced an atom of NAV high reads the same there.
+    /// @dev One share less leaves it a hair under, so an atom more of NAV lifts the hold a whole atom and the verb's cash word must equal `lendable()`.
+    function test_LendableBindsAtTheAtomWithTheRequestsWorthJustUnderAStep() public {
+        uint256 loanId = _loan();
+        vault.crank();
+        uint256 target = vault.idle() - 100e6;
+        uint256 shares = Math.mulDiv(target, _quoteSupply(), vault.totalAssets() + 1, Math.Rounding.Ceil) - 1;
+        vm.prank(alice);
+        vault.requestExit(shares);
+        (uint256 nav, uint256 q) = (vault.totalAssets(), _quoteSupply());
+        assertEq(Math.mulDiv(shares, nav + 1, q), target - 1, "PREMISE: the request's worth floors an atom under the target");
+        assertEq(Math.mulDiv(shares, nav + 2, q), target, "PREMISE: an atom more of NAV lifts it a whole atom");
+        uint256 room = vault.lendable();
+        assertEq(room, vault.idle() - (target - 1), "PREMISE: lendable is idle less the request's worth at NAV");
         assertGe(room, mpA.minPrincipal, "PREMISE: lendable clears the lot floor");
         assertLt(room, AMOUNT, "PREMISE: lendable binds under the rig's amount");
         _topReverts(loanId, room + 1, abi.encodeWithSelector(AceVaultFlows.OverLendable.selector));

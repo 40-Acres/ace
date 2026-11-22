@@ -32,7 +32,7 @@
 # WHY THE COPY MEANS THE SAME THING AS THE DEPLOYED VAULT:
 #   - EXTERNAL -> INTERNAL keeps the state the body touches: an internal library call runs on the CALLER's storage, with the
 #     same msg.sender, msg.value and address(this), and a revert unwinds the same state, exactly as the vault's DELEGATECALL
-#     does. The forward keeps its place inside `_fwd`/`_collect`/`_proceeds`/`_lendingDoor`, so it still runs under the lock.
+#     does. The forward keeps its place inside `_fwd`/`_collect`/`_proceeds`/`_lendingVerb`, so it still runs under the lock.
 #   - CALLDATA -> MEMORY for `ids` (both collects) and `tokens` (claim) is safe because no body writes its array, and a memory
 #     argument the callee only reads means what the calldata one did. A body that starts WRITING its array voids this
 #     point, as does a caller that reads one back: re-check it.
@@ -93,38 +93,38 @@ swap() {
 }
 
 I='    '
-swap "$CUR/AceVaultCaps.sol" "${I}function submitCap(address key, uint192 cap) external {" "${I}function submitCap(address key, uint192 cap) internal {"
-swap "$CUR/AceVaultCaps.sol" "${I}function submitDelist(address collateral) external {" "${I}function submitDelist(address collateral) internal {"
-swap "$CUR/AceVaultCaps.sol" "${I}function acceptCap(address key) external {" "${I}function acceptCap(address key) internal {"
-swap "$CUR/AceVaultCaps.sol" "${I}function revokePendingCap(address key) external {" "${I}function revokePendingCap(address key) internal {"
-swap "$CUR/AceVaultInKind.sol" "${I}function collectForfeited(uint256[] calldata ids) external returns (uint256[] memory out) {" \
+swap "$CUR/libraries/AceVaultCaps.sol" "${I}function submitCap(address key, uint192 cap) external {" "${I}function submitCap(address key, uint192 cap) internal {"
+swap "$CUR/libraries/AceVaultCaps.sol" "${I}function submitDelist(address collateral) external {" "${I}function submitDelist(address collateral) internal {"
+swap "$CUR/libraries/AceVaultCaps.sol" "${I}function acceptCap(address key) external {" "${I}function acceptCap(address key) internal {"
+swap "$CUR/libraries/AceVaultCaps.sol" "${I}function revokePendingCap(address key) external {" "${I}function revokePendingCap(address key) internal {"
+swap "$CUR/libraries/AceVaultInKind.sol" "${I}function collectForfeited(uint256[] calldata ids) external returns (uint256[] memory out) {" \
   "${I}function collectForfeited(uint256[] memory ids) internal returns (uint256[] memory out) {"
-swap "$CUR/AceVaultInKind.sol" "${I}function claim(address[] calldata tokens, address to) external returns (uint256[] memory paid) {" \
+swap "$CUR/libraries/AceVaultInKind.sol" "${I}function claim(address[] calldata tokens, address to) external returns (uint256[] memory paid) {" \
   "${I}function claim(address[] memory tokens, address to) internal returns (uint256[] memory paid) {"
-swap "$CUR/AceVaultFlows.sol" "${I}function collectForfeited(uint256[] calldata ids) external returns (uint256[] memory out) {" \
+swap "$CUR/libraries/AceVaultFlows.sol" "${I}function collectForfeited(uint256[] calldata ids) external returns (uint256[] memory out) {" \
   "${I}function collectForfeited(uint256[] memory ids) internal returns (uint256[] memory out) {"
-swap "$CUR/AceVaultFlows.sol" "${I}function returnProceeds(address collateral, uint256 cash, bool closes) external {" \
+swap "$CUR/libraries/AceVaultFlows.sol" "${I}function returnProceeds(address collateral, uint256 cash, bool closes) external {" \
   "${I}function returnProceeds(address collateral, uint256 cash, bool closes) internal {"
-swap "$CUR/AceVaultFlows.sol" "${I}function submitWriteOff(address collateral) external {" "${I}function submitWriteOff(address collateral) internal {"
-swap "$CUR/AceVaultFlows.sol" "${I}function acceptWriteOff(address collateral) external {" "${I}function acceptWriteOff(address collateral) internal {"
-swap "$CUR/AceVaultFlows.sol" "${I}function revokeWriteOff(address collateral) external {" "${I}function revokeWriteOff(address collateral) internal {"
-swap "$CUR/AceVaultFlows.sol" \
+swap "$CUR/libraries/AceVaultFlows.sol" "${I}function submitWriteOff(address collateral) external {" "${I}function submitWriteOff(address collateral) internal {"
+swap "$CUR/libraries/AceVaultFlows.sol" "${I}function acceptWriteOff(address collateral) external {" "${I}function acceptWriteOff(address collateral) internal {"
+swap "$CUR/libraries/AceVaultFlows.sol" "${I}function revokeWriteOff(address collateral) external {" "${I}function revokeWriteOff(address collateral) internal {"
+swap "$CUR/libraries/AceVaultFlows.sol" \
   "${I}function extendFor(uint256 loanId, uint256 maxFee, uint256 minBufferWad, bytes calldata data, bytes calldata permit2) external returns (uint256 fee) {" \
   "${I}function extendFor(uint256 loanId, uint256 maxFee, uint256 minBufferWad, bytes calldata data, bytes calldata permit2) internal returns (uint256 fee) {"
-swap "$CUR/AceVaultFlows.sol" "${I}) external returns (uint256 newId, uint256 out) {" "${I}) internal returns (uint256 newId, uint256 out) {" # refinanceFor's
-swap "$CUR/AceVaultFlows.sol" "${I}${I}external" "${I}${I}internal" # drawMoreFor's visibility, on its own line under its long signature
-swap "$CUR/AceVaultTail.sol" "${I}${I}${I}w := calldataload(sub(calldatasize(), sub(SIZE, shl(5, i))))" "${I}${I}${I}w := tload(add($SLOT, i))"
+swap "$CUR/libraries/AceVaultFlows.sol" "${I}) external returns (uint256 newId, uint256 out) {" "${I}) internal returns (uint256 newId, uint256 out) {" # refinanceFor's
+swap "$CUR/libraries/AceVaultFlows.sol" "${I}${I}external" "${I}${I}internal" # drawMoreFor's visibility, on its own line under its long signature
+swap "$CUR/libraries/AceVaultTail.sol" "${I}${I}${I}w := calldataload(sub(calldatasize(), sub(SIZE, shl(5, i))))" "${I}${I}${I}w := tload(add($SLOT, i))"
 # a transient read is `view`, so the word reader and the eleven figure readers lose `pure` with it
 for r in 'ace() internal pure returns (address)' 'capTimelock() internal pure returns (uint64)' 'inKind() internal pure returns (bool)' \
   'door() internal pure returns (bool)' 'curator() internal pure returns (address)' 'guardian() internal pure returns (address)' \
   'asset() internal pure returns (address)' 'terms() internal pure returns (address)' 'title() internal pure returns (address)' \
   'minTenor() internal pure returns (uint64)' 'maxTenor() internal pure returns (uint64)' '_word(uint256 i) private pure returns (uint256 w)'; do
-  swap "$CUR/AceVaultTail.sol" "${I}function $r {" "${I}function ${r/ pure / view } {"
+  swap "$CUR/libraries/AceVaultTail.sol" "${I}function $r {" "${I}function ${r/ pure / view } {"
 done
 swap "$CUR/AceVault.sol" "${I}${I}(ok, ret) = lib.delegatecall(abi.encodePacked(msg.data, TAIL0, TAIL1, TAIL2, TAIL3, TAIL4));" \
   "${I}${I}(ok, ret) = (true, AceVaultMunged.forward(lib, TAIL0, TAIL1, TAIL2, TAIL3, TAIL4));"
-swap "$CUR/AceVault.sol" 'import {AceVaultTail} from "./AceVaultTail.sol";' \
-  'import {AceVaultTail} from "./AceVaultTail.sol";'$'\n''import {AceVaultMunged} from "./AceVaultMunged.sol";'
+swap "$CUR/AceVault.sol" 'import {AceVaultTail} from "./libraries/AceVaultTail.sol";' \
+  'import {AceVaultTail} from "./libraries/AceVaultTail.sol";'$'\n''import {AceVaultMunged} from "./AceVaultMunged.sol";'
 cp "$TEMPLATE" "$CUR/AceVaultMunged.sol"
 
 # 5. A PINNED copy (`out` named verify/certora/munged-vault-pin-<verb>) forwards that one verb and refuses every other
@@ -179,7 +179,7 @@ cut="$(diff "$ROOT/src/curator/AceVault.sol" "$CUR/AceVault.sol" | grep -c '^<' 
 # one added import
 EXPECTED=29
 changed=0
-for f in AceVaultCaps AceVaultInKind AceVaultFlows AceVaultTail AceVault; do
+for f in libraries/AceVaultCaps libraries/AceVaultInKind libraries/AceVaultFlows libraries/AceVaultTail AceVault; do
   n="$(diff "$ROOT/src/curator/$f.sol" "$CUR/$f.sol" | grep -c '^>' || true)"
   changed=$((changed + n))
 done

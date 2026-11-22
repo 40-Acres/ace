@@ -19,9 +19,9 @@ import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
 import {MarketParams, OpenBounds} from "../../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../../src/ace/positions/PositionManager.sol";
 import {AceVault} from "../../../src/curator/AceVault.sol";
-import {AceVaultCaps, CapListing, ProductConfig} from "../../../src/curator/AceVaultCaps.sol";
-import {AceVaultFlows, BorrowRequest, Terms, VaultConfig} from "../../../src/curator/AceVaultFlows.sol";
-import {AceVaultTail} from "../../../src/curator/AceVaultTail.sol";
+import {AceVaultCaps, CapListing, ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
+import {AceVaultFlows, BorrowRequest, Terms, VaultConfig} from "../../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVaultTail} from "../../../src/curator/libraries/AceVaultTail.sol";
 import {IAceLenderOps} from "../../../src/interfaces/IAceLenderOps.sol";
 import {IAceVaultDoor} from "../../../src/interfaces/IAceVaultDoor.sol";
 import {Extension} from "../../../src/interfaces/IRollPolicy.sol";
@@ -177,7 +177,7 @@ interface IRequestExit {
 }
 
 /// @title AceVaultRefinance
-/// @notice The base lending door `refinanceFor`: the holder hands the vault its title for one call, the vault refinances as holder of record,
+/// @notice The base lending verb `refinanceFor`: the holder hands the vault its title for one call, the vault refinances as holder of record,
 /// @notice and both titles and the net payout come home; the exit gate in the policy's form, the room on the net new cash, and the rest bounded.
 contract AceVaultRefinanceTest is WarpClock {
     Ace internal ace;
@@ -727,7 +727,7 @@ contract AceVaultRefinanceTest is WarpClock {
         _refi(loanId, 1_200e6, 7 days);
     }
 
-    /// @notice S3 review D6: the lending door's two transient words are cleared once the refinance returns, so nothing later in the transaction reads them.
+    /// @notice S3 review D6: the lending verb's two transient words are cleared once the refinance returns, so nothing later in the transaction reads them.
     /// @dev The test runs as one transaction, so a word left set would still be there; the vault's code is swapped for a reader and put back.
     function test_TheTransientWordsAreClearedAfterTheRefinance() public {
         uint256 loanId = _loan(7 days);

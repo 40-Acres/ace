@@ -5,7 +5,7 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {MarketParams} from "../../../src/ace/hub/Types.sol";
 import {AceVault} from "../../../src/curator/AceVault.sol";
-import {ProductConfig} from "../../../src/curator/AceVaultCaps.sol";
+import {ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
 import {CuratorTerms, CuratorTermsConfig, Listing, Row} from "../../../src/entities/curated/CuratorTerms.sol";
 import {IAceLenderOps} from "../../../src/interfaces/IAceLenderOps.sol";
 import {IAceVaultDoor} from "../../../src/interfaces/IAceVaultDoor.sol";

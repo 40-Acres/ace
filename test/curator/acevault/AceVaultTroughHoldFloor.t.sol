@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {AceVault} from "../../../src/curator/AceVault.sol";
-import {AceVaultFlows} from "../../../src/curator/AceVaultFlows.sol";
+import {AceVaultFlows} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
 
 /// @title AceVaultTroughHoldFloor
@@ -129,7 +129,7 @@ contract AceVaultTroughHoldFloorTest is AceVaultRig {
         assertEq(_hold(), MARKED, "PREMISE: the exemption wrote no hold");
     }
 
-    // ---- `_troughHeld`: a stored hold binds only over a pile above the floor ----
+    // ---- `AceVaultNav.troughHeld`: a stored hold binds only over a pile above the floor ----
 
     /// @notice Under a stored hold, a pile exactly on the floor does not hold entry: the view opens and the verb lands, before the stored second.
     function test_HoldFloor_APileExactlyOnTheOneBpFloorDoesNotHoldEntry() public {
@@ -150,7 +150,7 @@ contract AceVaultTroughHoldFloorTest is AceVaultRig {
         _assertHeld(bob);
     }
 
-    // ---- `_markTrough`: a clear over a pile on the floor stores no hold ----
+    // ---- `AceVaultNav.markTrough`: a clear over a pile on the floor stores no hold ----
 
     /// @notice A clear whose sync leaves a pile exactly on the floor stores zero, so a later rise is gated by the vest band alone.
     function test_HoldFloor_AClearOverAPileExactlyOnTheOneBpFloorStoresNoHold() public {

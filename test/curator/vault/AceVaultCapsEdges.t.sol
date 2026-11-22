@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {AceVault} from "../../../src/curator/AceVault.sol";
 import {Vm} from "forge-std/Vm.sol";
-import {AceVaultCaps, CapListing, ProductConfig} from "../../../src/curator/AceVaultCaps.sol";
+import {AceVaultCaps, CapListing, ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
 import {MockStakeVault} from "../../mocks/MockStakeVault.sol";
 import {AceVaultBaseRig} from "./AceVaultBaseRig.sol";
 import {VaultSeed} from "../../utils/VaultSeed.sol";

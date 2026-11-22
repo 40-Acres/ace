@@ -31,8 +31,6 @@ contract AceQuoteDestinationsTest is WarpClock, DeleverageCrank {
     address internal borrower = address(0xB0B);
     address internal haven = address(0xDEAF); // an address the quote accepts, named at claim time
 
-    event RevenueSweepFailed(bytes32 indexed market, address indexed to, uint256 amount, uint64 at);
-
     uint256 internal constant COLL = 10_000e18;
     uint256 internal constant PRINCIPAL = 4_500e6;
     uint256 internal P_REF; // par in the hub's frame; assigned in setUp
@@ -95,7 +93,7 @@ contract AceQuoteDestinationsTest is WarpClock, DeleverageCrank {
     function _booked(bytes32 mid, uint256 loans) internal view returns (uint256 booked) {
         MarketState memory s = read.marketState(mid);
         (uint256 resting,, uint256 owed) = read.poolOf(mid); // the LENDER legs; one market here, so it spans nothing else
-        booked = resting + s.protocolRevenue + owed + s.quoteOwedTotal;
+        booked = resting + read.revenuePot(address(quote)) + owed + s.quoteOwedTotal; // the revenue pot is per quote, one market in it here
         for (uint256 i = 1; i <= loans; i++) {
             booked += read.feeEscrowOf(i);
         }
@@ -195,26 +193,5 @@ contract AceQuoteDestinationsTest is WarpClock, DeleverageCrank {
         vm.prank(borrower);
         (, uint256 paid) = ace.claimOwed(loanId, borrower);
         assertGt(paid, 0, "and pays in full once it lifts");
-    }
-
-    /// @notice A treasury the quote refuses must not brick the settlement that now carries the sweep.
-    /// @dev The `catch` in `_sweepRevenue` had ZERO coverage until expiry settlement began sweeping.
-    /// @dev A blocked RECIPIENT is the honest shape here: a fixed destination has no alternative.
-    /// @dev The EVENT is what makes this non-vacuous: an unchanged counter also holds if no sweep ran.
-    function test_Sweep_ABlockedTreasuryDoesNotBrickExpirySettlement() public {
-        AceFixtures.Deployment memory d = _deploy(_base());
-        uint256 loanId = _open(d);
-        uint256 banked = read.protocolRevenue(d.id);
-        assertGt(banked, 0, "guard: origination banked a cut for the sweep to fail on");
-
-        quote.setBlocked(AceFixtures.TREASURY, true);
-        _warpTo(uint256(read.loan(loanId).expiry) + 1);
-        vm.expectEmit(true, true, false, true, address(ace));
-        emit RevenueSweepFailed(d.id, AceFixtures.TREASURY, banked, uint64(_now()));
-        ace.forceClose(loanId); // must NOT revert, though the sweep inside it does
-
-        assertTrue(read.loan(loanId).closedAt != 0, "the loan settled despite the treasury refusing");
-        assertEq(read.protocolRevenue(d.id), banked, "and the swallowed failure RESTORED the counter");
-        assertEq(quote.balanceOf(AceFixtures.TREASURY), 0, "nothing reached the blocked destination");
     }
 }

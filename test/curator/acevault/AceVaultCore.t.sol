@@ -4,7 +4,7 @@ pragma solidity 0.8.36;
 import {Loan, MarketParams} from "../../../src/ace/hub/Types.sol";
 import {PolicyRefused} from "../../../src/ace/hub/Borrower.sol";
 import {AceVault} from "../../../src/curator/AceVault.sol";
-import {AceVaultFlows, BorrowRequest, Terms} from "../../../src/curator/AceVaultFlows.sol";
+import {AceVaultFlows, BorrowRequest, Terms} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {Extension, IRollPolicy} from "../../../src/interfaces/IRollPolicy.sol";
 import {AceFixtures} from "../../utils/AceFixtures.sol";
 import {MockERC20} from "../../mocks/MockERC20.sol";

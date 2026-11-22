@@ -3,8 +3,8 @@ pragma solidity 0.8.36;
 
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {AceVault} from "../../../src/curator/AceVault.sol";
-import {AceVaultCaps} from "../../../src/curator/AceVaultCaps.sol";
-import {AceVaultFlows} from "../../../src/curator/AceVaultFlows.sol";
+import {AceVaultCaps} from "../../../src/curator/libraries/AceVaultCaps.sol";
+import {AceVaultFlows} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {MockStakeVault} from "../../mocks/MockStakeVault.sol";
 import {AceVaultBaseRig} from "./AceVaultBaseRig.sol";
 

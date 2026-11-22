@@ -239,13 +239,13 @@ contract AceRecordRailTest is Test {
         vm.stopPrank();
     }
 
-    /// @notice In a record-less market `forceClose` is the ONLY automatic revenue collection there is.
-    /// @notice So expiry settlement carrying the sweep is what stops this class collecting nothing, ever.
+    /// @notice In a record-less market no keeper verb collects revenue: `forceClose` settles and pays the treasury nothing.
+    /// @notice What it banked waits in the quote's pot until someone calls `sweepRevenue(quote)`, which then delivers it whole.
     /// @dev `deleverage` reverts DeleverageDisabled here and `finalize` reverts NoRecord, both pinned above.
-    /// @dev Nobody calls `sweepRevenue`: the point is that collection needs no babysitter in this class.
-    function test_Recordless_ExpirySettlementSweeps() public {
+    /// @dev This is what ruling out the keeper piggyback gives up for this class: collection needs the scheduled sweeper.
+    function test_Recordless_ExpirySettlementSweepsNothingAndTheDoorDelivers() public {
         uint256 loanId = _open();
-        uint256 banked = read.protocolRevenue(id);
+        uint256 banked = read.revenuePot(address(usdc));
         assertGt(banked, 0, "guard: origination banked a cut in a market with no decline channel");
         assertEq(usdc.balanceOf(AceFixtures.TREASURY), 0, "the treasury starts unpaid");
 
@@ -254,7 +254,11 @@ contract AceRecordRailTest is Test {
         ace.forceClose(loanId);
 
         assertTrue(read.loan(loanId).closedAt != 0, "the loan settled at tenor");
-        assertEq(usdc.balanceOf(AceFixtures.TREASURY), banked, "and the settlement delivered the banked revenue");
-        assertEq(read.protocolRevenue(id), 0, "clearing the counter, with nobody cranking sweepRevenue");
+        assertEq(usdc.balanceOf(AceFixtures.TREASURY), 0, "and the settlement delivered nothing to the treasury");
+        assertEq(read.revenuePot(address(usdc)), banked, "leaving the pot whole");
+
+        ace.sweepRevenue(address(usdc));
+        assertEq(usdc.balanceOf(AceFixtures.TREASURY), banked, "the door then delivers the banked revenue");
+        assertEq(read.revenuePot(address(usdc)), 0, "and clears the pot");
     }
 }

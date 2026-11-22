@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
-import {AceVaultCaps} from "./AceVaultCaps.sol";
-import {AceVaultFlows} from "./AceVaultFlows.sol";
-import {AceVaultInKind} from "./AceVaultInKind.sol";
+import {AceVaultCaps} from "./libraries/AceVaultCaps.sol";
+import {AceVaultFlows} from "./libraries/AceVaultFlows.sol";
+import {AceVaultInKind} from "./libraries/AceVaultInKind.sol";
 
 /// @title AceVaultMunged
 /// @notice PROVER COPY ONLY: scripts/certora-munge-vault.sh writes it into the munged tree, never into src.

@@ -4,7 +4,7 @@ pragma solidity 0.8.36;
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
 import {VaultConfig} from "../../src/curator/AceVault.sol";
-import {CapListing, ProductConfig} from "../../src/curator/AceVaultCaps.sol";
+import {CapListing, ProductConfig} from "../../src/curator/libraries/AceVaultCaps.sol";
 import {CuratedVaults} from "../utils/CuratedVaults.sol";
 import {AccumVault} from "./CuratorVaultVestAccumulator.t.sol";
 
@@ -13,9 +13,9 @@ import {AccumVault} from "./CuratorVaultVestAccumulator.t.sol";
 /// @notice A rise grosses the basis DOWN, so it reads back exactly, and a fall scales it DOWN; together they must not walk `unvested()` off the exact pile.
 /// @notice The exact pile is the first gain decayed linearly to the one maturity, plus each rise and less each fall, tracked here at 1e18 precision.
 /// @notice `unvested()` sits within one wei an op of the exact pile either way, reads back exactly at each rise, and reads zero at maturity.
-/// @dev Drives `_stampVest(1)` and `_burnVest(1)` through the shipped `AccumVault` harness: exactly what `_sync` runs on a 1-wei move.
+/// @dev Drives `AceVaultNav.stampVest(1)` and `AceVaultNav.burnVest(1)` through the shipped `AccumVault` harness: exactly what `_sync` runs on a 1-wei move.
 /// @dev The pile is kept over the window in seconds, so a 1-wei stamp's maturity shift floors to zero and the maturity never moves.
-/// @dev MUTANTS: `_grossed` Floor -> Ceil, and `_scaled` Floor -> Ceil.
+/// @dev MUTANTS: `AceVaultNav.grossed` Floor -> Ceil, and `AceVaultNav.scaled` Floor -> Ceil.
 contract CuratorVaultVestDriftTest is CuratorVaultBase {
     uint256 internal constant Q = 1e18;
 

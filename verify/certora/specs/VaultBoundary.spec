@@ -1,7 +1,7 @@
 // AceVault's BOUNDARY: what the vault enforces whatever its product answers. The terms contract and the door are outside the
 // scene, so every answer they give, every market they build and every draw they admit is arbitrary (NONDET); each rule
 // holds for ANY product. They are the boundary the vault's design claims: what NAV is, who moves shares, where cash goes,
-// the caps, the total and the drawdown, the tenor rail, that no exit calls the product, that every lending door on a live
+// the caps, the total and the drawdown, the tenor rail, that no exit calls the product, that every lending verb on a live
 // loan acts only for its holder, that nothing rests and every title goes home, and that the door's seized ledger is conserved.
 //
 // THE SCENE, each piece a stand-in whose behaviour admits at least the real one's on what a rule reads:
@@ -334,7 +334,7 @@ rule aClaimCanLowerTheVaultsBalance(env e, uint256 shares, address receiver, uin
 // ---- idle ----
 
 // Idle falls only at an exit (`withdraw`, `redeem`, `claimExit`), or where the hub's figure for the vault rose at least by
-// idle's fall: a placement or a lending door moves cash into a live claim, never out of gross NAV. The in-kind `claim` pays
+// idle's fall: a placement or a lending verb moves cash into a live claim, never out of gross NAV. The in-kind `claim` pays
 // tokens other than the asset only (`scene`), so it lowers no idle.
 rule idleFallsOnlyAtAnExitOrIntoTheHub(method f, env e, calldataarg args) filtered { f -> !f.isView && !exitVerb(f) } {
     scene(e);
@@ -697,7 +697,7 @@ rule anEntryAsksTheProduct(env e, uint256 assets, address receiver) {
     satisfy productCalled;
 }
 
-// ---- the lending doors act only for the holder (I9) ----
+// ---- the lending verbs act only for the holder (I9) ----
 
 // A landed extendFor acted for the loan's title holder, the caller, and on that loan alone.
 rule anExtendForActsOnlyForTheHolder(env e, uint256 loanId, uint256 maxFee, uint256 minBufferWad, bytes data, bytes permit2) {

@@ -471,14 +471,14 @@ contract AceDeleverageTest is WarpClock {
         uint256 loanId = _open();
         _enterBand(loanId, PS_BAND);
         keeper.setRoutePrice(PS_BAND); // routes exactly at the sizing price
-        uint256 revenue0 = read.protocolRevenue(id);
+        uint256 revenue0 = read.revenuePot(address(usdc));
         uint256 borrower0 = usdc.balanceOf(borrower);
         uint256 debt0 = read.debtOf(loanId);
 
         (uint256 sold, uint256 out) = keeper.crankDeleverage(loanId);
 
         assertGt(sold, 0, "the crank ran");
-        assertEq(read.protocolRevenue(id), revenue0, "no protocol cut on the decline channel");
+        assertEq(read.revenuePot(address(usdc)), revenue0, "no protocol cut on the decline channel");
         assertEq(usdc.balanceOf(borrower), borrower0, "no borrower payout below full repayment");
         assertEq(debt0 - read.debtOf(loanId), out, "every unit of proceeds melted debt");
         uint256 realized = (sold * PS_BAND) / UNIT_SCALE;

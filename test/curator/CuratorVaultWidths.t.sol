@@ -9,7 +9,7 @@ import {Ace} from "../../src/ace/hub/Ace.sol";
 
 /// @title CuratorVaultWidths
 /// @notice The two places `AceVault` does 256-bit arithmetic into a width it never checks.
-/// @notice O1: `_grossed` SafeCasts the vest basis into `uint128`, and the revert shuts every verb AND every view.
+/// @notice O1: the vest basis was SafeCast into `uint128`, a revert that shut every verb AND every view; `AceVaultNav.grossed` now saturates.
 /// @notice O15: the performance fee's `feeValue * s` is a plain product of a quote value and a share supply.
 /// @notice BOTH END IN A VAULT NOBODY CAN UNWEDGE FROM INSIDE, which is why they are asserted as a freeze.
 /// @notice Every row here is written against the behaviour the vault MUST have, so each was red before the fix.
@@ -51,7 +51,7 @@ contract CuratorVaultWidthsTest is CuratorVaultBase {
 
     /// @dev A vault carrying the WIDEST basis the field can hold, half a window from maturity.
     /// @dev The basis is set by one real gain of exactly `type(uint128).max`, which the cast admits today.
-    /// @dev From here any further gain at all grosses the pile past the width: `_grossed` returns 2x the pile.
+    /// @dev From here any further gain at all grosses the pile past the width: `AceVaultNav.grossed` returns 2x the pile.
     function _atTheVestCeiling() internal returns (AceVault v) {
         v = _mockedVault(0);
         _lpDeposit(v, alice, SEED);
@@ -83,10 +83,10 @@ contract CuratorVaultWidthsTest is CuratorVaultBase {
         return Math.mulDiv(feeValue, s, a - feeValue, Math.Rounding.Floor);
     }
 
-    // ---- O1: the uint128 vest basis, RED until `_grossed` saturates ----
+    // ---- O1: the uint128 vest basis, RED until `AceVaultNav.grossed` saturates ----
 
     /// @dev THE LP-FACING HALF OF THE FREEZE: nobody can even price what they hold.
-    /// @dev `totalAssets()` reaches `_pendingUnvested`, which replays `_grossed` and reverts with it.
+    /// @dev `totalAssets()` reaches `AceVaultNav.deferredAt`, which replays `AceVaultNav.grossed` and reverts with it.
     /// @dev WAS RED before the fix, with `SafeCastOverflowedUintDowncast(128, ...)`.
     function test_Width_O1_NavStillReadsPastTheVestBasisWidth() public {
         AceVault v = _atTheVestCeiling();

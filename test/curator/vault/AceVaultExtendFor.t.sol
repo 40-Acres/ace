@@ -18,9 +18,9 @@ import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
 import {Loan, MarketParams, OpenBounds} from "../../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../../src/ace/positions/PositionManager.sol";
 import {AceVault} from "../../../src/curator/AceVault.sol";
-import {CapListing, ProductConfig} from "../../../src/curator/AceVaultCaps.sol";
-import {AceVaultFlows, BorrowRequest, Terms, VaultConfig} from "../../../src/curator/AceVaultFlows.sol";
-import {AceVaultTail} from "../../../src/curator/AceVaultTail.sol";
+import {CapListing, ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
+import {AceVaultFlows, BorrowRequest, Terms, VaultConfig} from "../../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVaultTail} from "../../../src/curator/libraries/AceVaultTail.sol";
 import {HubLoanTerm} from "../../../src/interfaces/HubLoanTerm.sol";
 import {IAceVaultDoor} from "../../../src/interfaces/IAceVaultDoor.sol";
 import {Extension} from "../../../src/interfaces/IRollPolicy.sol";
@@ -94,7 +94,7 @@ contract RecordingTerms is IVaultTerms {
     }
 }
 
-/// @notice Calls `extendFor` twice in one transaction, so the two lending doors share every transient slot the vault might leave set.
+/// @notice Calls `extendFor` twice in one transaction, so the two lending verbs share every transient slot the vault might leave set.
 contract TwoDoors {
     function both(IAceVaultDoor v, uint256 first, uint256 second, uint256 fee1, uint256 fee2, address shares, uint256 request) external {
         IERC20(IERC20Asset(address(v)).asset()).approve(address(v), fee1 + fee2);
@@ -113,7 +113,7 @@ interface IRequest {
 }
 
 /// @title AceVaultExtendFor
-/// @notice The base lending door `extendFor`: the holder extends a loan of the vault's in place, the fee priced on the hub's own term word
+/// @notice The base lending verb `extendFor`: the holder extends a loan of the vault's in place, the fee priced on the hub's own term word
 /// @notice and pulled before the product's write calls, the exit gate read before the pull, and the vault left with no allowance and nothing owed.
 contract AceVaultExtendForTest is WarpClock {
     Ace internal ace;
@@ -394,7 +394,7 @@ contract AceVaultExtendForTest is WarpClock {
         assertEq(read.loan(loanId).expiry, _now() + TENOR, "the sweep collected the paydown before the gate, and the extension landed");
     }
 
-    /// @notice Two lending doors in one transaction each read their own gate: the second refuses once a request lands between them.
+    /// @notice Two lending verbs in one transaction each read their own gate: the second refuses once a request lands between them.
     function test_TwoDoorsInOneTransactionReadTheirOwnWords() public {
         uint256 a = _loan();
         uint256 b = _loan();

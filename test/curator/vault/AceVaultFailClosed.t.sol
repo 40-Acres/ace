@@ -7,8 +7,8 @@ import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/Reentrancy
 import {PolicyRefused} from "../../../src/ace/hub/Borrower.sol";
 import {MarketParams} from "../../../src/ace/hub/Types.sol";
 import {AceVault} from "../../../src/curator/AceVault.sol";
-import {ProductConfig} from "../../../src/curator/AceVaultCaps.sol";
-import {AceVaultFlows, Terms} from "../../../src/curator/AceVaultFlows.sol";
+import {ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
+import {AceVaultFlows, Terms} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {IRollPolicy} from "../../../src/interfaces/IRollPolicy.sol";
 import {AceVaultBaseRig} from "./AceVaultBaseRig.sol";
 import {VaultSeed} from "../../utils/VaultSeed.sol";

@@ -109,13 +109,13 @@ contract AceS10ValueFlowTest is WarpClock {
         return ace.marketLoans(mid, 0, ace.marketLoansLength(mid));
     }
 
-    /// @dev `balanceOf(hub) == sum(cash + protocolRevenue + quoteOwedTotal) + sum(feeEscrow) + sum over DISTINCT lenders of owed`.
+    /// @dev `balanceOf(hub) == sum(cash + quoteOwedTotal) + revenuePot(quote) + sum(feeEscrow) + sum over DISTINCT lenders of owed`.
     function _quoteIdentity(string memory at) internal view {
-        uint256 booked;
+        uint256 booked = read.revenuePot(address(usdc)); // ONE pot for both markets: they share the quote, so it is read once
         bytes32[2] memory mids = [midRec, midBare];
         for (uint256 i; i < 2; i++) {
             MarketState memory s = read.marketState(mids[i]);
-            booked += s.cash + s.protocolRevenue + s.quoteOwedTotal;
+            booked += s.cash + s.quoteOwedTotal;
         }
         uint256 n = read.loanCount();
         for (uint256 id = 1; id <= n; id++) {
@@ -198,7 +198,7 @@ contract AceS10ValueFlowTest is WarpClock {
 
     function _snap(uint256 id) internal view returns (Snap memory s) {
         s.hub = usdc.balanceOf(address(ace));
-        s.rev = read.protocolRevenue(midRec);
+        s.rev = read.revenuePot(address(usdc));
         s.debt = read.debtOf(id);
         s.units = read.loan(id).collateralUnits;
         (, s.lent, s.owed) = read.lenderPools(L1, address(usdc));

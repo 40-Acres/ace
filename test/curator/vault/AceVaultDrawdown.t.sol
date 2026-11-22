@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
-import {AceVaultCaps} from "../../../src/curator/AceVaultCaps.sol";
-import {Terms, VaultConfig} from "../../../src/curator/AceVaultFlows.sol";
+import {AceVaultCaps} from "../../../src/curator/libraries/AceVaultCaps.sol";
+import {Terms, VaultConfig} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {MockPersistenceRecord} from "../../mocks/MockPersistenceRecord.sol";
 import {MockStakeVault} from "../../mocks/MockStakeVault.sol";
 import {AceVaultBaseRig} from "./AceVaultBaseRig.sol";

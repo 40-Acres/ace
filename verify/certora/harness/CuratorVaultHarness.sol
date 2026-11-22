@@ -2,9 +2,9 @@
 pragma solidity 0.8.36;
 
 import {AceVault} from "../../../src/curator/AceVault.sol";
-import {CapListing, ProductConfig} from "../../../src/curator/AceVaultCaps.sol";
-import {AceVaultFlows, VaultConfig} from "../../../src/curator/AceVaultFlows.sol";
-import {AceVaultTail} from "../../../src/curator/AceVaultTail.sol";
+import {CapListing, ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
+import {AceVaultFlows, VaultConfig} from "../../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVaultTail} from "../../../src/curator/libraries/AceVaultTail.sol";
 
 /// @title CuratorVaultHarness
 /// @notice AceVault, the vault a curated product names its terms on, plus three views: the vest maturity, the NAV mark and the suffix's match.
@@ -18,12 +18,12 @@ contract CuratorVaultHarness is AceVault {
 
     /// @notice When the deferred pile finishes vesting.
     function vestMaturity() external view returns (uint64) {
-        return AceVaultFlows.layout().vestMaturity;
+        return AceVaultFlows.vaultLayout().vestMaturity;
     }
 
     /// @notice The gross NAV the last sync observed, which every stamp is capped at.
     function navMark() external view returns (uint256) {
-        return AceVaultFlows.layout().navMark;
+        return AceVaultFlows.vaultLayout().navMark;
     }
 
     /// @notice Whether the five suffix words are the ones the constructor packs from the named immutables, as every deploy leaves them.

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
+import {Vm} from "forge-std/Vm.sol";
 import {AceVault} from "../../../src/curator/AceVault.sol";
 import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
@@ -82,6 +83,40 @@ contract AceVaultNavTest is AceVaultRig {
         assertEq(ace.lenderOwed(address(vault), address(usdc)), 0, "the credit came home");
         assertEq(vault.idle(), idle0 + owed, "as idle");
         assertEq(vault.grossNav(), g0, "a crank moves no NAV");
+    }
+
+    /// @notice A sync that sees a rise emits `ValueDeferred` with exactly that rise, and the vest takes in that much.
+    /// @dev Kills a sync that stamps the vest but reports a zero rise: the event was the only witness and no row watched it.
+    function test_ASyncEmitsTheRiseItDefers() public {
+        uint256 g0 = vault.grossNav();
+        usdc.mint(address(vault), 500e6);
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit AceVault.ValueDeferred(500e6);
+        vault.crank();
+        assertEq(vault.grossNav(), g0 + 500e6, "PREMISE: the landing is all that moved gross");
+        assertEq(vault.unvested(), 500e6, "the vest took in other than the rise the event named");
+    }
+
+    /// @notice Cash in, cash out, a quiet sync and a fall emit no `ValueDeferred`: only growth past the mark is deferred.
+    function test_NoCashFlowOrFallEmitsValueDeferred() public {
+        vm.recordLogs();
+        _lp(bob, 50_000e6);
+        uint256 shares = vault.balanceOf(bob);
+        vm.prank(bob);
+        vault.redeem(shares, bob, bob);
+        vault.crank();
+        deal(address(usdc), address(vault), vault.idle() - 100e6);
+        vault.crank();
+        assertEq(_deferrals(), 0, "a cash flow, a quiet sync or a fall emitted ValueDeferred");
+        assertEq(vault.unvested(), 0, "and the vest took something in");
+    }
+
+    /// @dev How many `ValueDeferred` logs the vault emitted since `vm.recordLogs`.
+    function _deferrals() internal returns (uint256 n) {
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; ++i) {
+            if (logs[i].emitter == address(vault) && logs[i].topics[0] == AceVault.ValueDeferred.selector) n++;
+        }
     }
 
     /// @notice The vault names no credit line: its asset is the market quote and there is nothing else to read.

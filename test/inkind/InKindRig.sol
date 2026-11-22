@@ -13,7 +13,7 @@ import {Ace} from "../../src/ace/hub/Ace.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {Loan, MarketParams} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
-import {BorrowRequest, VaultConfig} from "../../src/curator/AceVaultFlows.sol";
+import {BorrowRequest, VaultConfig} from "../../src/curator/libraries/AceVaultFlows.sol";
 import {IAceVaultLens, IInKindTerms, IInKindVault, InKindConfig, Listing, Quote, RollQuote, Row} from "./InKindSurface.sol";
 import {SafeLikeHandler, SafeLikeProxy, SafeLikeSingleton} from "./InKindMocks.sol";
 

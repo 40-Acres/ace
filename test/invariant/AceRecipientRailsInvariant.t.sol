@@ -361,7 +361,7 @@ contract AceRecipientRailsInvariantTest is WarpClock {
     /// @dev The quote the books assign the hub: resting cash, revenue, borrower credits, fee escrows and the lender's pool.
     function _booked() internal view returns (uint256 booked) {
         MarketState memory s = read.marketState(mid);
-        booked = s.cash + s.protocolRevenue + s.quoteOwedTotal;
+        booked = s.cash + read.revenuePot(address(usdc)) + s.quoteOwedTotal;
         uint256[] memory ids = ace.marketLoans(mid, 0, ace.marketLoansLength(mid));
         for (uint256 i; i < ids.length; ++i) {
             booked += read.feeEscrowOf(ids[i]);

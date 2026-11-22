@@ -130,7 +130,7 @@ contract AceAskDecimalSweepTest is WarpClock {
 
     /// @dev The quote the hub's books say it holds: cash + revenue + owed to unit holders.
     function _booked() internal view returns (uint256) {
-        return read.poolResting(id) + read.protocolRevenue(id) + read.poolOwed(id) + read.quoteOwedTotal(id);
+        return read.poolResting(id) + read.revenuePot(address(usdc)) + read.poolOwed(id) + read.quoteOwedTotal(id);
     }
 
     // --- the shared probes ---

@@ -148,7 +148,7 @@ contract AceRefinanceTest is WarpClock {
     function _pot() internal view returns (uint256) {
         MarketState memory s = read.marketState(id);
         (uint256 resting,, uint256 owed) = read.poolOf(id); // the LENDER legs; one market here, so it spans nothing else
-        return usdc.balanceOf(address(ace)) - resting - s.protocolRevenue - owed - s.quoteOwedTotal;
+        return usdc.balanceOf(address(ace)) - resting - read.revenuePot(address(usdc)) - owed - s.quoteOwedTotal;
     }
 
     // ============ 17. the happy path, and the M1 wiring probe ============
@@ -395,16 +395,16 @@ contract AceRefinanceTest is WarpClock {
     /// @notice Plan test 24d: a repeat refinance is not free -- each one charges a whole new fee.
     /// @dev Compounded with the fresh admissibility check, that is what forces progressive delevering.
     function test_Refinance_Repeated_ChargesAFreshFeeEachTime() public {
-        uint256 rev0 = read.protocolRevenue(id);
+        uint256 rev0 = read.revenuePot(address(usdc));
         uint256 a = _open(P, TEN30);
-        assertEq(read.protocolRevenue(id) - rev0, 126e6, "fixture: the first open banked one protocol cut");
+        assertEq(read.revenuePot(address(usdc)) - rev0, 126e6, "fixture: the first open banked one protocol cut");
 
         _warpTo(t0 + 15 days);
         uint256 b = _refiViaMulticall(a, P, TEN30);
         _warpTo(t0 + 30 days);
         uint256 c = _refiViaMulticall(b, P, TEN30);
 
-        assertEq(read.protocolRevenue(id) - rev0, 378e6, "three originations, three protocol cuts");
+        assertEq(read.revenuePot(address(usdc)) - rev0, 378e6, "three originations, three protocol cuts");
         assertGt(c, b, "and three distinct loans");
     }
 

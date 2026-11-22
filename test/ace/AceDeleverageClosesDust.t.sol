@@ -203,9 +203,9 @@ contract AceDeleverageClosesDustTest is WarpClock {
         vm.stopPrank();
     }
 
-    /// @dev Revenue wherever it sits: the crank piggybacks the sweep, so the counter alone can read low.
+    /// @dev Revenue wherever it sits: the quote's pot, plus anything a sweep already paid the treasury.
     function _revenue() internal view returns (uint256) {
-        return read.protocolRevenue(id) + quote.balanceOf(AceFixtures.TREASURY);
+        return read.revenuePot(address(quote)) + quote.balanceOf(AceFixtures.TREASURY);
     }
 
     /// @dev The lender's quote, pushed or not: a close may move the pool to the wallet.
@@ -424,7 +424,7 @@ contract AceDeleverageClosesDustTest is WarpClock {
 
     /* ============================== F4 ============================== */
 
-    /// @notice F4: a closing crank is a terminal close: it pushes the lender's whole pool, STRICT, and the sweep runs after it.
+    /// @notice F4: a closing crank is a terminal close: it pushes the lender's whole pool, STRICT, and sweeps nothing.
     /// @notice A quote refusing the push keeps the credit; a limit short of the push's budget reverts `PushGasShort`.
     function test_Close_PushesTheLendersPool() public {
         uint256 loanId = _dustBound();
@@ -441,11 +441,8 @@ contract AceDeleverageClosesDustTest is WarpClock {
         assertTrue(_closed(loanId), "the crank closed the loan");
         assertEq(read.poolOwed(id), 0, "the pool was pushed home");
         assertEq(quote.balanceOf(alice) - bal0, credit, "the lender received the whole pool, the close's own melt included");
-        uint256 iPush = _indexOf(logs, COLLECTED_SIG);
-        uint256 iSweep = _indexOf(logs, SWEPT_SIG);
-        assertLt(iPush, logs.length, "the push fired");
-        assertLt(iSweep, logs.length, "PREMISE: a sweep was due and ran");
-        assertLt(iPush, iSweep, "and the sweep ran after the push");
+        assertLt(_indexOf(logs, COLLECTED_SIG), logs.length, "the push fired");
+        assertEq(_indexOf(logs, SWEPT_SIG), logs.length, "and no sweep ran: the crank leaves the protocol's cut in its pot");
         vm.revertToState(snap);
 
         quote.setReverting(true);

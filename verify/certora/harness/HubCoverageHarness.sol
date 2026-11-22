@@ -113,14 +113,9 @@ contract HubCoverageHarness is Ace {
         return Constants.SETTLE_DARK_GRACE;
     }
 
-    /// @notice One market's protocol revenue pot.
-    function protocolRevenueOf(bytes32 id) external view returns (uint256) {
-        return Storage.markets()[id].s.protocolRevenue;
-    }
-
-    /// @notice When a market's protocol revenue was last swept.
-    function marketLastSweptAtOf(bytes32 id) external view returns (uint64) {
-        return Storage.markets()[id].s.lastSweptAt;
+    /// @notice One quote token's protocol revenue pot, which every market in that quote shares.
+    function protocolRevenueOf(address quote) external view returns (uint256) {
+        return Storage.revenue()[quote];
     }
 
     /// @notice One market's quote claims pot.

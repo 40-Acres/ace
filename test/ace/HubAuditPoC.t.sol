@@ -10,7 +10,6 @@ import {PositionTitleNFT} from "../../src/ace/positions/PositionTitleNFT.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {AceInventoryLens} from "../../src/ace/lens/AceInventoryLens.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
-import {MockBlacklistERC20} from "../mocks/MockBlacklistERC20.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {AceReader} from "../utils/AceReader.sol";
@@ -220,46 +219,9 @@ contract HubAuditPoC is WarpClock {
     /* ================================================================== */
 
     /* ================================================================== */
-    /*  Row D: a refused piggyback sweep stamps the clock anyway           */
+    /*  Row D is DELETED: it pinned the keeper piggyback sweep's stamp,    */
+    /*  and no keeper verb sweeps any more                                 */
     /* ================================================================== */
-
-    /// @notice A treasury the quote refuses makes the keeper piggyback restore the counter but keep the stamp, so the next crank waits a whole period.
-    /// @notice The standalone `sweepRevenue` is not rate-limited, so nothing strands; the stamp means "last attempt", not "last delivery".
-    function test_D1_ARefusedPiggybackSweepStampsTheClockAndDefersTheNextCrankForAPeriod() public {
-        MockBlacklistERC20 blk = new MockBlacklistERC20("Blacklisting USD", "BUSD", 6);
-        MockPersistenceRecord rec2 = new MockPersistenceRecord(address(blk), address(coll));
-        rec2.setMinPrice(AceFixtures.px(1.1e18, address(blk), address(coll)));
-        bytes32 bid = ace.createMarket(_params(address(blk), address(rec2)));
-        blk.mint(alice, 4 * P);
-        vm.startPrank(alice);
-        blk.approve(address(ace), 4 * P);
-        ace.deposit(bid, 4 * P);
-        vm.stopPrank();
-
-        uint256 a = _open(bid, borrower, P);
-        _warpBy(1 hours);
-        uint256 b = _open(bid, borrower, P);
-        uint256 rev = read.protocolRevenue(bid);
-        assertGt(rev, 0, "PREMISE: two draws banked origination revenue");
-
-        address treasury = AceFixtures.TREASURY;
-        blk.setBlacklisted(treasury, true);
-        _warpTo(read.loan(a).expiry);
-        vm.prank(keeper);
-        ace.forceClose(a);
-        assertEq(read.protocolRevenue(bid), rev, "the refused piggyback restored the counter");
-        assertEq(read.marketState(bid).lastSweptAt, _now(), "but stamped the clock as if the revenue had left");
-
-        blk.setBlacklisted(treasury, false);
-        _warpTo(read.loan(b).expiry); // one hour later, the refusal lifted
-        vm.prank(keeper);
-        ace.forceClose(b);
-        assertEq(read.protocolRevenue(bid), rev, "the next crank does not retry inside the period");
-        assertEq(blk.balanceOf(treasury), 0, "so nothing has reached the treasury");
-
-        ace.sweepRevenue(bid);
-        assertEq(blk.balanceOf(treasury), rev, "the standalone door delivers at once");
-    }
 
     /* ================================================================== */
     /*  Row E: a post-close title sale moves no credit                     */

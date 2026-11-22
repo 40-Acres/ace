@@ -12,10 +12,10 @@ import {MarketParams} from "../../ace/hub/Types.sol";
 import {Extension} from "../../interfaces/IRollPolicy.sol";
 import {IVaultTerms, Lend, RefinanceRequest} from "../../interfaces/IVaultTerms.sol";
 import {AceVault} from "../../curator/AceVault.sol";
-import {AceVaultCaps} from "../../curator/AceVaultCaps.sol";
-import {BorrowRequest, Terms} from "../../curator/AceVaultFlows.sol";
-import {AceVaultInKind} from "../../curator/AceVaultInKind.sol";
-import {PriceGrid} from "../../curator/PriceGrid.sol";
+import {AceVaultCaps} from "../../curator/libraries/AceVaultCaps.sol";
+import {BorrowRequest, Terms} from "../../curator/libraries/AceVaultFlows.sol";
+import {AceVaultInKind} from "../../curator/libraries/AceVaultInKind.sol";
+import {PriceGrid} from "../../curator/libraries/PriceGrid.sol";
 
 /// @notice One token's terms: the lender's rate, the tenor range and the largest loan; the vault holds its cap.
 struct Row {

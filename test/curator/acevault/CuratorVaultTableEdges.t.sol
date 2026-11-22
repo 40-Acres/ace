@@ -3,9 +3,9 @@ pragma solidity 0.8.36;
 
 import {Constants} from "../../../src/ace/hub/Constants.sol";
 import {AceVault} from "../../../src/curator/AceVault.sol";
-import {AceVaultFlows} from "../../../src/curator/AceVaultFlows.sol";
+import {AceVaultFlows} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {CuratorTerms, Listing, Row} from "../../../src/entities/curated/CuratorTerms.sol";
-import {AceVaultCaps} from "../../../src/curator/AceVaultCaps.sol";
+import {AceVaultCaps} from "../../../src/curator/libraries/AceVaultCaps.sol";
 import {CuratedVaults} from "../../utils/CuratedVaults.sol";
 import {MockStakeVault} from "../../mocks/MockStakeVault.sol";
 import {MockPersistenceRecord} from "../../mocks/MockPersistenceRecord.sol";

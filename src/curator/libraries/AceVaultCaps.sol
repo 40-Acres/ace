@@ -2,8 +2,8 @@
 pragma solidity 0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {MarketParams} from "../ace/hub/Types.sol";
-import {IAceLenderOps} from "../interfaces/IAceLenderOps.sol";
+import {MarketParams} from "../../ace/hub/Types.sol";
+import {IAceLenderOps} from "../../interfaces/IAceLenderOps.sol";
 import {AceVaultFlows, BorrowRequest, Cap, PendingCap, Terms, VaultLayout} from "./AceVaultFlows.sol";
 import {AceVaultTail} from "./AceVaultTail.sol";
 
@@ -59,7 +59,7 @@ library AceVaultCaps {
     /// @notice Book the deploy's caps, each live at once: a collateral's row listed, the wildcard and the total at their figures.
     /// @notice In kind a nonzero wildcard or the asset as a key refuses.
     function init(CapListing[] calldata caps, bool inKind, address asset) external {
-        VaultLayout storage $ = AceVaultFlows.layout();
+        VaultLayout storage $ = AceVaultFlows.vaultLayout();
         for (uint256 i; i < caps.length; i++) {
             (address key, uint192 cap) = (caps[i].key, caps[i].cap);
             if (inKind) _checkInKind(key, cap, asset);
@@ -71,14 +71,14 @@ library AceVaultCaps {
     /// @notice Set `key`'s cap and list it: at or under its effective cap it lands at once, by the curator or the guardian; over it, it waits.
     /// @notice In kind a nonzero wildcard or the asset as a key refuses.
     function submitCap(address key, uint192 cap) external {
-        VaultLayout storage $ = AceVaultFlows.layout();
+        VaultLayout storage $ = AceVaultFlows.vaultLayout();
         if (AceVaultTail.inKind()) _checkInKind(key, cap, AceVaultTail.asset());
         _change($, key, Cap(cap, true), cap <= effective($, key));
     }
 
     /// @notice Delist `collateral`, so the wildcard's cap applies: at once unless the wildcard is above its row, else after the timelock.
     function submitDelist(address collateral) external {
-        VaultLayout storage $ = AceVaultFlows.layout();
+        VaultLayout storage $ = AceVaultFlows.vaultLayout();
         Cap memory row = $.caps[collateral];
         if (!row.listed || _special(collateral)) revert NotListed();
         _change($, collateral, Cap(0, false), $.caps[address(0)].cap <= row.cap);
@@ -86,7 +86,7 @@ library AceVaultCaps {
 
     /// @notice Make `key`'s pending change live once it has waited out the timelock. PERMISSIONLESS.
     function acceptCap(address key) external {
-        VaultLayout storage $ = AceVaultFlows.layout();
+        VaultLayout storage $ = AceVaultFlows.vaultLayout();
         PendingCap memory pending = $.pendingCaps[key];
         if (pending.validAt == 0 || block.timestamp < pending.validAt) revert NothingDue();
         delete $.pendingCaps[key];
@@ -97,7 +97,7 @@ library AceVaultCaps {
     /// @notice Drop `key`'s pending change. The curator or the guardian.
     function revokePendingCap(address key) external {
         if (msg.sender != AceVaultTail.curator() && msg.sender != AceVaultTail.guardian()) revert NotCurator();
-        delete AceVaultFlows.layout().pendingCaps[key];
+        delete AceVaultFlows.vaultLayout().pendingCaps[key];
         emit RevokePendingCap(msg.sender, key);
     }
 
@@ -107,7 +107,7 @@ library AceVaultCaps {
     /// @return row The row's room.
     /// @return total The total's room.
     function room(address ace, address asset, address collateral, uint256 held, uint256 drawdown) external view returns (uint256 row, uint256 total) {
-        VaultLayout storage $ = AceVaultFlows.layout();
+        VaultLayout storage $ = AceVaultFlows.vaultLayout();
         IAceLenderOps hub = IAceLenderOps(ace);
         (uint256 lent,) = hub.lenderByCollateral(address(this), asset, collateral);
         row = rowRoom(effective($, collateral), lent, $.seized[collateral].value);
@@ -125,7 +125,7 @@ library AceVaultCaps {
     }
 
     /// @notice Whether a vault recovers seized goods through the hub's inventory ask: neither in kind nor in door mode.
-    /// @dev The one spelling the core door's check and the lens's preview both take.
+    /// @dev The one spelling `borrow`'s check and the lens's preview both take.
     function hubAsk(bool inKind, address door) internal pure returns (bool) {
         return !inKind && door == address(0);
     }

@@ -8,7 +8,7 @@ import {Ace} from "../../src/ace/hub/Ace.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
 import {AceVaultFactory} from "../../src/curator/AceVaultFactory.sol";
-import {AceVaultFlows, BorrowRequest} from "../../src/curator/AceVaultFlows.sol";
+import {AceVaultFlows, BorrowRequest} from "../../src/curator/libraries/AceVaultFlows.sol";
 import {CuratorTerms, Listing, Row} from "../../src/entities/curated/CuratorTerms.sol";
 import {CuratedVaults} from "../utils/CuratedVaults.sol";
 import {MockTerms} from "./vault/MockTerms.sol";

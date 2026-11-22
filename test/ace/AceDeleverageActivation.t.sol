@@ -133,13 +133,13 @@ contract AceDeleverageActivationTest is Test {
         uint256 ps = _restorePs(loanId);
         _arm(loanId, ps);
         keeper.setRoutePrice(ps);
-        uint256 rev0 = read.protocolRevenue(id);
+        uint256 rev0 = read.revenuePot(address(usdc));
 
         (, uint256 out) = keeper.crankDeleverage(loanId);
 
         uint256 cut = FullMath.mulDiv(out, CUT_BPS, 10000);
         assertGt(cut, 0, "fixture: the cut is a real number");
-        assertEq(read.protocolRevenue(id) - rev0, cut, "protocol took exactly 5% off the top");
+        assertEq(read.revenuePot(address(usdc)) - rev0, cut, "protocol took exactly 5% off the top");
     }
 
     // ============ T3: the sizing sells MORE to cover the cut (borrower-borne) ============
@@ -273,14 +273,14 @@ contract AceDeleverageActivationTest is Test {
         uint256 ps = bound(psSeed, stop + 1, band - 1); // anywhere in the operating band
         _arm(loanId, ps);
         keeper.setRoutePrice(ps);
-        uint256 rev0 = read.protocolRevenue(id);
+        uint256 rev0 = read.revenuePot(address(usdc));
 
         (uint256 sold, uint256 out) = keeper.crankDeleverage(loanId);
         if (sold == 0) return; // at/above target the channel self-extinguishes; nothing to assert
 
         uint256 tStar = (ps * (1e18 - TARGET_BPS * 1e14)) / 1e18;
         assertLe(read.triggerPrice(loanId), tStar + 1, "restored to target on every admitted crank");
-        assertEq(read.protocolRevenue(id) - rev0, FullMath.mulDiv(out, CUT_BPS, 10000), "cut taken, borrower-borne");
+        assertEq(read.revenuePot(address(usdc)) - rev0, FullMath.mulDiv(out, CUT_BPS, 10000), "cut taken, borrower-borne");
     }
 
     // ============ T9: a gap-down straight through the band refuses, no sale ============
@@ -512,7 +512,7 @@ contract AceDeleverageActivationTest is Test {
         /// @dev bare `requiredAt`, an UPPER bound on what the scope cap allows -- never a mirror of `securedBase`
         /// @dev the cap subtracts the settlement reserve from this, so re-deriving the exact value here would drift
         uint256 base = FullMath.mulDivRoundingUp(WITNESS_K * w.d.read.loan(w.loanId).debt, UNIT_SCALE, w.d.read.fundingFloor(w.d.id, w.loanId) * 1e18);
-        uint256 rev0 = w.d.read.protocolRevenue(w.d.id);
+        uint256 rev0 = w.d.read.revenuePot(address(usdc));
         uint256 debt0 = w.d.read.loan(w.loanId).debt;
 
         (uint256 sold, uint256 out) = w.keep.crankDeleverage(w.loanId);
@@ -523,7 +523,7 @@ contract AceDeleverageActivationTest is Test {
         /// @dev `keep` takes one ceiling now, so `requiredAt` binds and the cap can land ON the debt-securing units.
         assertLe(sold, base, "the scope cap did not hold the sale to the debt-securing units");
         assertLt(sold, w.units, "unitsSold reached collateralUnits: the coverage line's dust reserve stopped being structural");
-        assertEq(w.d.read.protocolRevenue(w.d.id), rev0, "a crank that could not restore took a protocol cut");
+        assertEq(w.d.read.revenuePot(address(usdc)), rev0, "a crank that could not restore took a protocol cut");
         assertLt(w.d.read.loan(w.loanId).debt, debt0, "the crank melted no debt at all");
         assertEq(w.d.read.loan(w.loanId).closedAt, 0, "the reserved crank closed the loan: settlement's units were sold after all");
     }
@@ -533,7 +533,7 @@ contract AceDeleverageActivationTest is Test {
     /// @dev One leg of the differential, measured rather than derived: four quantities plus what the FIRST crank alone did.
     struct Leg {
         uint256 relief; // debt melted across the whole walk
-        uint256 revenue; // cumulative protocolRevenue the walk accrued
+        uint256 revenue; // cumulative revenue-pot growth the walk accrued
         uint256 units; // collateral units sold, net of every re-credited tail
         uint256 keeperEps; // the keeper's total eps take, which rides on units FILLED
         uint256 cranks; // how many cranks the walk took
@@ -553,7 +553,7 @@ contract AceDeleverageActivationTest is Test {
     function _walkToTarget(uint256 loanId, uint256 ps, uint256 firstRefundBps) private returns (Leg memory g) {
         uint256 debt0 = read.loan(loanId).debt;
         uint256 coll0 = read.loan(loanId).collateralUnits;
-        uint256 rev0 = read.protocolRevenue(id);
+        uint256 rev0 = read.revenuePot(address(usdc));
         uint256 keep0 = usdc.balanceOf(address(keeper));
         keeper.setRoutePrice(ps);
         keeper.setRefundBps(firstRefundBps);
@@ -563,12 +563,12 @@ contract AceDeleverageActivationTest is Test {
             (uint256 sold,) = keeper.crankDeleverage(loanId);
             keeper.setRefundBps(0); // only the FIRST crank is partially filled
             g.cranks++;
-            if (g.cranks == 1) (g.firstRevenue, g.trigAfterFirst) = (read.protocolRevenue(id) - rev0, read.triggerPrice(loanId));
+            if (g.cranks == 1) (g.firstRevenue, g.trigAfterFirst) = (read.revenuePot(address(usdc)) - rev0, read.triggerPrice(loanId));
             if (sold == 0) break;
         }
         g.relief = debt0 - read.loan(loanId).debt;
         g.units = coll0 - read.loan(loanId).collateralUnits;
-        g.revenue = read.protocolRevenue(id) - rev0;
+        g.revenue = read.revenuePot(address(usdc)) - rev0;
         g.keeperEps = usdc.balanceOf(address(keeper)) - keep0;
         g.trigEnd = read.triggerPrice(loanId);
     }

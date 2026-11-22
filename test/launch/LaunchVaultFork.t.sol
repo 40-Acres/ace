@@ -17,7 +17,7 @@ import {Ace} from "../../src/ace/hub/Ace.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {IContinuousClearingAuction} from "../../src/interfaces/ILaunchAuction.sol";
 import {LaunchVault} from "../../src/entities/launch/LaunchVault.sol";
-import {PriceGrid} from "../../src/curator/PriceGrid.sol";
+import {PriceGrid} from "../../src/curator/libraries/PriceGrid.sol";
 import {LaunchLock, Leg} from "../../src/entities/launch/LaunchLock.sol";
 import {LaunchOpsBudget} from "../../src/entities/launch/LaunchOpsBudget.sol";
 import {LaunchTokenFactory} from "../../src/entities/launch/LaunchTokenFactory.sol";

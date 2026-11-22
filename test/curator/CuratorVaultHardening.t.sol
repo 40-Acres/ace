@@ -103,10 +103,8 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
         uint256 grossBefore = v.grossNav();
         _finalize(loanId);
         lost = grossBefore > v.grossNav() ? grossBefore - v.grossNav() : 0;
-        /// @dev LET THE REPAY'S DEFERRAL MATURE before the settle crank, so the pile below is stamped clean
-        /// @dev The one-wei strand the caller pins is the HUB'S double floor, and only a pile whose maturity
-        /// @dev sits exactly one window ahead lets `_pendingUnvested` cancel `unvested` to the wei around it
-        /// @dev A live pile leaves a blended maturity instead, and the ladder's own ceil adds a second wei
+        /// @dev LET THE REPAY'S DEFERRAL MATURE before the settle crank, so the sale is read against no live pile
+        /// @dev The live-pile case is `_sliverThenSettleLivePile`; a floored basis reads back exactly at any maturity, so this picks a fixture, not a wei
         _warpBy(VEST_W + 1);
         /// @dev And past the ask hold, which the window above already clears; stated so the leg names its own gate
         _warpAtLeastTo(read.inventoryAskOpensAt(loanId));
@@ -153,7 +151,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
 
     /// @dev The sibling fixture with the vest pile LEFT LIVE: it rests past the ask hold and no further.
     /// @dev An hour of hold inside a one-day window is reachable in production, so this state is too.
-    /// @dev SEPARATE HELPER on purpose: two green tests depend on `_sliverThenSettle` maturing the pile.
+    /// @dev SEPARATE HELPER on purpose: the two rows above read the sale against a matured pile, and the row below against a live one.
     function _sliverThenSettleLivePile(AceVault v) internal returns (uint256 loanId) {
         (loanId,) = _funded(v);
         _repay(loanId, DRAW - DUST);
@@ -166,18 +164,15 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
     /// @notice THE SIBLING, one line apart: the same sale against a LIVE vest pile instead of a matured one.
     /// @notice The hold is an hour and the window is a day, so a partly-vested seller is the ordinary case.
     /// @dev THE STRAND IS DERIVED HERE, NOT OBSERVED, and it separates into two independently named wei.
-    /// @dev HUB WEI: the sale credits `unitOwed` in full while `qIndex` floors twice, so the class recognizes
-    /// @dev exactly one wei more than its holder can claim. That is the sibling's subject and it is EXACT.
-    /// @dev VEST WEI: `_pendingUnvested` re-grosses the rise, and `_grossed` then `_readVest` both CEIL.
-    /// @dev `_grossed`'s own contract is that the round trip returns the pile "or one wei above it": 0 or 1.
-    /// @dev It returns exactly the pile only when the maturity sits one full window out, which is a MATURED pile.
-    /// @dev A live pile blends to `mat - now < VEST_WINDOW`, so the two ceils no longer cancel and the wei can land.
+    /// @dev HUB WEI: the sale's rise in gross past the proceeds the vault can claim; the credit lands in the pool directly, so it is 0.
+    /// @dev VEST WEI: how far `AceVaultNav.deferredAt` at the sale's gross reads over the live pile plus the rise.
+    /// @dev It re-grosses the rise: `AceVaultNav.grossed` FLOORS the basis and `AceVaultNav.readVest` reads it back with CEIL.
+    /// @dev With `r = maturity - now` in (0, VEST_WINDOW], `floor(X * W / r) * r / W` sits in (X - 1, X], so the read is exactly X.
+    /// @dev A blended live maturity is such an `r` as a fresh window is, so the vest wei is 0 here too ( item 1).
     /// @dev The NAV mark is the gross the crank above synced at, and nothing moves gross before the sale.
     /// @dev So `grossAfter - grossPre` IS the `g - m` rise the deferral arithmetic reads, with nothing in between.
-    /// @dev The vest wei lands on 1 under this fixture, making the whole strand 2 against the matured sibling's 1.
-    /// @dev It is asserted as the DERIVED CEILING and not as that 1: which of 0 or 1 a given round trip lands on
-    /// @dev falls out of the specific numbers, so an equality here would be a measured constant wearing a proof.
-    function test_WriteOff_APotSoldIntoALiveVestPileStrandsTheHubWeiAndAtMostOneMore() public {
+    /// @dev The whole strand is therefore 0, as for the matured sibling, and the row asserts it.
+    function test_WriteOff_APotSoldIntoALiveVestPileStrandsNothing() public {
         AceVault v = _newVault(0);
         uint256 loanId = _sliverThenSettleLivePile(v);
         assertGt(v.unvested(), 0, "PREMISE: the pile is still LIVE, or this is just the matured sibling again");
@@ -198,7 +193,7 @@ contract CuratorVaultHardeningTest is CuratorVaultBase {
         /// @dev twice on the way out. The per-(loan, tick) index is deleted and the credit lands in the
         /// @dev lender's pool directly, so the second floor is gone and the hub strands nothing.
         assertEq(hubWei, 0, "HUB: the class recognizes exactly what its holder can claim");
-        assertLe(vestWei, 1, "VEST: one ceil round trip through `_grossed` may add a wei, and can never add two");
+        assertEq(vestWei, 0, "VEST: the re-grossed pile reads exactly the pile plus the rise");
         _crankAll(v);
 
         assertEq(v.idle() - idleBefore, proceeds, "a later crank brings them home as cash, to the wei");

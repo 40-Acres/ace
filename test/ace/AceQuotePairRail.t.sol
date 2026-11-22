@@ -189,10 +189,10 @@ contract AceQuotePairRailTest is WarpClock {
     /// @dev Every market here is the fixture's, so one read covers them; a mixed-lender list needs a dedupe.
     function _booked(bytes32[] memory mids) internal view returns (uint256 booked) {
         (uint256 resting,, uint256 owed) = read.poolOf(mids[0]);
-        booked = resting + owed;
+        booked = resting + owed + read.revenuePot(ace.idToMarketParams(mids[0]).quote); // the pot is per quote: read once, `mids` is every market in it
         for (uint256 i; i < mids.length; i++) {
             MarketState memory s = read.marketState(mids[i]);
-            booked += s.protocolRevenue + s.quoteOwedTotal;
+            booked += s.quoteOwedTotal;
         }
         uint256 n = read.loanCount();
         for (uint256 k = 1; k <= n; k++) {

@@ -3,8 +3,8 @@ pragma solidity 0.8.36;
 
 import {PolicyRefused} from "../../../src/ace/hub/Borrower.sol";
 import {Loan, MarketParams} from "../../../src/ace/hub/Types.sol";
-import {AceVaultCaps, ProductConfig} from "../../../src/curator/AceVaultCaps.sol";
-import {BorrowRequest, Terms} from "../../../src/curator/AceVaultFlows.sol";
+import {AceVaultCaps, ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
+import {BorrowRequest, Terms} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {Extension, IRollPolicy} from "../../../src/interfaces/IRollPolicy.sol";
 import {IAceVaultLens, VaultLens} from "../../utils/VaultLens.sol";
 import {AceVaultBaseRig} from "./AceVaultBaseRig.sol";

@@ -21,7 +21,7 @@
 // and band reads, the sizing, the secured base and the coverage line. Any size, any cap and any line is one of those answers,
 // so a rule about what a sale of THAT size pays holds of the real one. The custodian, title, keeper and token calls do nothing.
 // THE DOMAIN, stated: the market's rails hold (HubClaims.spec `aCreatedMarketKeepsItsRails`), the claim is the debt
-// (HubClaims.spec O10), and no revenue sweep is due, so the revenue word moves only by the crank's own cut.
+// (HubClaims.spec O10). No revenue sweep rides a crank, so the quote's revenue pot moves only by the crank's own cut.
 
 methods {
     function FullMath.mulDiv(uint256 a, uint256 b, uint256 d) internal returns (uint256) => mulDivDownExact(a, b, d);
@@ -58,11 +58,10 @@ methods {
     function loanBorrowerOf(uint256) external returns (address) envfree; // AceHarness
     function loanPotOf(uint256) external returns (uint256) envfree; // AceHarness
     function unitsOwedOf(uint256, address) external returns (uint256) envfree; // AceHarness
-    function protocolRevenueOf(bytes32) external returns (uint256) envfree; // AceHarness
+    function protocolRevenueOf(address) external returns (uint256) envfree; // AceHarness: one quote's pot
     function marketRailsOf(bytes32) external returns (uint256, uint256, uint256) envfree; // AceHarness
     function marketMinPrincipalOf(bytes32) external returns (uint256) envfree; // AceHarness
     function marketSettleBountyBpsOf(bytes32) external returns (uint256) envfree; // AceHarness
-    function marketLastSweptAtOf(bytes32) external returns (uint64) envfree; // AceHarness
     function marketDeleverageOf(bytes32) external returns (uint256, uint256, uint256, uint256, uint256) envfree; // HubCoverageHarness
     function marketRecordOf(bytes32) external returns (address) envfree; // HubCoverageHarness
 }
@@ -137,7 +136,6 @@ function liveLoanPremises(env e, uint256 id) {
 
 function crankPremises(env e, uint256 id) {
     liveLoanPremises(e, id);
-    require to_mathint(e.block.timestamp) < marketLastSweptAtOf(loanMarket(id)) + 86400; // no piggyback sweep is due
     require priceAsks == 0;
 }
 
@@ -171,11 +169,12 @@ rule aRestoringCrankPaysTheFloorBill(env e, uint256 id, uint256 minStableOut, by
     mathint cb = cutBpsOf(m);
     mathint u0 = loanUnitsOf(id);
     mathint d0 = loanDebtOf(id);
-    mathint r0 = protocolRevenueOf(m);
+    address q = marketQuoteOf(m);
+    mathint r0 = protocolRevenueOf(q);
     deleverage(e, id, minStableOut, data);
     require closedAtOf(id) == 0; // the restore path
     mathint sold = u0 - loanUnitsOf(id);
-    mathint taken = protocolRevenueOf(m) - r0;
+    mathint taken = protocolRevenueOf(q) - r0;
     mathint paid = (d0 - loanDebtOf(id)) + taken;
     mathint exact = priceSeen * sold * (10000 - eps);
     assert sold > 0 => priceAsks == 1, "a crank sold without one record read";

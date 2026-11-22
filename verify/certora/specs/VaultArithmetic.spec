@@ -129,9 +129,9 @@ rule anExitLowersTheHighWaterPerShareByUnderAWei(env e, method f, calldataarg ar
 // ---- the vest maturity only moves later ----
 
 // THE PRECONDITION IS AN INDUCTION, and both its legs are stated rather than left implicit:
-//   BASE: the constructor never writes the maturity `vestMaturity()` reads (only _stampVest does), so it starts at 0 <= now + W.
+//   BASE: the constructor never writes the maturity `vestMaturity()` reads (only AceVaultNav.stampVest does), so it starts at 0 <= now + W.
 //     The genesis seed changes nothing here: the constructor books it through `_mintBooked`, which writes the shares, the fee
-//     high-water, the mark and the high-water of gross, and never calls `_stampVest`.
+//     high-water, the mark and the high-water of gross, and never calls `AceVaultNav.stampVest`.
 //   STEP: the companion rule below, plus one fact of the chain -- block.timestamp never runs backwards.
 // The base is a hand step, checkable by reading every write to the layout's vestMaturity field; no rule here checks it.
 rule vestMaturityNeverMovesEarlier(env e, method f, calldataarg args) filtered { f -> !f.isView } {

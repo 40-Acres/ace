@@ -16,7 +16,7 @@ import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {Permits} from "../../src/ace/hub/libraries/Permits.sol";
 import {Bid, Checkpoint} from "../../src/interfaces/ILaunchAuction.sol";
 import {LaunchVault} from "../../src/entities/launch/LaunchVault.sol";
-import {PriceGrid} from "../../src/curator/PriceGrid.sol";
+import {PriceGrid} from "../../src/curator/libraries/PriceGrid.sol";
 import {LockAccount} from "../../src/entities/launch/LockAccount.sol";
 import {RunwayHook} from "../../src/entities/launch/RunwayHook.sol";
 import {MockPermit2Allowance} from "../mocks/MockPermit2Allowance.sol";

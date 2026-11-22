@@ -183,9 +183,9 @@ contract AceP10OrderCustodyIdentityTest is WarpClock {
     function _quote(string memory at) internal view {
         (uint256 resting,, uint256 owed) = read.poolOf(mid); // mid2 shares this pool: same lender, same quote
         MarketState memory s = read.marketState(mid);
-        uint256 pots = resting + owed + s.protocolRevenue + s.quoteOwedTotal;
+        uint256 pots = resting + owed + read.revenuePot(address(usdc)) + s.quoteOwedTotal; // the revenue pot is per quote: read once, mid2 shares it
         s = read.marketState(mid2);
-        pots += s.protocolRevenue + s.quoteOwedTotal;
+        pots += s.quoteOwedTotal;
         uint256 n = read.loanCount();
         for (uint256 id = 1; id <= n; id++) {
             pots += read.feeEscrowOf(id);

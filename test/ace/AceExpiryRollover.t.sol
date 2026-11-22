@@ -143,7 +143,7 @@ contract AceExpiryRolloverTest is WarpClock {
         _warpTo(uint256(read.loan(loanId).expiry) + 1);
         uint256 n = read.loanCount();
         uint256 want = _sliver(id, loanId);
-        uint256 rev0 = read.protocolRevenue(id);
+        uint256 rev0 = read.revenuePot(address(usdc));
         uint256 paid0 = usdc.balanceOf(AceFixtures.TREASURY);
         uint256 burns0 = read.marketState(id).cumulativeBackedBurns;
 
@@ -155,8 +155,9 @@ contract AceExpiryRolloverTest is WarpClock {
         assertEq(vault.balanceOf(keeper), want, "the sliver paid as ever");
         assertGt(read.invPotOf(id, loanId), 0, "claims became the classes' pots at their own ticks");
         assertEq(read.loanCount(), n, "no new loan");
-        uint256 swept = usdc.balanceOf(AceFixtures.TREASURY) - paid0;
-        assertEq(read.protocolRevenue(id) + swept, rev0, "no protocol take at the loss endpoint: the sweep moved banked revenue, it did not create any");
+        assertGt(rev0, 0, "PREMISE: the open banked a protocol cut, so the two rows below are not vacuous");
+        assertEq(usdc.balanceOf(AceFixtures.TREASURY), paid0, "no protocol take at the loss endpoint, and no sweep rides the close");
+        assertEq(read.revenuePot(address(usdc)), rev0, "the pot keeps every atom for the deliberate sweep");
         assertGt(read.marketState(id).cumulativeBackedBurns, burns0, "and the backed synthetic burned as ever");
     }
 

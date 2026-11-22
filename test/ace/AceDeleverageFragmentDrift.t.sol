@@ -117,7 +117,7 @@ abstract contract AceDeleverageFragmentDriftBase is WarpClock {
         p.deleverageTargetBps = TARGET;
         p.deleverageStopBps = STOP;
         p.deleverageProtocolBps = CUT;
-        AceFixtures.Deployment memory d = AceFixtures.deployWithTreasury(p, address(0)); // inert sweep: protocolRevenue counts the cut alone
+        AceFixtures.Deployment memory d = AceFixtures.deployWithTreasury(p, address(0)); // no treasury, no sweep: the quote's revenue pot counts the cut alone
         (ace, read, id) = (d.ace, d.read, d.id);
 
         uint256 lend = 100 * _debt();
@@ -172,7 +172,7 @@ abstract contract AceDeleverageFragmentDriftBase is WarpClock {
 
     function _snap() internal view returns (Snap memory s) {
         s.debt = read.debtOf(loanId);
-        s.rev = read.protocolRevenue(id);
+        s.rev = read.revenuePot(address(q));
         s.claim = read.claimOf(id, loanId);
         s.owed = read.poolOwed(id);
         s.units = read.loan(loanId).collateralUnits;
@@ -197,7 +197,7 @@ abstract contract AceDeleverageFragmentDriftBase is WarpClock {
 
     /// @dev Conservation: proceeds split into melt and cut, and every ledger moved by exactly its leg.
     function _checkMoney(Snap memory b, uint256 sold, uint256 out, uint256 melted) internal view {
-        uint256 cut = read.protocolRevenue(id) - b.rev;
+        uint256 cut = read.revenuePot(address(q)) - b.rev;
         assertEq(out, melted + cut, "every atom of proceeds is either melted debt or the protocol cut");
         assertTrue(cut == 0 || cut == (out * CUT) / 10000, "the cut is zero or the floored share of this crank");
         assertEq(q.balanceOf(address(ace)) - b.hub, out, "the hub received exactly the proceeds it reported");

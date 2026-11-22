@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {Vm} from "forge-std/Vm.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {AceVaultFlows, VaultConfig} from "../../src/curator/AceVaultFlows.sol";
+import {AceVaultFlows, VaultConfig} from "../../src/curator/libraries/AceVaultFlows.sol";
 
 /// @dev A test asset's own mint, which every mock cash in this tree carries.
 interface ISeedMint {

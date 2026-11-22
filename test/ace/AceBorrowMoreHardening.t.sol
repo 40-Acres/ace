@@ -53,14 +53,14 @@ contract AceDrawMoreHardeningTest is DrawMoreRig {
         assertEq(read.feeEscrowOf(loanId), 84_000_000, "PREMISE: the open's escrow is half of 10/11 of 184.8 USDC");
         uint256 bal0 = usdc.balanceOf(borrower);
         uint256 hub0 = usdc.balanceOf(address(ace));
-        uint256 rev0 = read.protocolRevenue(id);
+        uint256 rev0 = read.revenuePot(address(usdc));
         (uint256 resting0,, uint256 owed0) = read.poolOf(id);
         vm.prank(borrower);
         uint256 fee = hub.drawMore(loanId, A, _none());
         assertEq(fee, 42_900_000, "ceil(2,500e6 * 2190 * 26 days * 11000 / (1e8 * 365 days))");
         assertEq(usdc.balanceOf(borrower) - bal0, 2_457_100_000, "the holder took the amount less the fee");
         assertEq(hub0 - usdc.balanceOf(address(ace)), 2_457_100_000, "and the hub paid out exactly that");
-        assertEq(read.protocolRevenue(id) - rev0, 3_900_000, "the protocol took an eleventh of the fee");
+        assertEq(read.revenuePot(address(usdc)) - rev0, 3_900_000, "the protocol took an eleventh of the fee");
         (uint256 resting1,, uint256 owed1) = read.poolOf(id);
         assertEq(owed1 - owed0, 25_500_000, "owed took the open escrow's two served days and half the lender's cut");
         assertEq(read.feeEscrowOf(loanId), 97_500_000, "the escrow keeps 26/28 of the open's and the other half");
@@ -344,10 +344,10 @@ contract AceAddCollateralHardeningTest is DrawMoreRig {
         assertEq(_lenderFigures(), before, "an add moved a lender figure");
     }
 
-    /// @dev The market's pools, cash, counter and revenue, and the hub's quote, in one blob.
+    /// @dev The market's pools, cash and counter, the quote's revenue pot, and the hub's quote, in one blob.
     function _lenderFigures() internal view returns (bytes memory) {
         (uint256 r, uint256 l, uint256 o) = read.poolOf(id);
-        return abi.encode(r, l, o, ace.restingOf(id), read.marketState(id).drawCount, read.protocolRevenue(id), usdc.balanceOf(address(ace)));
+        return abi.encode(r, l, o, ace.restingOf(id), read.marketState(id).drawCount, read.revenuePot(address(usdc)), usdc.balanceOf(address(ace)));
     }
 }
 

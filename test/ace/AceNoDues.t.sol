@@ -83,14 +83,14 @@ contract AceNoDuesTest is ExtendRig {
     function test_ThroughASettlement() public {
         uint256 loanId = _extendedLoan(5000);
         uint256 c = read.claimOf(id, loanId);
-        uint256 rev0 = read.protocolRevenue(id);
+        uint256 rev0 = read.revenuePot(address(usdc));
         _warpTo(read.loan(loanId).expiry);
         vm.recordLogs();
         vm.prank(keeper);
         ace.forceClose(loanId);
         assertTrue(ace.isClosed(loanId), "the loan settled");
         assertEq(read.invPotOf(id, loanId), FullMath.mulDivRoundingUp(c, S, par), "the pot covers the claim and nothing else");
-        assertEq(read.protocolRevenue(id), rev0, "no protocol due exists to forfeit, and revenue does not move");
+        assertEq(read.revenuePot(address(usdc)), rev0, "no protocol due exists to forfeit, and revenue does not move");
         assertEq(read.claimOf(id, loanId), 0, "the claim converted");
         bytes32 duesSettled = keccak256("DuesSettled(uint256,uint256,uint256)");
         Vm.Log[] memory logs = vm.getRecordedLogs();

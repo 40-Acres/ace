@@ -73,7 +73,7 @@ contract AceExtendFromNowTest is ExtendRig {
     function _snap(uint256 loanId, address payer) internal view returns (Snap memory s) {
         s.loan = read.loan(loanId);
         s.escrow = read.feeEscrowOf(loanId);
-        s.revenue = read.protocolRevenue(s.loan.market);
+        s.revenue = read.revenuePot(address(usdc));
         (,, s.owed) = read.poolOf(s.loan.market);
         s.drawCount = read.marketState(s.loan.market).drawCount;
         s.payer = usdc.balanceOf(payer);
@@ -89,7 +89,7 @@ contract AceExtendFromNowTest is ExtendRig {
         assertEq(l.debt, s.loan.debt, "nor the debt");
         assertEq(l.collateralUnits, s.loan.collateralUnits, "nor the lot");
         assertEq(read.feeEscrowOf(loanId), s.escrow, "nor the escrow");
-        assertEq(read.protocolRevenue(l.market), s.revenue, "nor revenue");
+        assertEq(read.revenuePot(address(usdc)), s.revenue, "nor revenue");
         (,, uint256 owed) = read.poolOf(l.market);
         assertEq(owed, s.owed, "nor owed");
         assertEq(read.marketState(l.market).drawCount, s.drawCount, "nor the draw counter");
@@ -151,7 +151,7 @@ contract AceExtendFromNowTest is ExtendRig {
     function _extensionLegs(uint256 loanId) internal returns (Legs memory g) {
         uint256 e0 = read.feeEscrowOf(loanId);
         uint256 earned = e0 - _unearned(loanId, e0);
-        uint256 rev0 = read.protocolRevenue(id);
+        uint256 rev0 = read.revenuePot(address(usdc));
         (,, uint256 owed0) = read.poolOf(id);
         _fund(borrower, _ceiling(loanId));
         uint256 bal0 = usdc.balanceOf(borrower);
@@ -159,7 +159,7 @@ contract AceExtendFromNowTest is ExtendRig {
         g.fee = ace.extend(loanId, 0, "");
         assertEq(bal0 - usdc.balanceOf(borrower), g.fee, "the caller paid the fee it was charged");
         (,, uint256 owed1) = read.poolOf(id);
-        g.protocol = read.protocolRevenue(id) - rev0;
+        g.protocol = read.revenuePot(address(usdc)) - rev0;
         g.tick = owed1 - owed0 - earned;
         g.escrow = read.feeEscrowOf(loanId) + earned - e0;
         assertEq(g.protocol + g.escrow + g.tick, g.fee, "this call's legs sum to its fee");

@@ -161,7 +161,7 @@ contract AceEarlyExitRebateTest is WarpClock {
     function _escrowPot() internal view returns (uint256) {
         MarketState memory s = read.marketState(id);
         (uint256 resting,, uint256 owed) = read.poolOf(id); // the LENDER legs; one market here, so it spans nothing else
-        return usdc.balanceOf(address(ace)) - resting - s.protocolRevenue - owed - s.quoteOwedTotal;
+        return usdc.balanceOf(address(ace)) - resting - read.revenuePot(address(usdc)) - owed - s.quoteOwedTotal;
     }
 
     /// @dev Plan test 29: hub balance == cash + revenue + unit-owed + the escrow LEDGER, on every op.
@@ -175,7 +175,7 @@ contract AceEarlyExitRebateTest is WarpClock {
         }
         assertEq(
             usdc.balanceOf(address(ace)),
-            resting + s.protocolRevenue + pot + owed + s.quoteOwedTotal,
+            resting + read.revenuePot(address(usdc)) + pot + owed + s.quoteOwedTotal,
             "solvency: escrow pot, unit-owed and claimant-owed booked exactly"
         );
     }
@@ -190,7 +190,7 @@ contract AceEarlyExitRebateTest is WarpClock {
 
         assertEq(esc.feeEscrowOf(loanId), ESCROW30, "the loan's escrow ledger");
         assertEq(_escrowPot(), ESCROW30, "and the hub really holds it, unbooked");
-        assertEq(read.protocolRevenue(id), PROTO30, "the protocol cut is untouched by the rebate");
+        assertEq(read.revenuePot(address(usdc)), PROTO30, "the protocol cut is untouched by the rebate");
         assertEq(read.restingOf(id), cash0 - P, "the tick lost exactly the draw; the fee is not cash");
         assertApproxEqAbs(_lenderOwed(), LENDER30 - ESCROW30, 1, "the class took the lender share NET");
         assertEq(read.claimOf(id, loanId), P, "and the draw itself is unchanged");
@@ -447,14 +447,14 @@ contract AceEarlyExitRebateTest is WarpClock {
     /// @notice Every wei of the fee has exactly one home, over a full life.
     /// @dev The classes' owed quote includes PAR after a full repay, so the fee leg is owed minus P.
     function test_FeeConservation_OverAFullLifecycle_IsExact() public {
-        uint256 revBefore = read.protocolRevenue(id);
+        uint256 revBefore = read.revenuePot(address(usdc));
 
         uint256 loanId = _open(borrowerA, TEN30);
         _warpTo(t0 + 11 days);
         uint256 refund = _repayFull(borrowerA, loanId);
 
         uint256 credited = _lenderOwed() - P;
-        uint256 toProtocol = read.protocolRevenue(id) - revBefore;
+        uint256 toProtocol = read.revenuePot(address(usdc)) - revBefore;
 
         assertApproxEqAbs(credited + toProtocol + refund, FEE30, 4, "fee conservation: credit + revenue + refund == fee");
         assertGt(refund, 0, "non-vacuity: the refund leg actually ran");

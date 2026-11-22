@@ -83,9 +83,9 @@ error ShareOverCeiling(); // the asked origination share is over `MAX_PROTOCOL_S
 /// @dev Band on, settlement prices the take at the record under the policy budget, and a dark one holds both doors `SETTLE_DARK_GRACE` past expiry.
 /// @dev Whether a record is WIRED is still read at every settle, and it sets how much of the lot the lenders take.
 /// @dev A QUOTE that reverts on transfer refuses `open` and a borrower's cash-out refinance, which pay their caller in the call.
-/// @dev It refuses `withdraw`, `collect`, `claimOwed`, the revenue sweep and the lender push at a terminal close.
-/// @dev The piggyback sweep and the lender push each restore their own counter on a refusal; the lender's credit then waits for `collect`.
-/// @dev Protocol revenue's uncapped exit is the standalone `sweepRevenue`, which reverts on a refusal and leaves the counter whole.
+/// @dev It refuses `withdraw`, `collect`, `claimOwed`, its own quote's revenue sweep and the lender push at a terminal close.
+/// @dev The lender push restores its counter on a refusal, and the lender's credit then waits for `collect`.
+/// @dev Protocol revenue's one exit is `sweepRevenue(quote)`, uncapped, which reverts on a refusal and leaves that quote's pot whole.
 /// @dev An UNSUPPORTED quote's balance fall halts nothing: every outflow pays from one balance per token, so the last party out bears it.
 /// @dev Settlement's TITLE transfer moves no token, so a hostile quote holds payouts and never blocks it.
 /// @dev A dependency that BURNS its gas can starve the rest of the crank that fed it, which then reverts; a retry funds more.
@@ -98,8 +98,8 @@ contract Ace is ReentrancyGuardTransient {
 
     event MarketCreated(bytes32 indexed id, address indexed quote, address indexed collateral);
     event BuyInventory(uint256 indexed loanId, address indexed payer, address indexed unitsTo, uint256 unitsOut, uint256 stableFilled);
-    event RevenueSwept(bytes32 indexed market, address indexed to, uint256 amount, uint64 at);
-    event RevenueSweepFailed(bytes32 indexed market, address indexed to, uint256 amount, uint64 at);
+    /// @notice One quote's whole revenue pot paid to the treasury: every market's protocol cut in that quote since the last sweep.
+    event RevenueSwept(address indexed quote, address indexed to, uint256 amount);
     /// @notice A lender named the contract its loans' extensions ask; zero consents to none.
     event RollPolicySet(address indexed lender, address indexed policy);
     /// @notice The origination share moved from `previous` to `shareBps`; the constructor announces the first, from zero.
@@ -110,7 +110,6 @@ contract Ace is ReentrancyGuardTransient {
     address public immutable POSITION_TITLE; // the one ERC-721 over every position, hub-scoped; tokenId == loanId
     uint256 public immutable PUSH_GAS; // the gas each swallowed push hands its callee, fixed per deploy inside the rail
     uint256 public immutable PUSH_FLOOR; // the gas a lender push demands at its read: the budget past EIP-150's 1/64, plus its tail
-    uint256 public immutable SWEEP_FLOOR; // the same for the keeper piggyback's sweep, whose tail also carries its stamp and counter writes
     uint256 public immutable POLICY_GAS; // the gas a capped ask (a roll policy, a band-on settlement's price) hands its callee, fixed per deploy
 
     bytes32 private immutable CACHED_SEPARATOR; // the domain built at construction, valid for as long as the chain id holds
@@ -134,7 +133,7 @@ contract Ace is ReentrancyGuardTransient {
     /// @dev THE BINDING RAIL, and it is why the deploy order is positionManager-then-hub.
     /// @dev At this point the positionManager already has code, so the hub verifies the binding itself.
     /// @dev A wrong prediction fails closed HERE, with no operator trust and no genesis rail.
-    /// @dev Both budgets are railed first; the push floors derive from the one, the tails reserve what runs after the call.
+    /// @dev Both budgets are railed first; the push floor derives from the one, its tail reserving what runs after the call.
     /// @dev Constructor code is not runtime code, so this costs zero EIP-170 budget.
     constructor(address treasury, address positionManager, uint256 pushGas, uint256 policyGas) {
         if (pushGas < Constants.MIN_PUSH_GAS || pushGas > Constants.MAX_PUSH_GAS) revert PushGasOutOfRange();
@@ -148,7 +147,6 @@ contract Ace is ReentrancyGuardTransient {
         PUSH_GAS = pushGas;
         uint256 whole = (pushGas * 64 + 62) / 63; // floor(64p/63) already makes EIP-150 forward exactly p; the ceil adds one gas of margin
         PUSH_FLOOR = whole + Constants.PUSH_TAIL;
-        SWEEP_FLOOR = whole + Constants.SWEEP_TAIL;
         POLICY_GAS = policyGas;
         Storage.protocol().shareBps = Constants.MAX_PROTOCOL_SHARE_BPS;
         emit ProtocolShareSet(0, Constants.MAX_PROTOCOL_SHARE_BPS);
@@ -699,15 +697,13 @@ contract Ace is ReentrancyGuardTransient {
         (u, s) = _deleverage(id, minStableOut, data);
     }
 
-    /// @dev Cache once, hand to Deleverage, push on a close, then the best-effort revenue sweep: a limit that cannot fund it skips it.
+    /// @dev Cache once, hand to Deleverage, push on a close. No revenue sweep rides it: the protocol's cut waits in its quote's pot.
     function _deleverage(uint256 id, uint256 minStableOut, bytes calldata data) private returns (uint256 u, uint256 s) {
         bytes32 mid = _book().loans[id].market;
-        Market storage M = _market()[mid];
         Cfg memory c = _cache(mid);
-        (u, s) = Deleverage.deleverage(_book(), M, c, id, data);
+        (u, s) = Deleverage.deleverage(_book(), _market()[mid], c, id, data);
         if (s < minStableOut) revert BelowCallerFloor();
         if (_book().loans[id].closedAt != 0) _pushOwed(c); // a closing crank is a terminal close: the push rides it, STRICT
-        _sweepIfDue(mid, M, c);
     }
 
     /// @notice Close this loan and open a fresh one atomically, in its own market or another securing the same collateral in the same quote.
@@ -744,7 +740,6 @@ contract Ace is ReentrancyGuardTransient {
     /// @notice The LENDER's pooled quote credit is pushed here instead, swallowed; only the quote side moves.
     /// @notice That push is STRICT: a limit short of its fixed budget plus the tail reverts `PushGasShort`.
     /// @notice Band on, the take is the debt at the record's price, read under the policy budget (`RecordGasShort`); a dark one refuses.
-    /// @dev No revenue sweep rides this door, unlike `forceClose` and `deleverage`: `sweepRevenue` is the standalone door.
     function finalize(uint256 id) external nonReentrant {
         bytes32 mid = _book().loans[id].market;
         Cfg memory c = _cache(mid);
@@ -760,62 +755,34 @@ contract Ace is ReentrancyGuardTransient {
     /// @notice The keeper's in-kind sliver is CREDITED, priced at the loan's funding floor; `claimOwed` collects it.
     /// @notice It pays the market's lender their pooled quote credit, swallowed, so no quote or lender can fail this door.
     /// @notice That push is STRICT: a limit short of its fixed budget plus the tail reverts `PushGasShort`.
-    /// @notice THEN it sweeps any due protocol revenue, BEST-EFFORT on what the push left: a limit that cannot fund it skips it.
     /// @dev Band off, whether a record is WIRED is read as a param compare: a recordless market forfeits the coverage line to its lender.
-    /// @dev Settleability at tenor survives by CONSTRUCTION on the units side, never by the swallowed legs' grace: never give it a units-side call.
-    /// @dev The two token legs run LAST, after every state write: a view reached from a hook sees settled state.
+    /// @dev Settleability at tenor survives by CONSTRUCTION on the units side, never by the swallowed push's grace: never give it a units-side call.
+    /// @dev The push runs LAST, after every state write: a view reached from a hook sees settled state.
     function forceClose(uint256 id) external nonReentrant {
         bytes32 mid = _book().loans[id].market;
-        Market storage M = _market()[mid];
         Cfg memory c = _cache(mid);
-        Settlement.forceClose(_book(), M, c, id);
+        Settlement.forceClose(_book(), _market()[mid], c, id);
         _pushOwed(c);
-        /// @dev The sweep runs AFTER the strict push, on whatever it left, so no sweep can starve the lender.
-        _sweepIfDue(mid, M, c);
     }
 
     /* ============ 5. REVENUE AND INVENTORY: the protocol sweep, and the inventory bid ============ */
 
-    /// @notice Permissionless: push accrued protocol revenue to the immutable treasury.
-    /// @notice NOT RATE-LIMITED: the once-a-period spacing binds the keeper piggyback, never this call.
-    /// @notice STRICT and UNCAPPED where the piggyback is best-effort: the transfer takes the caller's gas, and a refusal reverts `PushRefused`.
-    /// @notice A quote whose transfer costs more than `PUSH_GAS` still sweeps here; a batch sweeper caps the gas it gives each market.
+    /// @notice Permissionless: pay this quote's whole revenue pot, every market's protocol cut in it, to the immutable treasury.
+    /// @notice No keeper verb sweeps: the pot moves only when someone calls this.
+    /// @notice STRICT and UNCAPPED: the transfer takes the caller's gas, so a quote dearer than `PUSH_GAS` still sweeps, and a refusal reverts `PushRefused`.
+    /// @notice A zero treasury or an empty pot returns at once, with no token call and no event.
+    /// @notice A refusing quote blocks only its own pot, so a `multicall` over several quotes fails on one: sweep each quote in its own call.
     /// @notice Under a tight cap a revert may be GAS, not refusal (empty data, or `PushRefused` on a costly quote): retry with more gas first.
-    /// @notice A refusing quote reverts the whole call, so a `multicall` of many markets' sweeps fails on one: sweep per market, or try each.
-    function sweepRevenue(bytes32 id) external nonReentrant {
-        _sweepRevenue(id, _market()[id], _cache(id), true);
-    }
-
-    /// @dev The PIGGYBACK's rate limit: a keeper crank sweeps at most once per period, and only when its limit funds it.
-    function _sweepIfDue(bytes32 id, Market storage M, Cfg memory c) private {
-        if (block.timestamp < M.s.lastSweptAt + Constants.SWEEP_PERIOD) return;
-        _sweepRevenue(id, M, c, false);
-    }
-
-    /// @dev Unguarded body: every caller already sits inside the hub's reentrancy guard (one shared slot).
-    /// @dev `strict` is the standalone door: the transfer is inline, uncapped and reverts on refusal, so nothing restores.
-    /// @dev The piggyback is GATED BEFORE THE STAMP on the whole fixed budget plus the tail; every caller runs it LAST.
-    /// @dev A starved piggyback writes and emits nothing: no stamp, the counter stays, and the sweep stays due.
-    /// @dev A refused or over-budget piggyback restores the counter but keeps the stamp, which marks the last attempt: the next piggyback waits a period.
-    function _sweepRevenue(bytes32 id, Market storage M, Cfg memory c, bool strict) internal {
-        if (TREASURY == address(0)) return; // inert while unset: no stamp, no event, no token move
-        uint256 amount = M.s.protocolRevenue;
-        if (amount == 0) return; // stamp NOTHING on a zero sweep
-        if (!strict && gasleft() < SWEEP_FLOOR) return;
-        M.s.lastSweptAt = uint64(block.timestamp);
-        M.s.protocolRevenue = 0; // CEI: counter clears before the external call
-        if (strict) {
-            /// @dev `trySafeTransfer` reads one word of returndata and copies nothing more, as `pushToken` does.
-            if (!IERC20(c.p.quote).trySafeTransfer(TREASURY, amount)) revert PushRefused();
-            emit RevenueSwept(id, TREASURY, amount, uint64(block.timestamp));
-            return;
-        }
-        try this.pushToken{gas: PUSH_GAS}(c.p.quote, TREASURY, amount) {
-            emit RevenueSwept(id, TREASURY, amount, uint64(block.timestamp));
-        } catch {
-            M.s.protocolRevenue = amount; // a swallowed failure must not burn the revenue
-            emit RevenueSweepFailed(id, TREASURY, amount, uint64(block.timestamp));
-        }
+    /// @notice Swept WHOLE, so the next accrual in this quote is a zero-to-nonzero store, ~17k gas more: an exact-estimate open or crank may run short.
+    /// @dev CEI: the pot clears before the call, and a refusal reverts it whole; `trySafeTransfer` reads one word of returndata and copies nothing more.
+    /// @param quote The token whose pot to pay out.
+    function sweepRevenue(address quote) external nonReentrant {
+        if (TREASURY == address(0)) return; // inert while unset: no event, no token move
+        uint256 amount = Storage.revenue()[quote];
+        if (amount == 0) return;
+        Storage.revenue()[quote] = 0;
+        if (!IERC20(quote).trySafeTransfer(TREASURY, amount)) revert PushRefused();
+        emit RevenueSwept(quote, TREASURY, amount);
     }
 
     /// @dev Pay the market's lender what the hub holds for them, and swallow a refusal into the credit it came from.
@@ -840,9 +807,9 @@ contract Ace is ReentrancyGuardTransient {
     }
 
     /// @notice Self-call plumbing; NOT an entry point. Exists only to make the transfer catchable.
-    /// @dev Unguarded: `SelfCallOnly` is the gate, and BOTH callers -- the piggyback sweep and the lender push -- hold it.
+    /// @dev Unguarded: `SelfCallOnly` is the gate, and its one caller, the lender push, already holds the guard.
     /// @dev THE SELF-CALL IS WHAT MAKES THE CAP EXPRESSIBLE: the library forwards `gas()` and takes no budget.
-    /// @dev EVERY CALLER HANDS IT `PUSH_GAS`, and that caps what the callee SPENDS, never what it RETURNS.
+    /// @dev ITS CALLER HANDS IT `PUSH_GAS`, and that caps what the callee SPENDS, never what it RETURNS.
     /// @dev So the window is bounded too: `trySafeTransfer` reads one word and reverts a bare selector, never bubbling.
     /// @dev Its acceptance test is the library's own, so this door and `collect` cannot disagree about a success.
     function pushToken(address token, address to, uint256 amount) external {

@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {MockPersistenceRecord} from "../../mocks/MockPersistenceRecord.sol";
 import {AceVault} from "../../../src/curator/AceVault.sol";
-import {BorrowRequest} from "../../../src/curator/AceVaultFlows.sol";
+import {BorrowRequest} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {Listing} from "../../../src/entities/curated/CuratorTerms.sol";
 import {CuratedVaults} from "../../utils/CuratedVaults.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";

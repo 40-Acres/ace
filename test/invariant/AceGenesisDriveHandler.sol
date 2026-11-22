@@ -538,12 +538,13 @@ contract AceGenesisDriveHandler is WarpClock {
         _tail();
     }
 
+    /// @notice A per-quote sweep: the quote of a created market, so the pot it drains is one some market books into.
     function sweepRevenue(uint256 mSeed) external {
         _bump("sweepRevenue");
         _ensureMarket(mSeed);
         if (_mkts.length == 0) return;
         vm.prank(keeper);
-        try ace.sweepRevenue(_mkts[mSeed % _mkts.length].id) {} catch {}
+        try ace.sweepRevenue(address(quoteTokens[_mkts[mSeed % _mkts.length].qi])) {} catch {}
         _tail();
     }
 

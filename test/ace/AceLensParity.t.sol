@@ -89,12 +89,17 @@ contract AceLensParityTest is Test {
         assertEq(l.drawCount, r.drawCount, "drawCount");
         assertEq(l.cumulativeBackedBurns, r.cumulativeBackedBurns, "cumulativeBackedBurns");
         assertEq(l.netSyntheticOutflow, r.netSyntheticOutflow, "netSyntheticOutflow");
-        assertEq(l.protocolRevenue, r.protocolRevenue, "protocolRevenue");
-        assertEq(l.lastSweptAt, r.lastSweptAt, "lastSweptAt");
         assertEq(l.unitScale, r.unitScale, "unitScale");
         assertEq(l.quoteOwedTotal, r.quoteOwedTotal, "quoteOwedTotal");
         assertEq(l.realizedLossAtBook, r.realizedLossAtBook, "realizedLossAtBook");
         assertGt(l.drawCount, 0, "the fixture really funded something");
+    }
+
+    /// @notice The per-quote revenue pot reads the same through the lens and the reader, and the parity is not 0 == 0.
+    function test_Parity_RevenuePot() public view {
+        uint256 l = lens.protocolRevenue(address(usdc));
+        assertEq(l, read.revenuePot(address(usdc)), "protocolRevenue(quote)");
+        assertGt(l, 0, "the fixture's open banked a protocol cut");
     }
 
     /// @notice The LAST word of `MarketState` must actually be decoded, not silently read as zero.

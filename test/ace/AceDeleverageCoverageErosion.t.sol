@@ -544,11 +544,11 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
 
         assertTrue(_armWorstFill(loanId), "fixture: the corridor must be open under the violated rail");
         uint256 held = read.loan(loanId).collateralUnits;
-        uint256 rev = read.protocolRevenue(mid);
+        uint256 rev = read.revenuePot(address(usdc));
         uint256 sold = _crank(loanId);
         assertGt(sold, 0, "fixture: the sale must actually run");
         assertLt(sold, held, "the reserve holds units back even under a rail genesis would have refused");
-        assertEq(read.protocolRevenue(mid) - rev, 0, "RAIL VIOLATED: the crank cannot restore, so no cut is taken");
+        assertEq(read.revenuePot(address(usdc)) - rev, 0, "RAIL VIOLATED: the crank cannot restore, so no cut is taken");
         assertLe(_need(loanId), read.loan(loanId).collateralUnits, "and the loan still covers every live claim");
     }
 
@@ -621,9 +621,9 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
         _seed(ticks, (32 * sh.lot) / ticks);
         uint256 loanId = _open(71_412, (_maxPrincipal(71_412, 32 * sh.lot) * pct) / 100);
         _armAtTheta(loanId, thetaWad);
-        uint256 rev = read.protocolRevenue(mid);
+        uint256 rev = read.revenuePot(address(usdc));
         _crank(loanId);
-        return read.protocolRevenue(mid) - rev == 0;
+        return read.revenuePot(address(usdc)) - rev == 0;
     }
 
     /// @dev Park the record at an exact margin `theta = trigger / ps`, anywhere the band admits.
@@ -641,9 +641,9 @@ contract AceDeleverageCoverageErosionTest is Test, DeleverageCrank {
         loanId = _open(units, (_maxPrincipal(units, 32 * sh.lot) * pctOfMax) / 100);
         assertTrue(_armWorstFill(loanId), "fixture: the corridor must be open at the lowest admitted fill");
         held = read.loan(loanId).collateralUnits;
-        uint256 rev = read.protocolRevenue(mid);
+        uint256 rev = read.revenuePot(address(usdc));
         sold = _crank(loanId);
-        revDelta = read.protocolRevenue(mid) - rev;
+        revDelta = read.revenuePot(address(usdc)) - rev;
     }
 
     /// @dev Rewrite `deleverageStopBps` in place, finding its slot by its value and reading the result back.

@@ -6,7 +6,7 @@ import {FairnessHarness} from "../fairness/FairnessHarness.sol";
 import {NoRecordPrice, RecordUnreadable} from "../../src/ace/hub/Borrower.sol";
 import {NotSettleable} from "../../src/ace/hub/Settlement.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
-import {AceVaultFlows} from "../../src/curator/AceVaultFlows.sol";
+import {AceVaultFlows} from "../../src/curator/libraries/AceVaultFlows.sol";
 
 /// @title AceBandOnTakeAtRecordHardening
 /// @notice Hardening rows for the band-on take at the record (#944, #945): exact ceil bounds, the vault skip by selector, the lens's dark reads.

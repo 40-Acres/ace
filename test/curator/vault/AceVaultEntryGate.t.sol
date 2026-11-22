@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {AceVault} from "../../../src/curator/AceVault.sol";
-import {AceVaultFlows} from "../../../src/curator/AceVaultFlows.sol";
+import {AceVaultFlows} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {AceVaultBaseRig} from "./AceVaultBaseRig.sol";
 
 /// @dev The two lens views this suite pins, called on the lens the rig built from its artifact.
@@ -72,6 +72,25 @@ contract AceVaultEntryGateTest is AceVaultBaseRig {
         vault.crank();
         uint256 until = _parity(AceVault.GainVesting.selector);
         assertEq(until, _now() + VEST_W, "the gain gate's second is not the vest's maturity");
+    }
+
+    /// @notice The gain gate's floor is strict: a pile of exactly one asset unit shuts nothing, and one atom more reads `GainVesting`.
+    /// @dev A ten-unit vault, so either pile is far over the band and the floor alone decides.
+    function test_EntryGate_TheGainFloorIsStrictAtOneUnit() public {
+        (vault, terms) = _deploy(_cfg(), _pc(), _caps(UNCAPPED, 0, UNCAPPED));
+        _lp(alice, 10e6);
+        uint256 unit = vault.VEST_FLOOR();
+        uint256 snap = vm.snapshotState();
+        usdc.mint(address(vault), unit);
+        vault.crank();
+        assertEq(vault.unvested(), unit, "PREMISE: the pile is exactly one asset unit");
+        assertGt(vault.unvested() * 10_000, vault.totalAssets() * vault.GATE_BPS(), "PREMISE: far over the band, so the floor alone decides");
+        assertEq(_parity(bytes4(0)), 0, "a pile of exactly one unit shut entry");
+        vm.revertToState(snap);
+        usdc.mint(address(vault), unit + 1);
+        vault.crank();
+        assertEq(vault.unvested(), unit + 1, "PREMISE: the pile is one atom over the unit");
+        _parity(AceVault.GainVesting.selector);
     }
 
     /// @notice A pot unsold at the hub reads `InventoryUnsold`, with no knowable second; so does the mark over it.

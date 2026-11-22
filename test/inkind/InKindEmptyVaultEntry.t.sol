@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {AceVault} from "../../src/curator/AceVault.sol";
-import {VaultConfig} from "../../src/curator/AceVaultFlows.sol";
+import {VaultConfig} from "../../src/curator/libraries/AceVaultFlows.sol";
 import {InKindRig} from "./InKindRig.sol";
 
 /// @title InKindEmptyVaultEntry

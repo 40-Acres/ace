@@ -77,7 +77,7 @@ contract MockCostlyERC20 {
 /// @title AceS2SweepHasNoUncappedExitTest
 /// @notice Protocol revenue left the hub ONLY through the gas-capped push; the lender's credit had an uncapped `collect` beside it.
 /// @notice A quote whose honest transfer to the treasury needed more than `PUSH_GAS` therefore stranded the market's revenue for good.
-/// @notice FIXED (Y-4): the standalone `sweepRevenue` is uncapped and strict; the keeper piggyback keeps the fixed budget.
+/// @notice FIXED (Y-4): `sweepRevenue` is uncapped and strict, and it is the only door: no keeper verb sweeps.
 contract AceS2SweepHasNoUncappedExitTest is WarpClock {
     Ace internal ace;
     AceReader internal read;
@@ -129,11 +129,11 @@ contract AceS2SweepHasNoUncappedExitTest is WarpClock {
 
     /// @notice CONTROL: with a cheap quote the standalone sweep delivers the whole banked revenue.
     function test_Control_ACheapQuoteSweepsTheRevenue() public {
-        uint256 banked = read.protocolRevenue(mid);
+        uint256 banked = read.revenuePot(address(quote));
         assertGt(banked, 0, "fixture: the open banked no protocol revenue");
         vm.prank(keeper);
-        ace.sweepRevenue(mid);
-        assertEq(read.protocolRevenue(mid), 0, "a cheap sweep left revenue banked");
+        ace.sweepRevenue(address(quote));
+        assertEq(read.revenuePot(address(quote)), 0, "a cheap sweep left revenue banked");
         assertEq(quote.balanceOf(treasury), banked, "the treasury did not receive the banked revenue");
     }
 
@@ -151,14 +151,14 @@ contract AceS2SweepHasNoUncappedExitTest is WarpClock {
     /// @dev Was the run's premise that no limit moved it: the capped push swallowed the failure and restored the counter.
     function test_EveryGenerousLimitDeliversTheRevenueOfACostlyQuote() public {
         quote.setCost(treasury, OVER);
-        uint256 banked = read.protocolRevenue(mid);
+        uint256 banked = read.revenuePot(address(quote));
         uint256[3] memory limits = [uint256(1_000_000), 5_000_000, 15_000_000];
         for (uint256 i; i < limits.length; i++) {
             uint256 snap = vm.snapshotState();
             vm.prank(keeper);
-            (bool ok,) = address(ace).call{gas: limits[i]}(abi.encodeCall(Ace.sweepRevenue, (mid)));
+            (bool ok,) = address(ace).call{gas: limits[i]}(abi.encodeCall(Ace.sweepRevenue, (address(quote))));
             assertTrue(ok, "the strict sweep reverted though its transfer was paid for");
-            assertEq(read.protocolRevenue(mid), 0, "the revenue left the hub");
+            assertEq(read.revenuePot(address(quote)), 0, "the revenue left the hub");
             assertEq(quote.balanceOf(treasury), banked, "and the treasury received all of it");
             vm.revertToState(snap);
         }
@@ -188,9 +188,9 @@ contract AceS2SweepHasNoUncappedExitTest is WarpClock {
     /// @dev Was the run's RED row; the standalone door's remedy turned it green.
     function test_AnHonestlyPaidSweepDeliversTheRevenue() public {
         quote.setCost(treasury, OVER);
-        uint256 banked = read.protocolRevenue(mid);
+        uint256 banked = read.revenuePot(address(quote));
         vm.prank(keeper);
-        ace.sweepRevenue{gas: 15_000_000}(mid);
+        ace.sweepRevenue{gas: 15_000_000}(address(quote));
         assertEq(quote.balanceOf(treasury), banked, "protocol revenue never left the hub though its transfer was paid for");
     }
 

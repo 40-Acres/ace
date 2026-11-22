@@ -156,7 +156,7 @@ contract AceKeeperGasTest is WarpClock {
         // sweepRevenue, standalone: unpaid
         vm.prank(keeper);
         g = gasleft();
-        ace.sweepRevenue(id);
+        ace.sweepRevenue(address(usdc));
         emit log_named_uint("sweepRevenue (unpaid)                 gas", g - gasleft());
     }
 }

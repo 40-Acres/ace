@@ -165,6 +165,5 @@ library MarketInit {
 
         M.p = p;
         M.s.unitScale = UNIT_SCALE;
-        M.s.lastSweptAt = uint64(block.timestamp); // a fresh market's first keeper crank cannot piggyback a sweep
     }
 }

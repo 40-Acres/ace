@@ -385,8 +385,8 @@ contract AceOrderFeeIdentityTest is WarpClock {
         uint256 orderId = aceOrder.postOrder(id, DRAW, LIQ, LIQ_HIGH, DRAW, TEN, uint64(_now() + 30 days));
         Order memory o = aceOrder.orderOf(orderId);
 
-        uint256 revenueBefore = readOrder.protocolRevenue(id);
-        assertEq(revenueBefore, readOpen.protocolRevenue(id), "guard: the two hubs start from the same protocol pot");
+        uint256 revenueBefore = readOrder.revenuePot(address(usdc));
+        assertEq(revenueBefore, readOpen.revenuePot(address(usdc)), "guard: the two hubs start from the same protocol pot");
 
         vm.prank(filler);
         uint256 filled = aceOrder.fillOrder(orderId, o.principal, o.collateralUnits);
@@ -397,8 +397,8 @@ contract AceOrderFeeIdentityTest is WarpClock {
         assertEq(readOrder.loan(filled).collateralUnits, readOpen.loan(opened).collateralUnits, "identical collateral");
         assertEq(readOrder.loan(filled).lastFee, readOpen.loan(opened).lastFee, "IDENTICAL FEE");
         assertGt(readOrder.loan(filled).lastFee, 0, "guard: a real fee was charged, so the equality is not two zeroes");
-        assertEq(readOrder.protocolRevenue(id) - revenueBefore, readOpen.protocolRevenue(id) - revenueBefore, "identical protocolRevenue delta");
-        assertGt(readOrder.protocolRevenue(id) - revenueBefore, 0, "guard: the protocol took a real cut on both");
+        assertEq(readOrder.revenuePot(address(usdc)) - revenueBefore, readOpen.revenuePot(address(usdc)) - revenueBefore, "identical protocolRevenue delta");
+        assertGt(readOrder.revenuePot(address(usdc)) - revenueBefore, 0, "guard: the protocol took a real cut on both");
         assertEq(readOrder.feeEscrowOf(filled), readOpen.feeEscrowOf(opened), "identical refundable escrow");
         assertGt(readOrder.feeEscrowOf(filled), 0, "guard: the refundable half is non-zero");
     }
@@ -579,6 +579,7 @@ contract AceOrderRestingWritesNothingTest is AceOrderFixture {
     function test_post_WritesNoMarketStateScalar() public {
         MarketState memory before = read.marketState(id);
         (uint256 restBefore, uint256 lentBefore, uint256 owedBefore) = read.poolOf(id);
+        uint256 potBefore = read.revenuePot(address(usdc));
 
         _post(1_000_000e6, LIQ, LIQ_HIGH, 10e6, TEN, _far());
 
@@ -590,11 +591,10 @@ contract AceOrderRestingWritesNothingTest is AceOrderFixture {
         assertEq(now_.quoteOwedTotal, before.quoteOwedTotal, "quoteOwedTotal is untouched");
         assertEq(now_.drawCount, before.drawCount, "drawCount is untouched: a resting order is not a draw");
         assertEq(now_.netSyntheticOutflow, before.netSyntheticOutflow, "netSyntheticOutflow is untouched");
-        assertEq(now_.protocolRevenue, before.protocolRevenue, "protocolRevenue is untouched: resting costs nothing");
+        assertEq(read.revenuePot(address(usdc)), potBefore, "the protocol revenue pot is untouched: resting costs nothing");
         assertEq(now_.cumulativeBackedBurns, before.cumulativeBackedBurns, "cumulativeBackedBurns is untouched");
         assertEq(now_.realizedLossAtBook, before.realizedLossAtBook, "realizedLossAtBook is untouched");
         assertEq(now_.cash, before.cash, "resting cash is untouched: a resting order draws none of it");
-        assertEq(now_.lastSweptAt, before.lastSweptAt, "lastSweptAt is untouched");
         assertEq(now_.unitScale, before.unitScale, "unitScale is untouched");
     }
 

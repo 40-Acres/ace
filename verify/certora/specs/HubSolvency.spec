@@ -1,11 +1,13 @@
 // Ace hub -- obligation O1: the hub's quote balance is exactly the booked pots, with no other float.
 //
 // THE BOOKED POTS, per quote token -- the same sum `test/utils/BookedQuote.sol` asserts in the fuzz suite:
-//   every market quoting it: `cash + protocolRevenue + quoteOwedTotal`; every loan in those markets: `feeEscrowOf`;
-//   every lender: `pools[lender][quote].owed`. (`pools.resting` is NOT added: it is the same money as market `cash`.)
+//   every market quoting it: `cash + quoteOwedTotal`; every loan in those markets: `feeEscrowOf`; every lender:
+//   `pools[lender][quote].owed`; and the protocol's one revenue pot in it, `protocolRevenue[quote]`, counted ONCE however
+//   many markets share it. (`pools.resting` is NOT added: it is the same money as market `cash`.)
 // Kept as one running ghost per quote, `booked[quote]`, by store hooks on those fields. The hooks reach the hub's
-// ERC-7201 namespaces through `AceStorageLink` (storage_extension_harnesses). HubHookProbe.spec showed a hook on
-// `s.protocolRevenue` firing on every write of every verb it finished; the book and lender hooks were not probed
+// ERC-7201 namespaces through `AceStorageLink` (storage_extension_harnesses). HubHookProbe.spec proves a hook on the
+// `Protocol` root's `protocolRevenue[quote]` fires on every write the prover reaches, on every verb; the deleverage cut's
+// write is not yet witnessed there (its witness finds no charging restore). The book and lender hooks were not probed
 // separately, and rest instead on the witnesses below, which fail if a pull, payout or push books nothing.
 //
 // THE TWO CLAIMS:
@@ -46,7 +48,7 @@ methods {
     // callee IS `quoteToken`, and do nothing otherwise: a call to another token cannot move quote balances.
     // NOT the hollow catch-all HubLoans.spec bans: the munged hub has no library call left to swallow, and the
     // ANTI-HOLLOW rules below prove a pull and a payout really move quote through it.
-    // The hub's own `this.pushToken` self-call (the sweep, the lender push) is unresolved too, and is dispatched to
+    // The hub's own `this.pushToken` self-call (the lender push) is unresolved too, and is dispatched to
     // the hub: left to the default, a push "succeeded" moving nothing, and the float rule failed on every close.
     unresolved external in _._ => DISPATCH [
         quoteToken.transfer(address,uint256),
@@ -178,8 +180,8 @@ persistent ghost mapping(address => mathint) booked {
 hook Sstore currentContract.markets.byId[KEY bytes32 id].s.cash uint256 newV (uint256 oldV) {
     booked[quoteOf[id]] = booked[quoteOf[id]] + newV - oldV;
 }
-hook Sstore currentContract.markets.byId[KEY bytes32 id].s.protocolRevenue uint256 newV (uint256 oldV) {
-    booked[quoteOf[id]] = booked[quoteOf[id]] + newV - oldV;
+hook Sstore currentContract.protocol.protocolRevenue[KEY address q] uint256 newV (uint256 oldV) {
+    booked[q] = booked[q] + newV - oldV;
 }
 hook Sstore currentContract.markets.byId[KEY bytes32 id].s.quoteOwedTotal uint256 newV (uint256 oldV) {
     booked[quoteOf[id]] = booked[quoteOf[id]] + newV - oldV;

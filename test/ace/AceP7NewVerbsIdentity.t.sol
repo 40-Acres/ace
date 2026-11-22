@@ -14,7 +14,7 @@ import {AceReader} from "../utils/AceReader.sol";
 /// @notice Phase-7 (attacker) probe: the solvency identity across TWO markets sharing one quote, driven only through
 /// @notice the verbs that landed after the last attacker pass and that no invariant handler reaches:
 /// @notice `postOrder` / `fillOrder` / `closeOrder`, `forceClose` at tenor, the held inventory ask, and `claimOwed` by legs.
-/// @dev The identity: `quote.balanceOf(ace) == Σ_markets (totalCash + protocolRevenue + unitOwed + quoteOwedTotal) + Σ_loans feeEscrow`.
+/// @dev The identity: `quote.balanceOf(ace) == sum_markets (totalCash + unitOwed + quoteOwedTotal) + revenuePot(quote) + sum_loans feeEscrow`.
 /// @dev Checked after EVERY step, and the collateral pot identity beside it.
 contract AceP7NewVerbsIdentityTest is WarpClock {
     Ace internal ace;
@@ -88,11 +88,10 @@ contract AceP7NewVerbsIdentityTest is WarpClock {
     /// @dev per market would claim the same money twice, breaking the identity on a solvent hub.
     function _identity(string memory at) internal view {
         (uint256 resting,, uint256 owed) = read.poolOf(midA); // midB shares this pool: same lender, same quote
-        uint256 pots = resting + owed;
+        uint256 pots = resting + owed + read.revenuePot(address(usdc)); // and the one revenue pot, read once for the same reason
         bytes32[2] memory mids = [midA, midB];
         for (uint256 i; i < 2; i++) {
-            MarketState memory s = read.marketState(mids[i]);
-            pots += s.protocolRevenue + s.quoteOwedTotal;
+            pots += read.marketState(mids[i]).quoteOwedTotal;
         }
         uint256 n = read.loanCount();
         for (uint256 id = 1; id <= n; id++) {
@@ -109,10 +108,10 @@ contract AceP7NewVerbsIdentityTest is WarpClock {
 
     /// @dev `unitOwed` LEFT `MarketState` with the receipt ledger: the credit pools per (lender, quote), which
     /// @dev both markets share, so a sibling-untouched check cannot read it and is not asked to.
+    /// @dev Protocol revenue left it too, for a per-quote pot both markets share, so it is not asked here either.
     function _assertBUntouched(MarketState memory before, string memory at) internal view {
         MarketState memory now_ = read.marketState(midB);
         assertEq(now_.cash, before.cash, string.concat(at, ": sibling cash moved"));
-        assertEq(now_.protocolRevenue, before.protocolRevenue, string.concat(at, ": sibling protocolRevenue moved"));
         assertEq(now_.quoteOwedTotal, before.quoteOwedTotal, string.concat(at, ": sibling quoteOwedTotal moved"));
     }
 

@@ -97,6 +97,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
     bytes4 public migrateRefusalSelector; // the FIRST refusal's selector, so a refusal cannot be anonymous
     uint256[4] public picksInMarket; // what the seed CHOSE, per market: the drive-distribution witness
     uint256[4] public landedInMarket; // what actually landed, so a 40/20/20/20 intent cannot read healthy while starving
+    mapping(address quote => uint256) public sweepsLandedOf; // per-quote sweeps that returned: the pot is the quote's, so no market lands one
 
     /// @dev THE PASSIVE MARKETS, one per quote token, so the per-token solvency identity is symmetric.
     /// @dev `canaries[0]` IS `canaryId`. They are NOT driven; nothing here ever addresses them.
@@ -124,7 +125,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
     }
 
     /// @notice Every market the hub holds for this handler: the four driven, then the two canaries.
-    /// @dev ONE index space, so the revenue latch and the isolation snapshot never each roll their own.
+    /// @dev ONE index space, so the isolation snapshot never rolls its own.
     function allMarketCount() external pure returns (uint256) {
         return 6;
     }
@@ -756,12 +757,10 @@ contract AceHandler is WarpClock, DeleverageCrank {
     /// @dev Hashing them here would make isolation FALSE for a correct hub, which is the failure a
     /// @dev port produces by keeping the tuple intact. The pool is exempt BY NAME, not by omission,
     /// @dev and `_invariant_poolsNeverCrossQuotes` is what holds the exemption to the quote it belongs to.
+    /// @dev Protocol revenue is exempt for the same reason: it pools per quote, so an accrual in one market moves the pot every sibling reads.
     function _bookOf(uint256 i) internal view returns (bytes32) {
         MarketState memory s = read.marketState(this.allMarketAt(i));
-        return
-            keccak256(
-                abi.encode(s.cash, s.protocolRevenue, s.quoteOwedTotal, s.cumulativeBackedBurns, s.netSyntheticOutflow, s.realizedLossAtBook, s.drawCount)
-            );
+        return keccak256(abi.encode(s.cash, s.quoteOwedTotal, s.cumulativeBackedBurns, s.netSyntheticOutflow, s.realizedLossAtBook, s.drawCount));
     }
 
     /// @dev Opens an action: every market's book is snapshotted and the entitled set is EMPTIED.
@@ -1691,7 +1690,7 @@ contract AceHandler is WarpClock, DeleverageCrank {
         _tail();
     }
 
-    /// @notice The disposal crank; also the path that carries the revenue sweep.
+    /// @notice The disposal crank; no revenue sweep rides it.
     /// @dev Measures the trigger DIRECTION around every successful crank, which is the property #208 bought.
     /// @dev RENAMED from `skim`, which it never called: the body has driven `ace.deleverage` throughout.
     /// @dev Picks among LIVE, UNEXPIRED loans only: a matured loan refuses `LoanMatured`, and the catch would hide it.
@@ -2381,14 +2380,15 @@ contract AceHandler is WarpClock, DeleverageCrank {
 
     // ---- protocol-revenue actions ----
 
-    function sweepRevenue(uint256 marketSeed) external {
+    /// @notice A stranger's per-quote sweep: it drains the quote's one pot, every market's cut in it, to the treasury.
+    /// @dev ENTITLES NO MARKET: the pot is the quote's, outside every market's booked tuple, so any market book that moves is a crossing.
+    function sweepRevenue(uint256 quoteSeed) external {
         _bump("sweepRevenue");
-        uint256 mi = _pickMarket(marketSeed);
-        _entitle(mi);
+        address q = quoteSeed % 2 == 0 ? address(usdc) : address(dai);
         uint256[] memory m = _preFloors();
         vm.prank(keeper);
-        try ace.sweepRevenue(mids[mi]) {
-            landedInMarket[mi]++;
+        try ace.sweepRevenue(q) {
+            sweepsLandedOf[q]++;
         } catch {}
         _postFloors(m, "sweepRevenue");
         _tail();

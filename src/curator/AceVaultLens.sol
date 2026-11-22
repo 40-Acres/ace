@@ -6,14 +6,15 @@ import {MarketParams} from "../ace/hub/Types.sol";
 import {IAceLenderOps} from "../interfaces/IAceLenderOps.sol";
 import {IVaultTerms} from "../interfaces/IVaultTerms.sol";
 import {AceVault} from "./AceVault.sol";
-import {AceVaultCaps} from "./AceVaultCaps.sol";
-import {AceVaultFlows, BorrowRequest, Terms} from "./AceVaultFlows.sol";
-import {AceVaultInKind} from "./AceVaultInKind.sol";
+import {AceVaultCaps} from "./libraries/AceVaultCaps.sol";
+import {AceVaultFlows, BorrowRequest, Terms} from "./libraries/AceVaultFlows.sol";
+import {AceVaultInKind} from "./libraries/AceVaultInKind.sol";
+import {AceVaultNav} from "./libraries/AceVaultNav.sol";
 
 /// @title AceVaultLens
-/// @notice Read-only views over any AceVault, the vault first in each: the core door's preview, the entry gate, the in-kind tracker and its stored figures.
+/// @notice Read-only views over any AceVault, the vault first in each: `borrow`'s preview, the entry gate, the in-kind tracker and its stored figures.
 /// @notice It holds no state and no authority, so a new lens can replace this one at any time.
-/// @dev `previewTerms` and `roomOf` run the core door's own library helpers on the vault's figures, so neither can drift from `borrow`.
+/// @dev `previewTerms` and `roomOf` run `borrow`'s own library helpers on the vault's figures, so neither can drift from `borrow`.
 /// @dev The tracker views and stored figures read the `ace.inkind` and `ace.curatorvault` words by `extsload`, at offsets that must match their layouts.
 contract AceVaultLens {
     bytes32 private constant TRACKER = AceVaultInKind.ROOT; // the in-kind tracker's namespace
@@ -319,16 +320,16 @@ contract AceVaultLens {
     function entryGate(AceVault vault) external view returns (bytes4 reason, uint256 until) {
         uint256 gross = vault.grossNav();
         uint256 nav = vault.totalAssets();
-        uint256 deferred = gross - nav; // the pile the next sync would leave
+        uint256 deferred = gross - nav; // the deferred gain the next sync would leave
         bool live = vault.totalSupply() > vault.SEED_SHARES();
         uint256 vestWord = _word(vault, _at(STORE, VEST));
         if (live && nav == 0) return (AceVault.EndOfLife.selector, 0);
-        if (live && AceVaultFlows.gainVesting(deferred, nav, vault.VEST_FLOOR())) {
+        if (live && AceVaultNav.gainVesting(deferred, nav, vault.VEST_FLOOR())) {
             return (AceVault.GainVesting.selector, _nextMaturity(vault, gross, vestWord));
         }
         if (_unsold(vault)) return (AceVault.InventoryUnsold.selector, 0);
         uint48 holdUntil = uint48(vestWord >> 200);
-        if (AceVaultFlows.material(deferred, gross) && block.timestamp < holdUntil) {
+        if (AceVaultNav.material(deferred, gross) && block.timestamp < holdUntil) {
             return (AceVault.RecoveryVesting.selector, holdUntil == type(uint48).max ? _nextMaturity(vault, gross, vestWord) : holdUntil);
         }
         if (vault.draining()) return (AceVault.Draining.selector, 0);
@@ -339,7 +340,7 @@ contract AceVaultLens {
     function _nextMaturity(AceVault vault, uint256 gross, uint256 vestWord) private view returns (uint64) {
         uint256 mark = _word(vault, _at(STORE, NAV_MARK));
         uint64 maturity = uint64(vestWord >> 128);
-        return gross > mark ? AceVaultFlows.blended(vault.unvested(), gross - mark, maturity, vault.VEST_WINDOW()) : maturity;
+        return gross > mark ? AceVaultNav.blended(vault.unvested(), gross - mark, maturity, vault.VEST_WINDOW()) : maturity;
     }
 
     /// @dev The vault's unsold-pot gate by its stored words: a batch open this block over tracked shares, or a pot or open key no exemption covers.
@@ -351,7 +352,7 @@ contract AceVaultLens {
         }
         (uint256 unsoldPots, uint256 settledPots) = IAceLenderOps(vault.ACE()).lenderUnresolved(address(vault), vault.asset());
         bytes32[] memory doorWords = vault.extsload(_two(_at(STORE, OPEN_SEIZED), _at(STORE, EXEMPT_SETTLED)));
-        return AceVaultFlows.unsold(unsoldPots, uint256(doorWords[0]), settledPots, uint256(doorWords[1]));
+        return AceVaultNav.unsold(unsoldPots, uint256(doorWords[0]), settledPots, uint256(doorWords[1]));
     }
 
     /// @dev Whether in-kind entry has no share left to mint under the supply bound at `nav`, as `maxDeposit` prices it.
@@ -361,7 +362,7 @@ contract AceVaultLens {
         return fits && scaled / quoteSupply == 0;
     }
 
-    /// @dev The total's room on `vault` under its total cap `cap`, by the core door's own helper.
+    /// @dev The total's room on `vault` under its total cap `cap`, by `borrow`'s own helper.
     function _totalRoom(AceVault vault, IAceLenderOps hub, uint256 cap) private view returns (uint256) {
         address asset = vault.asset();
         return AceVaultCaps.totalRoom(cap, hub.lenderAssets(address(vault), asset), hub.lenderOwed(address(vault), asset), drawdown(vault));

@@ -70,10 +70,11 @@ struct MarketParams {
     bool inventoryAsk;
 }
 
-/// @notice The per-market scalar state: the resting cash, the protocol's own pots, and the derived scales.
+/// @notice The per-market scalar state: the resting cash, the settlement aggregates, and the derived scale.
 /// @dev THE LENDER'S THREE AGGREGATES ARE NOT HERE: `resting`, `lent` and `owed` live in `Lenders.pools`, keyed by (lender, quote).
 /// @dev So a lender's position reads in O(1) at any market count, and no per-market split of those three exists.
-/// @dev The protocol's own pots below stay per-market, so revenue and the settlement record are still attributable to one market.
+/// @dev NOR IS PROTOCOL REVENUE: it pools per quote token in `Protocol.protocolRevenue`, so one sweep pays every market's cut in it.
+/// @dev The settlement record below stays per-market, so it is still attributable to one market.
 struct MarketState {
     /// @notice Resting quote at this market's one price: what a draw consumes and a withdraw returns.
     /// @dev PER MARKET, unlike the lender's pooled `resting`, which spans their markets in this quote.
@@ -82,8 +83,6 @@ struct MarketState {
     uint64 drawCount; // draws, top-ups and extensions made here, a lender's change detector; an extension may bump it for an atom's fee
     uint256 cumulativeBackedBurns;
     uint256 netSyntheticOutflow;
-    uint256 protocolRevenue; // the ONE protocol pot: the origination and deleverage cuts
-    uint64 lastSweptAt;
     uint256 unitScale; // the FIXED price frame, 2^96: prices are quote atoms per collateral atom
     uint256 quoteOwedTotal; // quote credited to claimants, held outside the lender's pools: a solvency pot
     uint256 realizedLossAtBook; // running quote loss at book over short settlements; NOT a pot, and solvency never reads it
@@ -217,10 +216,11 @@ struct Lenders {
     mapping(address lender => address policy) rollPolicyOf; // APPENDED: the contract a lender's extensions ask; zero consents to none
 }
 
-/// @notice The protocol's own word: the origination share TREASURY sets, under `MAX_PROTOCOL_SHARE_BPS`.
+/// @notice The protocol's own state: the origination share TREASURY sets, under `MAX_PROTOCOL_SHARE_BPS`, and its revenue per quote token.
 /// @custom:storage-location erc7201:ace.storage.protocol
 struct Protocol {
     uint256 shareBps;
+    mapping(address quote => uint256) protocolRevenue; // APPENDED: the ONE protocol pot per quote, every market's origination and deleverage cuts in it
 }
 
 /// @notice The hub's named storage: the ERC-7201 roots and the accessors over them, one home.
@@ -260,12 +260,18 @@ library Storage {
         }
     }
 
-    /// @notice The protocol's own word, the origination share.
+    /// @notice The protocol's own state: the origination share and the revenue pots.
     function protocol() internal pure returns (Protocol storage $) {
         bytes32 slot = PROTOCOL;
         assembly ("memory-safe") {
             $.slot := slot
         }
+    }
+
+    /// @notice The protocol's revenue pots, one entry per quote token, each shared by every market quoting in it.
+    /// @dev THE ONE SPELLING of the pot, so the credit and the sweep cannot reach it apart.
+    function revenue() internal view returns (mapping(address quote => uint256) storage) {
+        return protocol().protocolRevenue;
     }
 
     /// @notice The pool a market's writes land in: its own lender's, in its own quote.

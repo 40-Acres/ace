@@ -9,21 +9,19 @@ pragma solidity 0.8.36;
 /// @dev ONE RELATION BINDS TWO OF THEM: `MIN_COVERAGE_WAD * (10000 - MAX_DELEVERAGE_FLOOR_EPS_BPS) > 1e22`.
 /// @dev The deleverage sizing denominator's positivity proof rests on it, so a retune of EITHER must preserve it.
 /// @dev Shipped margin is 2.9%. Breaking it does not prove a defect, but it does remove the proof.
-/// @dev The two push tails are gas on Ethereum's opcode schedule: a chain that reprices storage or calls re-measures them first.
+/// @dev The push tail is gas on Ethereum's opcode schedule: a chain that reprices storage or calls re-measures it first.
 library Constants {
     // ---- ACE's own take: uniform across every market, never creator-set ----
 
     uint256 internal constant MAX_PROTOCOL_SHARE_BPS = 1000; // the most ACE's origination take can be; TREASURY sets the live share at or under it
     uint256 internal constant SECONDS_PER_YEAR = 365 days; // the period every market's rate is quoted per, leap years ignored: a rate is bps a year
     uint256 internal constant REBATE_PHI_BPS = 5000; // half the lender fee is refundable: a borrower pays the midpoint of term booked and used
-    uint64 internal constant SWEEP_PERIOD = 1 days; // min spacing between keeper-crank sweeps: transfer count against dwell time
 
-    // ---- the swallowed token push: a fixed budget per deploy, railed here, and the two measured tails behind it ----
+    // ---- the swallowed token push: a fixed budget per deploy, railed here, and the measured tail behind it ----
 
     uint256 internal constant MIN_PUSH_GAS = 60_000; // the budget's floor: an Ethereum USDC or USDT push needs under 48k
     uint256 internal constant MAX_PUSH_GAS = 250_000; // its ceiling: bounds a hostile quote's burn per push, and the limit every close carries
     uint256 internal constant PUSH_TAIL = 40_000; // the lender push's frame past its budget, 2x measured: a from-zero restore is 20k of it
-    uint256 internal constant SWEEP_TAIL = 47_000; // the sweep's frame past its budget: its stamp, counter, restore and event, 2x measured
     uint256 internal constant POLICY_TAIL = 300; // a capped ask's gas between its floor check and its STATICCALL, warm target, 2x measured
 
     // ---- the capped ask: a fixed budget per deploy, railed here, for the roll policy and a band-on settlement's price read ----

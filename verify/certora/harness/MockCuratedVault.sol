@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
-import {AceVaultFlows} from "../../../src/curator/AceVaultFlows.sol";
+import {AceVaultFlows} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {DummyERC20} from "./DummyERC20.sol";
 
 /// @title MockCuratedVault
@@ -96,6 +96,11 @@ contract MockCuratedVault {
     /// @notice Whether `c`'s key is open, bit 248 of its seized word, for a spec.
     function keyOpenView(address c) external view returns (bool) {
         return (uint256(seizedWordOf(c)) >> 248) & 1 != 0;
+    }
+
+    /// @notice `c`'s booked value, bits 0-183 of its seized word, for a spec.
+    function bookedView(address c) external view returns (uint256) {
+        return uint256(seizedWordOf(c)) & type(uint184).max;
     }
 
     /// @notice The units the collect reports for `id`, for a spec.

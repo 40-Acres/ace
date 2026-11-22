@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
-import {Loan, MarketParams, MarketState, RecordState} from "../hub/Types.sol";
+import {Loan, MarketParams, RecordState} from "../hub/Types.sol";
 import {ZeroLimit} from "./AceLens.sol";
 
 error TornRead(); // a guarded hub body is mid-flight, so an aggregate read here would straddle a half-written state
@@ -19,7 +19,6 @@ interface IAceInventoryHub {
 /// @dev EVERY MEMBER MUST EXIST ON `AceLens`: an interface call compiles against this declaration alone, so a dropped one reverts at RUNTIME.
 interface IAceLensReads {
     function recordStateOf(bytes32 id) external view returns (RecordState state, uint256 cap);
-    function marketState(bytes32 id) external view returns (MarketState memory s);
     function invPotOf(bytes32 id, uint256 loanId) external view returns (uint256);
     function loan(uint256 loanId) external view returns (Loan memory l);
 }
@@ -37,6 +36,7 @@ interface IAceLensReads {
 contract AceInventoryLens {
     IAceInventoryHub public immutable ACE;
     IAceLensReads public immutable LENS;
+    uint256 private constant UNIT_SCALE = 1 << 96; // the hub's one price frame, fixed here: a lens of another generation decodes its state at other offsets
 
     constructor(address ace, address lens) {
         ACE = IAceInventoryHub(ace);
@@ -47,7 +47,7 @@ contract AceInventoryLens {
     /// @notice A ZERO IS NOT AN ALL-CLEAR: page to the end before concluding a market holds nothing.
     /// @dev Non-reverting on a blind record ON PURPOSE, unlike the singular view, which refuses.
     /// @dev A record that cannot price is the state most likely to coincide with a settlement.
-    /// @dev The record and the unit scale are read ONCE per call, not once per pot.
+    /// @dev The record is read ONCE per call, not once per pot; the unit scale is the hub's fixed frame and read from no lens.
     /// @dev The liveness skip is sound: a pot is written only in settlement, which closes the loan in that call.
     /// @dev ETH_CALL ONLY. The walk is paginated but unbounded in aggregate; never call it from a transaction.
     /// @param id The market to size.
@@ -67,7 +67,6 @@ contract AceInventoryLens {
 
         uint256 ask;
         (priced, ask) = _ask(id);
-        uint256 scale = LENS.marketState(id).unitScale;
 
         uint256[] memory page = ACE.marketLoans(id, offset, limit);
         nextOffset = offset + page.length;
@@ -77,7 +76,7 @@ contract AceInventoryLens {
             uint256 pot = LENS.invPotOf(id, page[i]);
             if (pot == 0) continue;
             units += pot;
-            if (priced) quoted += FullMath.mulDiv(pot, ask, scale);
+            if (priced) quoted += FullMath.mulDiv(pot, ask, UNIT_SCALE);
         }
     }
 
@@ -95,10 +94,9 @@ contract AceInventoryLens {
         if (pot == 0 || !p.inventoryAsk) return 0;
         (bool priced, uint256 ask) = _ask(id);
         if (!priced) return 0;
-        uint256 scale = LENS.marketState(id).unitScale;
         uint256 eff = ask + Math.ceilDiv(ask * p.fillFeeBps, 10000);
-        uint256 g = FullMath.mulDivRoundingUp(pot, ask, scale);
-        return Math.max(FullMath.mulDivRoundingUp(pot, eff, scale), g + Math.ceilDiv(g * p.fillFeeBps, 10000));
+        uint256 g = FullMath.mulDivRoundingUp(pot, ask, UNIT_SCALE);
+        return Math.max(FullMath.mulDivRoundingUp(pot, eff, UNIT_SCALE), g + Math.ceilDiv(g * p.fillFeeBps, 10000));
     }
 
     /// @dev ONE ASK FOR THE WHOLE PAGE, since every pot in the market prices at the market's own price.

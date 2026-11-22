@@ -337,7 +337,7 @@ contract CuratorVaultLastOutReleaseAtTheClaimTest is CuratorVaultBase {
     }
 
     /// @notice THE CLAIM RE-PRICES AFTER THE RELEASE: the deferral it retires lifts the payout, so the last holder takes the gross.
-    /// @dev MUTATION TARGET: `claimExit` releases, then reads NAV once and collects the fee; read NAV before `_release(g)` and this must fail.
+    /// @dev MUTATION TARGET: `claimExit` releases, then reads NAV once and collects the fee; read NAV before `AceVaultNav.release(g)` and this must fail.
     function test_LastOut_AClaimRePricesAfterTheReleaseAndPaysTheWholeBook() public {
         AceVault v = _newVault(0);
         _lastOutWithADeferral(v);

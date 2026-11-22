@@ -6,7 +6,7 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
-import {MarketParams, MarketState, OpenBounds} from "../../src/ace/hub/Types.sol";
+import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {MarketPairMismatch, NotBorrower, QuoteMismatch} from "../../src/ace/hub/Borrower.sol";
 import {BelowMinPrincipal, TenorOutOfRange, TriggerAboveFloor} from "../../src/ace/hub/Borrower.sol";
 import {InsufficientCash} from "../../src/ace/hub/Borrower.sol";
@@ -269,12 +269,11 @@ contract AceCrossMarketRefinanceTest is WarpClock {
     /// @dev the A/B split below reads the same figure twice. That is the honest reading: a migration between
     /// @dev two of one lender's markets moves nothing at the pool, which is a property this file now pins.
     function _snap(uint256 oldId) internal view returns (Snap memory s) {
-        MarketState memory a = read.marketState(idA);
-        MarketState memory b = read.marketState(idB);
         (uint256 restA, uint256 lentA,) = read.poolOf(idA);
         (uint256 restB, uint256 lentB,) = read.poolOf(idB);
-        (s.cashA, s.lentA, s.revA) = (restA, lentA, a.protocolRevenue);
-        (s.cashB, s.lentB, s.revB) = (restB, lentB, b.protocolRevenue);
+        uint256 pot = read.revenuePot(address(usdc)); // ONE pot per quote, so the A and B legs read one figure, as the pooled lender legs do
+        (s.cashA, s.lentA, s.revA) = (restA, lentA, pot);
+        (s.cashB, s.lentB, s.revB) = (restB, lentB, pot);
         s.loansA = ace.marketLoansLength(idA);
         s.loansB = ace.marketLoansLength(idB);
         s.loanCount = read.loanCount();
@@ -293,10 +292,10 @@ contract AceCrossMarketRefinanceTest is WarpClock {
     function _assertSnapEq(Snap memory x, Snap memory y, string memory why) internal pure {
         assertEq(x.cashA, y.cashA, string.concat(why, ": A totalCash"));
         assertEq(x.lentA, y.lentA, string.concat(why, ": A totalLent"));
-        assertEq(x.revA, y.revA, string.concat(why, ": A protocolRevenue"));
+        assertEq(x.revA, y.revA, string.concat(why, ": revenue pot, A leg"));
         assertEq(x.cashB, y.cashB, string.concat(why, ": B totalCash"));
         assertEq(x.lentB, y.lentB, string.concat(why, ": B totalLent"));
-        assertEq(x.revB, y.revB, string.concat(why, ": B protocolRevenue"));
+        assertEq(x.revB, y.revB, string.concat(why, ": revenue pot, B leg"));
         assertEq(x.loansA, y.loansA, string.concat(why, ": A openedLoans"));
         assertEq(x.loansB, y.loansB, string.concat(why, ": B openedLoans"));
         assertEq(x.loanCount, y.loanCount, string.concat(why, ": loan id counter"));
@@ -410,13 +409,13 @@ contract AceCrossMarketRefinanceTest is WarpClock {
 
     // ============ 5-8. whose config prices the new loan ============
 
-    /// @notice Plan test 5: B's `lenderAprBps` prices the origination -- B's lenders fund it, B's pot takes it.
+    /// @notice Plan test 5: B's `lenderAprBps` prices the origination -- B's lenders fund it, the quote's pot takes its cut.
     /// @dev The one-Cfg shape is what guarantees this; threading A's would price the loan at 2190 bps a year.
+    /// @dev The pot is per quote, shared by A and B, so the cut is read as its delta; the migration books no other fee.
     function test_CrossMarket_BsFeePricesTheNewLoan() public {
         uint256 oldId = _open(idA, P, TEN30);
         _warpTo(t0 + 15 days);
-        uint256 revA = read.protocolRevenue(idA);
-        uint256 revB = read.protocolRevenue(idB);
+        uint256 rev0 = read.revenuePot(address(usdc));
 
         _migrate(borrower, _args(oldId, idB, P, TEN30));
 
@@ -424,8 +423,7 @@ contract AceCrossMarketRefinanceTest is WarpClock {
         uint256 feeA = (P * BASE_BPS_A * TEN30 * 11000 + den - 1) / den;
         uint256 feeB = (P * BASE_BPS_B * TEN30 * 11000 + den - 1) / den;
         assertEq(feeB, feeA * 2, "fixture: B's origination is exactly twice A's");
-        assertEq(read.protocolRevenue(idB) - revB, (feeB * 1000) / 11000, "B's pot took the hub's cut of B's all-in");
-        assertEq(read.protocolRevenue(idA), revA, "and A's pot took nothing for a loan it does not carry");
+        assertEq(read.revenuePot(address(usdc)) - rev0, (feeB * 1000) / 11000, "the pot took the hub's cut of B's all-in");
     }
 
     /// @notice Plan test 6: the new loan answers to B's regime, which is the repricing being bought.

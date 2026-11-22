@@ -2,8 +2,8 @@
 pragma solidity 0.8.36;
 
 import {AceVault} from "../../src/curator/AceVault.sol";
-import {CapListing, ProductConfig} from "../../src/curator/AceVaultCaps.sol";
-import {AceVaultFlows, VaultConfig, VaultLayout} from "../../src/curator/AceVaultFlows.sol";
+import {CapListing, ProductConfig} from "../../src/curator/libraries/AceVaultCaps.sol";
+import {AceVaultFlows, VaultConfig, VaultLayout} from "../../src/curator/libraries/AceVaultFlows.sol";
 import {InKindVaults} from "../utils/InKindVaults.sol";
 import {IInKindTerms, IInKindVault} from "./InKindSurface.sol";
 import {InKindRig} from "./InKindRig.sol";
@@ -15,7 +15,7 @@ contract InKindKeeperBurnHarness is AceVault {
 
     /// @notice Burn `shares` of `holder`'s request on their behalf, the request ledger debited as `claimExit` debits it.
     function burnEscrowFor(address holder, uint256 shares) external {
-        VaultLayout storage $ = AceVaultFlows.layout();
+        VaultLayout storage $ = AceVaultFlows.vaultLayout();
         $.requests[holder].shares -= shares;
         $.requestedShares -= shares;
         _burn(address(this), shares);

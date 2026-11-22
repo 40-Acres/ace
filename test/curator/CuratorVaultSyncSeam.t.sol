@@ -251,7 +251,7 @@ contract CuratorVaultSyncSeamTest is CuratorVaultBase {
     /// @dev THE LAW, and it is EXACT: an inequality here admits the very mutant the row exists to catch.
     /// @dev `block.timestamp` is FIXED across quote and fill, deliberately: `unvested()` decays, which
     /// @dev would invert the entry pair for a reason EIP-4626 puts out of scope ("the same transaction").
-    /// @dev THE LAST OUT IS DRIVEN TOO: `_release` raises NAV mid-claim, and the views quote it released, so it is no exception.
+    /// @dev THE LAST OUT IS DRIVEN TOO: `AceVaultNav.release` raises NAV mid-claim, and the views quote it released, so it is no exception.
     /// @dev DO NOT SOFTEN THIS TO A TOLERANCE. If exact equality cannot hold, the plan is wrong.
     /// @dev An entry the pile gate shuts is judged by the seam instead: both max views read zero and the verb refuses with `GainVesting`.
     function testFuzz_Preview_TheQuoteEqualsTheFillAcrossAnyUnsyncedMove(uint256 up, uint256 to, uint16 feeBps) public {
@@ -379,7 +379,7 @@ contract CuratorVaultSyncSeamTest is CuratorVaultBase {
         assertEq(v.pendingFeeShares(), 0, "the view says the same thing");
     }
 
-    /// @dev F1, THE ROW THE REVIEW DEMANDS: the claim's `_release` raises NAV before that claim's `_collectFeeAt`.
+    /// @dev F1, THE ROW THE REVIEW DEMANDS: the claim's `AceVaultNav.release` raises NAV before that claim's `_collectFeeAt`.
     /// @dev WHAT IT GUARDS -- the release is not stranded, and the fee on the released rise is taken once, on the way out.
     /// @dev The fixture's net NAV sits under the fee mark and its gross above it, so only the release's own collection charges.
     /// @dev The leaver is the whole supply, so the claim releases and the deferral goes to them, less that fee.

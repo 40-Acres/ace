@@ -19,7 +19,7 @@
 // Each verb has an EFFECT row that holds only if its body ran on the vault's storage, so it FAILS on a no-op forward, and
 // fields it never writes, which FAIL if the call havocs the vault's storage instead. The suffix carries the vault's own
 // immutables, so the auth and mode reads are the real ones. The hub, the terms and the door are outside the scene: their
-// answers are NONDET, but the hub's `borrowerOf`, which is a ghost so the lending doors' holder check reads a fixed answer.
+// answers are NONDET, but the hub's `borrowerOf`, which is a ghost so the lending verbs' holder check reads a fixed answer.
 //
 // WHAT THIS SPEC ASSUMES, each stated where the prover cannot see it for itself:
 //   - THE SUFFIX MATCHES THE NAMED IMMUTABLES (`deployed()` below). The constructor packs the five suffix words from the

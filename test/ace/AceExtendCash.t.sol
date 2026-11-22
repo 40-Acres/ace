@@ -146,14 +146,14 @@ contract AceExtendCashTest is ExtendRig {
         _fund(borrower, fee);
         uint256 payer0 = usdc.balanceOf(borrower);
         uint256 hub0 = usdc.balanceOf(address(ace));
-        uint256 rev0 = read.protocolRevenue(id);
+        uint256 rev0 = read.revenuePot(address(usdc));
         (, uint256 lent0, uint256 owed0) = read.poolOf(id);
         uint256 resting0 = ace.restingOf(id);
         vm.prank(borrower);
         ace.extend(loanId, 0, "");
         assertEq(usdc.balanceOf(borrower), payer0 - fee, "the caller paid the whole fee");
         assertEq(usdc.balanceOf(address(ace)), hub0 + fee, "and the hub holds it");
-        assertEq(read.protocolRevenue(id), rev0 + LoanMath.protocolCut(fee), "the protocol cut is revenue");
+        assertEq(read.revenuePot(address(usdc)), rev0 + LoanMath.protocolCut(fee), "the protocol cut is revenue");
         (, uint256 lent1, uint256 owed1) = read.poolOf(id);
         assertEq(owed1, owed0 + (f0 - r) + LoanMath.tickCut(fee), "owed takes the earned old escrow and the tick cut");
         assertEq(lent1, lent0, "lent does not move");
@@ -170,14 +170,14 @@ contract AceExtendCashTest is ExtendRig {
         usdc.approve(address(ace), 0);
         Loan memory l0 = read.loan(loanId);
         uint256 f0 = read.feeEscrowOf(loanId);
-        uint256 rev0 = read.protocolRevenue(id);
+        uint256 rev0 = read.revenuePot(address(usdc));
         (,, uint256 owed0) = read.poolOf(id);
         vm.prank(borrower);
         vm.expectRevert();
         ace.extend(loanId, 0, "");
         assertEq(read.loan(loanId).expiry, l0.expiry, "the term did not move");
         assertEq(read.feeEscrowOf(loanId), f0, "nor the escrow");
-        assertEq(read.protocolRevenue(id), rev0, "nor revenue");
+        assertEq(read.revenuePot(address(usdc)), rev0, "nor revenue");
         (,, uint256 owed1) = read.poolOf(id);
         assertEq(owed1, owed0, "nor owed");
     }

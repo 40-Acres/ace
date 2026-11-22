@@ -3,8 +3,8 @@ pragma solidity 0.8.36;
 
 import {MarketParams} from "../../src/ace/hub/Types.sol";
 import {AceVault} from "../../src/curator/AceVault.sol";
-import {CapListing, ProductConfig} from "../../src/curator/AceVaultCaps.sol";
-import {AceVaultFlows} from "../../src/curator/AceVaultFlows.sol";
+import {CapListing, ProductConfig} from "../../src/curator/libraries/AceVaultCaps.sol";
+import {AceVaultFlows} from "../../src/curator/libraries/AceVaultFlows.sol";
 import {IAceVaultDoor} from "../../src/interfaces/IAceVaultDoor.sol";
 import {AceVaultBaseRig} from "../curator/vault/AceVaultBaseRig.sol";
 import {MockTerms} from "../curator/vault/MockTerms.sol";

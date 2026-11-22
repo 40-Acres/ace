@@ -290,7 +290,7 @@ contract CuratorVaultDepositWindowTest is WarpClock {
     }
 
     /// @notice THE SAME PROPERTY UNDER A LIVE VEST, which is what tells the fix from half of it.
-    /// @notice The two counters are one unit: `_pendingUnvested` reads gross AGAINST the mark, never either alone.
+    /// @notice The two counters are one unit: `AceVaultNav.deferredAt` reads gross AGAINST the mark, never either alone.
     /// @dev With no vest both branches of that read return zero, so the row above passes even under a HALF fix.
     /// @dev A half fix funds the line alone, driving the `g < m` branch and shrinking the deduction.
     /// @dev Same corruption, opposite sign, and it heals the instant the transfer returns -- so only this row sees it.

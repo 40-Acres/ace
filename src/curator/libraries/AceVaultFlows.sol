@@ -7,20 +7,20 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {LowLevelCall} from "@openzeppelin/contracts/utils/LowLevelCall.sol";
 import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
-import {LoanClosed, LoanMatured, NoRecordPrice, RecordUnreadable} from "../ace/hub/Borrower.sol";
-import {EmptyPot} from "../ace/hub/Lender.sol";
-import {NotExpired} from "../ace/hub/Settlement.sol";
-import {LoanMath} from "../ace/hub/libraries/LoanMath.sol";
-import {Permits} from "../ace/hub/libraries/Permits.sol";
-import {Probe, RecordGasShort} from "../ace/hub/libraries/Probe.sol";
-import {MarketParams, MigrateArgs, OpenBounds} from "../ace/hub/Types.sol";
-import {HubLoanTerm} from "../interfaces/HubLoanTerm.sol";
-import {HubProtocolShare} from "../interfaces/HubProtocolShare.sol";
-import {IAceLenderOps} from "../interfaces/IAceLenderOps.sol";
-import {IAceVaultDoor} from "../interfaces/IAceVaultDoor.sol";
-import {IAceVaultOps} from "../interfaces/IAceVaultOps.sol";
-import {IPersistenceRecord} from "../interfaces/IPersistenceRecord.sol";
-import {IVaultTerms, Lend, RefinanceRequest} from "../interfaces/IVaultTerms.sol";
+import {LoanClosed, LoanMatured, NoRecordPrice, RecordUnreadable} from "../../ace/hub/Borrower.sol";
+import {EmptyPot} from "../../ace/hub/Lender.sol";
+import {NotExpired} from "../../ace/hub/Settlement.sol";
+import {LoanMath} from "../../ace/hub/libraries/LoanMath.sol";
+import {Permits} from "../../ace/hub/libraries/Permits.sol";
+import {Probe, RecordGasShort} from "../../ace/hub/libraries/Probe.sol";
+import {MarketParams, MigrateArgs, OpenBounds} from "../../ace/hub/Types.sol";
+import {HubLoanTerm} from "../../interfaces/HubLoanTerm.sol";
+import {HubProtocolShare} from "../../interfaces/HubProtocolShare.sol";
+import {IAceLenderOps} from "../../interfaces/IAceLenderOps.sol";
+import {IAceVaultDoor} from "../../interfaces/IAceVaultDoor.sol";
+import {IAceVaultOps} from "../../interfaces/IAceVaultOps.sol";
+import {IPersistenceRecord} from "../../interfaces/IPersistenceRecord.sol";
+import {IVaultTerms, Lend, RefinanceRequest} from "../../interfaces/IVaultTerms.sol";
 import {AceVaultCaps} from "./AceVaultCaps.sol";
 import {AceVaultTail} from "./AceVaultTail.sol";
 
@@ -35,7 +35,7 @@ struct VaultConfig {
     uint256 seed; // the least asset the vault's address must hold at construction, at least `MIN_SEED` atoms; all it holds is booked as dead shares
 }
 
-/// @notice What a borrower asks the core door for; a product reads the fields its terms need and ignores the rest.
+/// @notice What a borrower asks `borrow` for; a product reads the fields its terms need and ignores the rest.
 struct BorrowRequest {
     address collateral;
     uint256 units;
@@ -86,7 +86,7 @@ struct VaultLayout {
     uint256 feeHighWater; // fee threshold in assets: a collection lifts it to NAV; an entry or an exit carries it per virtual share
     uint256 navMark; // gross NAV at the last sync; a rise above it defers, a fall passes through
     uint128 vestBasis; // grossed, read back as basis * (maturity - now) / VEST_WINDOW
-    uint64 vestMaturity; // when the deferred pile finishes; it only ever moves LATER
+    uint64 vestMaturity; // when the deferred gain finishes vesting; it only ever moves LATER
     bool draining; // lending stopped: no placement, no extension, entry shut; packs into the vest's word
     uint48 troughHold; // zero none; all ones a material loss seen over an unsold pot; else the second the hold lifts by; packs into the vest's word
     uint256 requestedShares; // escrowed shares of every standing request
@@ -99,7 +99,7 @@ struct VaultLayout {
     uint256 openSeized; // door mode: the keys still open, each shutting entry
 }
 
-/// @notice What a vault hands its core door body: the cash, custody, and the bounds it read before resting anything.
+/// @notice What a vault hands `borrow`'s body: the cash, custody, and the bounds it read before resting anything.
 struct Ctx {
     address asset;
     address manager; // the hub's custodian, approved for exactly the pledge
@@ -121,7 +121,7 @@ interface IAceSettle {
 }
 
 /// @title AceVaultFlows
-/// @notice AceVault's storage and linked bodies: the core door, the loan end, the other lending doors, and door mode's collect, return and write-off.
+/// @notice AceVault's storage and linked bodies: `borrow`, the loan end, the lending verbs on a live loan, and door mode's collect, return and write-off.
 /// @notice DELEGATECALL-linked: each runs as the vault; a forwarded verb takes the vault's calldata unchanged and reads its figures from the appended suffix.
 /// @notice NOTHING THE VAULT FUNDS RESTS ACROSS A CALL: a market's cash is zero between calls.
 /// @dev A member that writes runs only through the vault's guarded wrappers; the library's call protection refuses a direct call.
@@ -137,12 +137,10 @@ library AceVaultFlows {
     error OverLendable(); // the placement passes what the requests' hold leaves lendable
     error OverCap(); // the placement passes the collateral's cap room
 
-    /// @notice The core door lent: the loan, its market, who took it, and what it paid.
+    /// @notice `borrow` lent: the loan, its market, who took it, and what it paid.
     event Borrowed(uint256 indexed loanId, bytes32 indexed market, address indexed borrower, uint256 units, uint256 principal, uint256 payout);
 
     uint256 internal constant MIN_SEED = 1e4; // the least genesis seed, in atoms; the vault's `MIN_SEED`, here so a deploy can name it
-    uint16 internal constant HOLD_BPS = 1; // the trough hold weighs a loss or a pile against this share of the mark, and MIN_SEED atoms
-    uint16 internal constant GATE_BPS = 500; // entry shuts while a gain over this share of NAV vests
     uint256 internal constant VIRTUAL_SHARES = 1e6; // the vault's share offset, 10 ** its `_decimalsOffset`
     uint256 internal constant Q96 = 1 << 96; // the hub's price frame
     uint256 internal constant ASK_RESERVE = 12_000; // gas a product read keeps back: a cold call's charge plus the worst caller tail, maxMint's
@@ -151,7 +149,7 @@ library AceVaultFlows {
     bytes32 internal constant BOOKED = bytes32(uint256(LENDING) + 2); // transient: a door collect's booked rise, read by its trailing sync
 
     /// @notice The vault's state, at its ERC-7201 root.
-    function layout() internal pure returns (VaultLayout storage $) {
+    function vaultLayout() internal pure returns (VaultLayout storage $) {
         bytes32 slot = ROOT;
         assembly ("memory-safe") {
             $.slot := slot
@@ -168,27 +166,6 @@ library AceVaultFlows {
                 if and(ok, eq(returndatasize(), 0x20)) { word := mload(0) }
             }
         }
-    }
-
-    /// @dev Whether `amount` is material to the trough hold against `ref`: over `MIN_SEED` atoms and over `HOLD_BPS` of `ref`, compared without a product.
-    function material(uint256 amount, uint256 ref) internal pure returns (bool) {
-        return amount > MIN_SEED && amount > Math.mulDiv(ref, HOLD_BPS, 10_000);
-    }
-
-    /// @dev Whether pile `deferred` is still vesting against `nav`: over `floor` and over `GATE_BPS` of `nav`.
-    function gainVesting(uint256 deferred, uint256 nav, uint256 floor) internal pure returns (bool) {
-        return deferred > floor && deferred * 10_000 > nav * GATE_BPS;
-    }
-
-    /// @dev Whether entry waits on a pot: one unsold at the hub or a door key open, and no exemption at the hub's count `settledPots`.
-    function unsold(uint256 hubUnsold, uint256 openKeys, uint256 settledPots, uint256 exempt) internal pure returns (bool) {
-        return (hubUnsold != 0 || openKeys != 0) && settledPots != exempt;
-    }
-
-    /// @dev The maturity a `rise` stamped now onto pile `deferred` maturing at `maturity` leaves, over a `window` in seconds.
-    function blended(uint256 deferred, uint256 rise, uint256 maturity, uint256 window) internal view returns (uint64) {
-        uint256 end = block.timestamp + window;
-        return uint64((deferred == 0 || maturity <= block.timestamp) ? end : maturity + Math.mulDiv(end - maturity, rise, deferred + rise));
     }
 
     /// @notice A door-mode booking of `units` at `price`, `units * price >> 96` floored and saturating; a door computing one must call this.
@@ -209,9 +186,9 @@ library AceVaultFlows {
         return bookValue(Math.min(pot, Math.mulDiv(debt, Q96, price, Math.Rounding.Ceil)), price);
     }
 
-    /* ============================== THE CORE DOOR ============================== */
+    /* ============================== THE BORROW ============================== */
 
-    /// @notice A lending door's market checks, moving nothing: `self` the lender, `asset` the quote, neither own token the collateral, no settle bounty.
+    /// @notice A lending verb's market checks, moving nothing: `self` the lender, `asset` the quote, neither own token the collateral, no settle bounty.
     function checkMarket(MarketParams memory mp, address asset, address self) internal pure {
         if (mp.lender != self) revert NotOurLender();
         if (mp.quote != asset) revert OutsideEnvelope();
@@ -220,7 +197,7 @@ library AceVaultFlows {
         if (mp.settleBountyBps != 0) revert PaysSettleBounty();
     }
 
-    /// @notice The core door's checks and pledge: the market is this vault's, the placement fits, and exactly the units arrived.
+    /// @notice `borrow`'s checks and pledge: the market is this vault's, the placement fits, and exactly the units arrived.
     /// @dev Runs before the product's write hook, so the borrower's pull meets no primed product; custody's in `hub.open` runs primed, under the hub's lock.
     /// @return id The market id.
     function place(Ctx memory ctx, MarketParams memory mp, Terms memory draw, bytes calldata permit2) public returns (bytes32 id) {
@@ -231,7 +208,7 @@ library AceVaultFlows {
         id = keccak256(abi.encode(mp));
     }
 
-    /// @notice The core door's hub leg: create the market if missing, rest all idle, open to this vault, withdraw every unit.
+    /// @notice `borrow`'s hub leg: create the market if missing, rest all idle, open to this vault, withdraw every unit.
     /// @dev Opening to this vault passes the hub's credit-operator gate; the title is handed over by the wrapper after this returns.
     /// @return loanId The loan, titled to this vault until the wrapper hands it over.
     /// @return payout The cash the open paid this vault, measured.
@@ -270,7 +247,7 @@ library AceVaultFlows {
     function collectForfeited(uint256[] calldata ids) external returns (uint256[] memory out) {
         (address ace, address asset) = (AceVaultTail.ace(), AceVaultTail.asset());
         IAceLenderOps hub = IAceLenderOps(ace);
-        VaultLayout storage $ = layout();
+        VaultLayout storage $ = vaultLayout();
         out = new uint256[](ids.length);
         uint256 booked;
         for (uint256 i; i < ids.length; ++i) {
@@ -296,7 +273,7 @@ library AceVaultFlows {
     /// @dev The cash is pulled on the door's exact allowance and measured; the key's value falls by it, saturating, whatever the key.
     function returnProceeds(address collateral, uint256 cash, bool closes) external {
         if (cash == 0 && !closes) revert IAceVaultDoor.NothingReturned();
-        VaultLayout storage $ = layout();
+        VaultLayout storage $ = vaultLayout();
         Seizure storage seizure = $.seized[collateral];
         if (cash != 0) {
             IERC20 token = IERC20(AceVaultTail.asset());
@@ -313,7 +290,7 @@ library AceVaultFlows {
     /// @notice Queue a write-off of key `collateral`'s residue, due after the cap timelock. CURATOR ONLY; an empty key refuses `NothingSeized`.
     function submitWriteOff(address collateral) external {
         if (msg.sender != AceVaultTail.curator()) revert IAceVaultDoor.NotCurator();
-        Seizure storage seizure = layout().seized[collateral];
+        Seizure storage seizure = vaultLayout().seized[collateral];
         if (seizure.value == 0 && !seizure.open) revert IAceVaultDoor.NothingSeized();
         uint64 due = uint64(block.timestamp) + AceVaultTail.capTimelock();
         seizure.writeOffAt = due;
@@ -322,7 +299,7 @@ library AceVaultFlows {
 
     /// @notice Land key `collateral`'s write-off once due: its value goes to zero and it closes. PERMISSIONLESS.
     function acceptWriteOff(address collateral) external {
-        VaultLayout storage $ = layout();
+        VaultLayout storage $ = vaultLayout();
         Seizure storage seizure = $.seized[collateral];
         uint64 due = seizure.writeOffAt;
         if (due == 0 || block.timestamp < due) revert IAceVaultDoor.NothingDue();
@@ -335,7 +312,7 @@ library AceVaultFlows {
     /// @notice Drop key `collateral`'s pending write-off. The curator or the guardian; with none pending it refuses `NothingDue`.
     function revokeWriteOff(address collateral) external {
         if (msg.sender != AceVaultTail.curator() && msg.sender != AceVaultTail.guardian()) revert IAceVaultDoor.NotCurator();
-        Seizure storage seizure = layout().seized[collateral];
+        Seizure storage seizure = vaultLayout().seized[collateral];
         if (seizure.writeOffAt == 0) revert IAceVaultDoor.NothingDue();
         seizure.writeOffAt = 0;
         emit IAceVaultDoor.WriteOffRevoked(msg.sender, collateral);
@@ -412,7 +389,7 @@ library AceVaultFlows {
         added = uint64(Math.saturatingSub(block.timestamp + tenor, expiry));
     }
 
-    /// @dev Every lending door's first refusals on a live loan: the caller holds its title, it is this vault's in its asset, and it has not matured.
+    /// @dev Each live-loan lending verb's first refusals: the caller holds its title, it is this vault's in its asset, and it has not matured.
     /// @return mp The loan's market.
     /// @return tenor The loan's tenor.
     /// @return expiry The loan's expiry.
@@ -535,9 +512,9 @@ library AceVaultFlows {
         if (out != 0) IERC20(refi.mp.quote).safeTransfer(msg.sender, out); // as the hub skips a zero net, for an asset that refuses zero transfers
     }
 
-    /// @dev Gross NAV's fall below its high-water, with the hub holding `held`: the vault's own figure, read here off the same two balances.
+    /// @dev `AceVaultNav.drawdown` restated with the hub holding `held`: gross NAV's fall below its high-water, off the same two balances.
     function _drawdown(address asset, uint256 held) private view returns (uint256) {
-        return Math.saturatingSub(layout().navHigh, IERC20(asset).balanceOf(address(this)) + held);
+        return Math.saturatingSub(vaultLayout().navHigh, IERC20(asset).balanceOf(address(this)) + held);
     }
 
     /* ============================== THE TOP-UP ============================== */

@@ -4,7 +4,7 @@ pragma solidity 0.8.36;
 import {Ace} from "../../../src/ace/hub/Ace.sol";
 import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
 import {MarketParams} from "../../../src/ace/hub/Types.sol";
-import {AceVaultFlows} from "../../../src/curator/AceVaultFlows.sol";
+import {AceVaultFlows} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {MockTerms} from "./MockTerms.sol";
 import {AceVaultDoorRig} from "./AceVaultDoorRig.sol";
 

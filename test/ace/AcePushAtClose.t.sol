@@ -57,7 +57,6 @@ contract AcePushAtCloseTest is Test {
     /// @dev returndata again, which is the one thing a fixed tail cannot be sized against.
     bytes32 internal constant PUSH_FAILED_SIG = Lender.LenderPushFailed.selector;
     bytes32 internal constant COLLECTED_SIG = Lender.Collected.selector;
-    bytes32 internal constant SWEEP_FAILED_SIG = Ace.RevenueSweepFailed.selector;
 
     function setUp() public {
         vm.warp(1_000_000);
@@ -89,8 +88,7 @@ contract AcePushAtCloseTest is Test {
     }
 
     /// @dev Whether the hub emitted `sig` during the recorded window, scanned rather than matched by POSITION.
-    /// @dev `vm.expectEmit` binds to the NEXT event, and a terminal close emits several -- the piggyback sweep's
-    /// @dev among them -- so ordering would make these rows assert the hub's event sequence by accident.
+    /// @dev `vm.expectEmit` binds to the NEXT event, and a terminal close emits several, so ordering would assert the hub's event sequence by accident.
     function _sawFromHub(bytes32 sig) internal returns (bool, uint256) {
         Vm.Log[] memory logs = vm.getRecordedLogs();
         for (uint256 i; i < logs.length; i++) {
@@ -224,7 +222,7 @@ contract AcePushAtCloseTest is Test {
     /// @dev reason that nothing pushes anywhere, so alone it passes green against an empty implementation and
     /// @dev pins nothing. The closing leg is what makes the partial leg mean "excluded" rather than "absent",
     /// @dev and an edit that drops the positive half silently re-vacuums the exclusion it was guarding.
-    /// @dev THE THIRD LEG IS THE COUPLING, and it is the same class of trap as the sweep row's gas assertion.
+    /// @dev THE THIRD LEG IS THE COUPLING, the `paid >= owedAfterPartial` assertion below.
     /// @dev "Terminal ends only" is defensible ONLY because the push takes the WHOLE POOL: the partial's credit
     /// @dev is not stranded, it is QUEUED, and the close delivers it along with its own. Narrow the push to the
     /// @dev close's DELTA and both rulings break at once -- every partial repay's credit strands -- and without
@@ -394,10 +392,9 @@ contract AcePushAtCloseTest is Test {
     /* ====================== 5. THE EXPOSURE: EACH PUSH COSTS ITS BUDGET, AND THE TAIL SURVIVES ====================== */
 
     /// @notice A BURNING QUOTE COSTS EACH PUSH ITS FIXED BUDGET, and the caller's next leg still runs.
-    /// @notice `forceClose` makes two pushes here, the lender's and then the due sweep; each is handed `PUSH_GAS` and no more.
-    /// @dev The lender push runs first and the sweep after, on what it left, so a burning sweep cannot starve the push.
-    /// @dev Both land in their fallbacks, the credit is restored whole, and `collect` still pays it: nobody's money is at risk.
-    /// @dev THE CALLER'S TAIL survives because the burn is bounded: 8M less two budgets is plenty for the second leg.
+    /// @notice `forceClose` makes one push here, the lender's, handed `PUSH_GAS` and no more; no sweep rides the close.
+    /// @dev It lands in its fallback, the credit is restored whole, and `collect` still pays it: nobody's money is at risk.
+    /// @dev THE CALLER'S TAIL survives because the burn is bounded: 8M less one budget is plenty for the second leg.
     /// @dev A caller whose chain is funded against the push's NEED rather than its budget is the residual, and it is recorded.
     /// @dev The quote spins until it is under a 1,000-gas floor, then cannot afford the transfer, so each push fails.
     function test_Exposure_ABurningQuoteCostsEachPushItsBudgetAndTheTailSurvives() public {
@@ -442,11 +439,11 @@ contract AcePushAtCloseTest is Test {
     /* ====================== 6. WHAT EACH DOOR DEMANDS UNDER A FULL BURN ====================== */
 
     /// @notice `forceClose` DEMANDS ONE LENDER BUDGET, and this row measures the floor under a quote burning every unit.
-    /// @notice It sweeps BEST-EFFORT, so its floor is the lender push's alone: the sweep is skipped there, never paid.
+    /// @notice No sweep rides it, so its floor is the lender push's alone.
     /// @dev MEASURED ON THE SHIPPED BUILD too: run it under `FOUNDRY_PROFILE=deploy` via `scripts/test-ir.sh`.
     /// @dev THE METHOD IS A BISECTION FROM OUTSIDE: the least outer budget at which the verb completes while the quote burns its whole budget.
     /// @dev Below it the verb reverts, `PushGasShort` or dry in its own body; at and above it the lender push lands in its fallback.
-    /// @dev THE TWO-PUSH PREMISE IS GONE: the sweep runs after the push and its floor is the higher, so it never binds the least budget.
+    /// @dev THE TWO-PUSH PREMISE IS GONE: forceClose makes the lender push alone.
     function test_Floor_ForceCloseDemandsOneLenderBudgetUnderAFullBurn() public {
         uint256 fc = _floorFor();
 
@@ -458,19 +455,6 @@ contract AcePushAtCloseTest is Test {
         /// @dev THE BINDING DEMAND IS THE PUSH'S: just under the floor the door refuses by name, not dry in its own body.
         /// @dev The bound above holds for any door whose body alone costs a budget; this one fails if the push never demanded.
         assertEq(bytes4(_revertAt(fc - 1_000)), PushGasShort.selector, "forceClose's floor is not the lender push's");
-
-        uint256 snap = vm.snapshotState();
-        uint256 loanId = _open(TEN30);
-        vm.warp(uint256(read.loan(loanId).expiry) + 1);
-        uint64 stamped = read.marketState(mid).lastSweptAt;
-        usdc.setBurnAll(true);
-        vm.recordLogs();
-        vm.prank(keeper);
-        ace.forceClose{gas: fc}(loanId);
-        assertFalse(_sawSigFromHub(SWEEP_FAILED_SIG), "forceClose's floor paid for a sweep: the best-effort gate bound it");
-        assertEq(read.marketState(mid).lastSweptAt, stamped, "and stamped a sweep it never ran");
-        usdc.setBurnAll(false);
-        vm.revertToState(snap);
     }
 
     /// @dev Bisect the least outer budget at which `forceClose` completes while the quote burns every unit it is handed.
@@ -523,20 +507,20 @@ contract AcePushAtCloseTest is Test {
     /// @dev What stays bounded is the COPY: `trySafeTransfer` reads one word of returndata, so the hub never copies the bomb.
     function test_SweepRevenue_AReturnBombRevertsTheStrictSweepAndKeepsTheRevenue() public {
         uint256 loanId = _open(TEN30);
-        uint256 banked = read.protocolRevenue(mid);
+        uint256 banked = read.revenuePot(address(usdc));
         assertGt(banked, 0, "premise: origination banked a protocol cut to sweep");
         assertGt(loanId, 0, "premise: the loan is real");
         usdc.setBombWords(ONE_MIB_WORDS);
 
         uint256 g = gasleft();
         vm.prank(keeper);
-        (bool ok, bytes memory ret) = address(ace).call(abi.encodeCall(Ace.sweepRevenue, (mid)));
+        (bool ok, bytes memory ret) = address(ace).call(abi.encodeCall(Ace.sweepRevenue, (address(usdc))));
         uint256 spent = g - gasleft();
 
         emit log_named_uint("gas a 1 MiB return bomb costs the strict sweeper", spent);
         assertFalse(ok, "the strict sweep refused the bomb");
         assertEq(bytes4(ret), PushRefused.selector, "by name, as a bare selector");
-        assertEq(read.protocolRevenue(mid), banked, "and the revert left the revenue whole");
+        assertEq(read.revenuePot(address(usdc)), banked, "and the revert left the revenue whole");
     }
 }
 

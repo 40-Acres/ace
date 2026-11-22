@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
-import {CapListing, ProductConfig} from "../../../src/curator/AceVaultCaps.sol";
-import {AceVaultFlows, VaultConfig} from "../../../src/curator/AceVaultFlows.sol";
+import {CapListing, ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
+import {AceVaultFlows, VaultConfig} from "../../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVaultNav} from "../../../src/curator/libraries/AceVaultNav.sol";
 import {CuratorVaultHarness} from "./CuratorVaultHarness.sol";
 
 /// @title VaultVestHarness
@@ -16,21 +17,21 @@ contract VaultVestHarness is CuratorVaultHarness {
 
     /// @notice The vest's stored basis, read back as basis * (maturity - now) / VEST_WINDOW.
     function vestBasis() external view returns (uint128) {
-        return AceVaultFlows.layout().vestBasis;
+        return AceVaultFlows.vaultLayout().vestBasis;
     }
 
-    /// @notice The vault's own `_stampVest`, the only line of the vault that writes the vest maturity.
+    /// @notice The vault's own `AceVaultNav.stampVest`, the only code that writes the vest maturity.
     function stampVest(uint256 amount) external {
-        _stampVest(amount);
+        AceVaultNav.stampVest(amount, VEST_WINDOW);
     }
 
-    /// @notice The vault's own `_burnVest`, the sync's write on a NAV fall.
+    /// @notice The vault's own `AceVaultNav.burnVest`, the sync's write on a NAV fall.
     function burnVest(uint256 amount) external {
-        _burnVest(amount);
+        AceVaultNav.burnVest(amount, VEST_WINDOW);
     }
 
-    /// @notice The vault's own `_release`, the last requester's write: the pile vests whole and the mark takes `g`.
+    /// @notice The vault's own `AceVaultNav.release`, the last requester's write: the deferred gain vests whole and the mark takes `g`.
     function release(uint256 g) external {
-        _release(g);
+        AceVaultNav.release(g);
     }
 }

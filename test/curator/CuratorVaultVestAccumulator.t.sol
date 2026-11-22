@@ -6,30 +6,31 @@ import {CuratorVaultBase} from "./CuratorVaultBase.sol";
 import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
 import {Listing} from "../../src/entities/curated/CuratorTerms.sol";
 import {CuratedVaults} from "../utils/CuratedVaults.sol";
-import {AceVaultFlows} from "../../src/curator/AceVaultFlows.sol";
-import {CapListing, ProductConfig} from "../../src/curator/AceVaultCaps.sol";
+import {AceVaultFlows} from "../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVaultNav} from "../../src/curator/libraries/AceVaultNav.sol";
+import {CapListing, ProductConfig} from "../../src/curator/libraries/AceVaultCaps.sol";
 
-/// @notice The vault with `_stampVest` exposed and its two fields readable, so credits land at chosen instants.
+/// @notice The vault with `AceVaultNav.stampVest` exposed and its two fields readable, so credits land at chosen instants.
 /// @dev Exposes the shipped internal UNCHANGED -- it substitutes no arithmetic and mocks nothing.
 /// @dev Without it the instant of a stamp is whatever a hub event happens to fall on.
 contract AccumVault is AceVault {
     constructor(VaultConfig memory cfg, ProductConfig memory pc, CapListing[] memory caps) AceVault(cfg, pc, caps, "Accum", "cACC") {}
 
     function stamp(uint256 amount) external {
-        _stampVest(amount);
+        AceVaultNav.stampVest(amount, VEST_WINDOW);
     }
 
     function burn(uint256 amount) external {
-        _burnVest(amount);
+        AceVaultNav.burnVest(amount, VEST_WINDOW);
     }
 
     /// @notice When the deferred pile finishes. The monotonicity property is stated directly on this.
     function maturity() external view returns (uint64) {
-        return AceVaultFlows.layout().vestMaturity;
+        return AceVaultFlows.vaultLayout().vestMaturity;
     }
 
     function basis() external view returns (uint128) {
-        return AceVaultFlows.layout().vestBasis;
+        return AceVaultFlows.vaultLayout().vestBasis;
     }
 }
 
@@ -65,7 +66,7 @@ contract CuratorVaultVestAccumulatorTest is CuratorVaultBase {
     /// @dev THE ANTI-SANDWICH PROPERTY, stated on the field itself rather than inferred from a total.
     /// @dev A credit is a weighted average of the old maturity and `now + W`, and the old one is always
     /// @dev at or below `now + W`, so the average cannot fall below it. Timing a credit releases nothing.
-    /// @dev MUTATION TARGET: change `m +=` to `m =` in `_stampVest` and this must fail.
+    /// @dev MUTATION TARGET: change `m +=` to `m =` in `AceVaultNav.stampVest` and this must fail.
     function test_Vest_TheMaturityOnlyEverMovesLater() public {
         AccumVault v = _accum(1 days);
         v.stamp(10_000e6);
@@ -110,7 +111,7 @@ contract CuratorVaultVestAccumulatorTest is CuratorVaultBase {
     /// @dev bracket row in `CuratorVaultVesting` rails the value exactly, in literals, and catches that.
     /// @dev What this row adds is the REASON the value is what it is, stated as an inequality a reader
     /// @dev can check, rather than as a comment beside a number nobody can evaluate.
-    /// @dev NOT a round trip: it asserts an inequality over elapsed time, never re-deriving `_readVest`.
+    /// @dev NOT a round trip: it asserts an inequality over elapsed time, never re-deriving `AceVaultNav.readVest`.
     function test_Vest_OneBlockAtTheFloorRecognizesAlmostNothing() public {
         uint64 floor = _accum(1 days).MIN_VEST_WINDOW();
         AccumVault v = _accum(floor);
@@ -126,10 +127,10 @@ contract CuratorVaultVestAccumulatorTest is CuratorVaultBase {
     // ---- PROPERTY TWO: a stamp adds its own credit and nothing else ----
 
     /// @dev What the quote-then-verb seam rests on: the pile after a stamp is the pile before plus the credit.
-    /// @dev NOT an equality. `_stampVest` grosses with CEIL and `unvested()` reads back with CEIL, and two
-    /// @dev ceils in series cannot cancel: the readback is `u + x` when `(u+x)*W` divides the span exactly
-    /// @dev and `u + x + 1` otherwise, which is the ordinary case. Both directions favour the stayers.
-    function test_Vest_AStampAddsItsOwnCreditAndAtMostOneWei() public {
+    /// @dev `AceVaultNav.grossed` FLOORS the basis and `AceVaultNav.readVest` reads it back with CEIL, over `r = maturity - now` in (0, W].
+    /// @dev `floor(X * W / r) * r / W` then sits in (X - 1, X], so the ceil read is X: the readback is exactly `u + x`, never a wei over.
+    /// @dev So the row asserts the equality; the old ceiled basis read one wei over (decisions item 1).
+    function test_Vest_AStampAddsExactlyItsOwnCredit() public {
         AccumVault v = _accum(1 days);
         v.stamp(7_777e6);
         _warpBy(7 hours);
@@ -139,10 +140,10 @@ contract CuratorVaultVestAccumulatorTest is CuratorVaultBase {
         v.stamp(3_333e6);
 
         assertGe(v.unvested(), u + 3_333e6, "the credit landed in full: a stamp may never RELEASE");
-        assertLe(v.unvested(), u + 3_333e6 + 1, "and added nothing beyond the one wei the two ceils cost");
+        assertEq(v.unvested(), u + 3_333e6, "and reads back exactly the pile before plus its own credit");
     }
 
-    /// @dev The bound over arbitrary piles and instants, because one wei is a claim about EVERY stamp.
+    /// @dev The bound over arbitrary piles and instants, because the exact readback is a claim about EVERY stamp.
     function testFuzz_Vest_TheStampBoundHoldsAtEveryPileAndInstant(uint64 window, uint256 seed) public {
         uint64 win = uint64(bound(window, 1 hours, 7 days));
         AccumVault v = _accum(win);
@@ -154,7 +155,7 @@ contract CuratorVaultVestAccumulatorTest is CuratorVaultBase {
             uint256 u = v.unvested();
             v.stamp(x);
             assertGe(v.unvested(), u + x, "a stamp released live value on the way in");
-            assertLe(v.unvested(), u + x + 1, "a stamp added more than its own credit plus the ceil wei");
+            assertEq(v.unvested(), u + x, "a stamp read back other than the pile before plus its own credit");
             credited += x;
         }
         assertGt(credited, 0, "LIVENESS: nothing was ever credited");
@@ -182,7 +183,7 @@ contract CuratorVaultVestAccumulatorTest is CuratorVaultBase {
     /// @dev the maturity to `now + W` on any credit -- satisfies monotonicity and adds the credit exactly,
     /// @dev and lets anybody re-defer the whole pile forever for one wei a block. The weighting is what
     /// @dev makes the move proportional: a dust credit against a large pile moves the maturity by dust.
-    /// @dev MUTATION TARGET: in `_grossed`, replace the blended maturity with `end` and this must fail.
+    /// @dev MUTATION TARGET: in `AceVaultNav.grossed`, replace the blended maturity with `end` and this must fail.
     function test_Vest_ADustCreditAgainstALargePileBarelyMovesTheMaturity() public {
         AccumVault v = _accum(1 days);
         v.stamp(1_000_000e6);
@@ -201,7 +202,7 @@ contract CuratorVaultVestAccumulatorTest is CuratorVaultBase {
     }
 
     /// @dev The other half of proportional: a credit the SIZE of the pile really does move it materially.
-    /// @dev Without this row the test above would pass a contract that ignored `_stampVest`'s blend entirely.
+    /// @dev Without this row the test above would pass a contract that ignored `AceVaultNav.stampVest`'s blend entirely.
     function test_Vest_AMatchingCreditMovesTheMaturityMaterially() public {
         AccumVault v = _accum(1 days);
         v.stamp(1_000e6);
@@ -216,7 +217,7 @@ contract CuratorVaultVestAccumulatorTest is CuratorVaultBase {
 
     // ---- the fall side keeps its behaviour on one field ----
 
-    /// @dev `_burnVest` scales the basis and leaves the maturity alone, so a loss retires value without
+    /// @dev `AceVaultNav.burnVest` scales the basis and leaves the maturity alone, so a loss retires value without
     /// @dev moving WHEN the rest matures. A burn that moved the clock would be a release or a re-defer.
     function test_Vest_ABurnScalesThePileAndLeavesTheClockAlone() public {
         AccumVault v = _accum(1 days);

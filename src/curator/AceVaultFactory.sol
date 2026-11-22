@@ -5,8 +5,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {CREATE3} from "../../vendor/solady/CREATE3.sol";
 import {HubRatePeriod} from "../interfaces/HubRatePeriod.sol";
-import {CapListing, ProductConfig} from "./AceVaultCaps.sol";
-import {VaultConfig} from "./AceVaultFlows.sol";
+import {CapListing, ProductConfig} from "./libraries/AceVaultCaps.sol";
+import {VaultConfig} from "./libraries/AceVaultFlows.sol";
 
 /// @title AceVaultFactory
 /// @notice Deploys AceVaults from ONE pinned creation code against ONE hub and registers each, so whether a vault runs that code is checkable on chain.

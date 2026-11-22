@@ -1,7 +1,7 @@
 // Ace hub -- obligation O2: isolation is logical, per market id. No verb moves a market it does not name.
 //
 // "MOVES" is read through three digests, each a keccak the prover treats as collision-free:
-//   `marketDigest(m, anyLoan, index)`: the market's own record -- params, its whole state (cash, the three pots,
+//   `marketDigest(m, anyLoan, index)`: the market's own record -- params, its whole state (cash, the claims pot,
 //     counters), one arbitrary loan's claim and inventory pot there, both list lengths and one entry of each list;
 //   `loanRecordDigest(id, claimant)`: a loan's entries in the loan book -- the loan record (market, borrower, units,
 //     debt, times, fee), its principal at open, its fee escrow, one claimant's owed units and quote, its shortfall;
@@ -11,6 +11,9 @@
 // OUT OF SCOPE ON PURPOSE, because none is keyed by market:
 //   the lender pools, keyed by (lender, quote), pool one lender's markets in that quote (sole tenancy), so a verb on
 //     market X legitimately moves a pool that also backs market Y; their conservation belongs to O1/O4;
+//   the protocol's revenue pots, keyed by quote in the `Protocol` root, pool every market's cut in that quote, so an
+//     accrual in market X legitimately moves the pot market Y's cuts also land in; its conservation belongs to O1 and
+//     O20 (revenue leaves only whole), and `sweepRevenue(quote)` names no market;
 //   a borrower's credit-operator grants and nonce, keyed by the borrower;
 //   the custodian's ledger, another contract: HubCustody.spec ties each live loan's custody to its units, which the
 //     loan digest covers.
@@ -63,7 +66,6 @@ definition byMarketId(method f) returns bool =
     f.selector == sig:deposit(bytes32,uint256).selector
     || f.selector == sig:depositWithPermit2(bytes32,uint256,bytes).selector
     || f.selector == sig:withdraw(bytes32,uint256,address,uint256).selector
-    || f.selector == sig:sweepRevenue(bytes32).selector
     || f.selector == sig:postOrder(bytes32,uint256,uint256,uint256,uint256,uint64,uint64).selector
     || f.selector == sig:open(bytes32,uint256,uint256,uint64,address,AceHarness.OpenBounds).selector
     || f.selector == sig:openWithPermit2(bytes32,uint256,uint256,uint64,address,AceHarness.OpenBounds,bytes).selector;
@@ -100,8 +102,6 @@ function callNamingOneMarket(env e, method f, bytes32 market) {
         depositWithPermit2(e, market, a, data);
     } else if (f.selector == sig:withdraw(bytes32,uint256,address,uint256).selector) {
         withdraw(e, market, a, to, b);
-    } else if (f.selector == sig:sweepRevenue(bytes32).selector) {
-        sweepRevenue(e, market);
     } else if (f.selector == sig:postOrder(bytes32,uint256,uint256,uint256,uint256,uint64,uint64).selector) {
         postOrder(e, market, a, b, c, d, t, u);
     } else if (f.selector == sig:open(bytes32,uint256,uint256,uint64,address,AceHarness.OpenBounds).selector) {
@@ -156,12 +156,15 @@ rule aMigrationMovesOnlyItsTwoMarkets(env e, AceHarness.MigrateArgs m, bytes32 o
 
 // ---- the verbs that name no market, and createMarket ----
 
-// `setRollPolicy` writes the caller's lender entry, which no market record holds
+// `setRollPolicy` writes the caller's lender entry, which no market record holds; `sweepRevenue` and `setProtocolShareBps`
+// write the `Protocol` root, keyed by quote and hub-wide
 definition namesNoMarket(method f) returns bool =
     f.selector == sig:collect(address,address).selector
     || f.selector == sig:setCreditOperator(address,bool).selector
     || f.selector == sig:setCreditOperatorWithSig(address,address,bool,uint256,uint256,bytes).selector
     || f.selector == sig:setRollPolicy(address).selector
+    || f.selector == sig:sweepRevenue(address).selector
+    || f.selector == sig:setProtocolShareBps(uint256).selector
     || f.selector == sig:pushToken(address,address,uint256).selector;
 
 rule aVerbNamingNoMarketMovesNone(env e, method f, calldataarg args, bytes32 any, uint256 anyLoan, uint256 index)

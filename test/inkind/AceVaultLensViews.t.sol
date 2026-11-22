@@ -3,9 +3,9 @@ pragma solidity 0.8.36;
 
 import {Checkpoints} from "@openzeppelin/contracts/utils/structs/Checkpoints.sol";
 import {AceVault} from "../../src/curator/AceVault.sol";
-import {CapListing, ProductConfig} from "../../src/curator/AceVaultCaps.sol";
-import {VaultConfig} from "../../src/curator/AceVaultFlows.sol";
-import {AceVaultInKind} from "../../src/curator/AceVaultInKind.sol";
+import {CapListing, ProductConfig} from "../../src/curator/libraries/AceVaultCaps.sol";
+import {VaultConfig} from "../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVaultInKind} from "../../src/curator/libraries/AceVaultInKind.sol";
 import {InKindVaults} from "../utils/InKindVaults.sol";
 import {IInKindTerms, IInKindVault} from "./InKindSurface.sol";
 import {InKindRig} from "./InKindRig.sol";
@@ -15,15 +15,15 @@ contract TrackerReadVault is AceVault {
     constructor(VaultConfig memory c, ProductConfig memory p, CapListing[] memory caps, string memory n, string memory s) AceVault(c, p, caps, n, s) {}
 
     function trackedOfLayout(address h) external view returns (uint256) {
-        return Checkpoints.latest(AceVaultInKind.layout().bal[h]);
+        return Checkpoints.latest(AceVaultInKind.inKindLayout().bal[h]);
     }
 
     function trackedSupplyOf() external view returns (uint256) {
-        return AceVaultInKind.layout().trackedSupply;
+        return AceVaultInKind.inKindLayout().trackedSupply;
     }
 
     function tokensOf() external view returns (address[] memory) {
-        return AceVaultInKind.layout().paidTokens;
+        return AceVaultInKind.inKindLayout().paidTokens;
     }
 }
 

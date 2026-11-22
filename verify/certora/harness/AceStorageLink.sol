@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
-import {Lenders, LoanBook, Markets} from "../../../src/ace/hub/Types.sol";
+import {Lenders, LoanBook, Markets, Protocol} from "../../../src/ace/hub/Types.sol";
 
 /// @title AceStorageLink
-/// @notice Gives the prover names for the hub's three ERC-7201 roots, so a spec can hook their fields.
+/// @notice Gives the prover names for the hub's four ERC-7201 roots, so a spec can hook their fields.
 /// @notice The hub declares them on FILE-LEVEL structs, where the prover's annotation scan does not reach.
 /// @notice Each slot is the constant `Storage` in Types.sol uses; a wrong one would hook the wrong words.
 /// @dev Never deployed and never called: a conf's `storage_extension_harnesses` maps it onto the hub.
@@ -18,5 +18,8 @@ contract AceStorageLink {
 
     /** @custom:certoralink 0x6bd405d8488bcf8aea88b86961ffb3be4d6d2f3e4b297dab758f37bb87f80c00 */
     Lenders lenders;
+
+    /** @custom:certoralink 0x715850d4bd55b3697bcd36ebd74d0933ac5ea4724483aa12ce3726a1b5ca2e00 */
+    Protocol protocol;
     // forgefmt: disable-end
 }

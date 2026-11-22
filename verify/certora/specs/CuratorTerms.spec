@@ -8,8 +8,9 @@
 //      under the buffered minimum;
 //   P  the price: the record's windowed minimum less the row's buffer, gridded down, on the market these terms build;
 //      a borrow refuses exactly when the collateral is unlisted or the gridded price is zero;
-//   D  the door: only the curator sells; a sale never clears under the 20% floor while the key is open, and
-//      one at or over it lands; the cash goes to the vault against the item and nowhere else; the floor's record is
+//   D  the door: only the curator sells; a sale never clears under the floor while the key is open (the 20% discount,
+//      raised to the lesser of the units' booked share and their record value), and one at or over it lands; the cash
+//      goes to the vault against the item and nowhere else; the floor's record is
 //      the one the latest collect pinned, and nothing else moves it; stray cash forwards under the asset's key;
 //   R  the room: the vault's cap less what is lent and the unsold pots held at the market record's minimum.
 //
@@ -73,6 +74,7 @@ methods {
     function MockCuratedVault.MAX_TENOR() external returns (uint64) envfree;
     function MockCuratedVault.effectiveCap(address) external returns (uint256) envfree;
     function MockCuratedVault.keyOpenView(address) external returns (bool) envfree;
+    function MockCuratedVault.bookedView(address) external returns (uint256) envfree;
     function MockCuratedVault.collectedView(uint256) external returns (uint256) envfree;
     function MockCuratedVault.returnCount() external returns (uint256) envfree;
     function MockCuratedVault.lastKey() external returns (address) envfree;
@@ -185,22 +187,33 @@ function tableHolds(address c) returns bool {
     return (r.record == 0 || (inRails(r) && !own)) && (v != 0 => (inRails(p) && !own));
 }
 
-// THE FLOOR THE DOOR RULES, restated from and: zero unless the
-// item's key is open and the pinned record answers a price; past `max / 8000` an unpayable floor; else
-// ceil(units * minPrice * 8000 / (10000 * 2^96)). It reads the key from the vault's layout and the record through the
-// mock, so it shares no line with `_floor`. A rule using it names the mock as the item's pinned record.
-function saleFloor(address item, mathint units) returns mathint {
-    if (!vault.keyOpenView(item)) {
+// THE FLOOR THE DOOR RULES, restated from, and
+//, for the goods the rules sell: zero unless their key is open; the units' pro-rata share
+// of the key's booked value, s = ceil(booked * units / max(units, held)), alone while the pinned record answers zero (the
+// share reads no price); past `max / 8000` an unpayable floor; else the discounted d = ceil(units * minPrice * 8000 /
+// (10000 * 2^96)), raised to the lesser of s and the units' record value v = ceil(units * minPrice / 2^96). `held` is
+// the door's balance before the sale moves it. It reads the key from the vault's layout and the record through the mock,
+// so it shares no line with `_floor`. A rule using it names the mock as the goods' pinned record.
+function saleFloor(mathint units) returns mathint {
+    if (!vault.keyOpenView(goods)) {
         return 0;
     }
-    mathint m = record.priceView(cash, item);
+    mathint held = goods.balanceOf(currentContract);
+    mathint den = units > held ? units : held;
+    mathint s = den == 0 ? 0 : (vault.bookedView(goods) * units + den - 1) / den;
+    mathint m = record.priceView(cash, goods);
     if (m == 0) {
-        return 0;
+        return s;
     }
     if (m > max_uint256 / 8000) {
         return max_uint256;
     }
-    return (units * m * 8000 + 2 ^ 96 * 10000 - 1) / (2 ^ 96 * 10000);
+    mathint d = (units * m * 8000 + 2 ^ 96 * 10000 - 1) / (2 ^ 96 * 10000);
+    if (d >= s) {
+        return d;
+    }
+    mathint v = (units * m + 2 ^ 96 - 1) / 2 ^ 96;
+    return s < v ? s : v;
 }
 
 // ---- T: the table ----
@@ -463,12 +476,13 @@ rule onlyTheCuratorSells(env e, address item, uint256 units, address buyer, uint
     assert e.msg.sender != curator => lastReverted, "a sale by someone other than the curator landed";
 }
 
-// THE FLOOR: while the item's key is open and its pinned record answers a price, no sale clears under the record's
-// minimum less 20%, rounded up, priced on the units actually sold (`max` resolving to the door's whole balance).
+// THE FLOOR: while the item's key is open, no sale clears under the record's minimum less 20%, rounded up, nor under
+// the lesser of the units' booked share and their record value, nor, while the record answers zero, under the share,
+// priced on the units actually sold (`max` resolving to the door's whole balance).
 rule aSaleNeverClearsUnderTheFloor(env e, uint256 units, address buyer, uint256 minOut, bytes data) {
     require saleRecord(goods) == record;
     mathint u = units == max_uint256 ? to_mathint(goods.balanceOf(currentContract)) : to_mathint(units);
-    mathint floor = saleFloor(goods, u);
+    mathint floor = saleFloor(u);
     require floor <= max_uint256;
 
     uint256 paid = sell(e, goods, units, buyer, minOut, data);
@@ -476,7 +490,7 @@ rule aSaleNeverClearsUnderTheFloor(env e, uint256 units, address buyer, uint256 
 }
 
 // AND THE FLOOR IS NO HIGHER THAN RULED: a curator's sale at or over it, and over `minOut`, to a buyer that pays what it
-// states, lands. With the rule above this pins the floor exactly, the 20% discount and the open-key gate included.
+// states, lands. With the rule above this pins the floor exactly: the discount, the share, the record value, the open key.
 rule aSaleAtOrOverTheFloorLands(env e, uint256 units, uint256 minOut, bytes data) {
     require e.msg.sender == vault.CURATOR() && e.msg.value == 0;
     // THE GUARD STARTS CLEAR, as every transaction's transient storage does; the prover starts a rule from arbitrary
@@ -487,7 +501,7 @@ rule aSaleAtOrOverTheFloorLands(env e, uint256 units, uint256 minOut, bytes data
     uint256 held = goods.balanceOf(currentContract);
     mathint u = units == max_uint256 ? to_mathint(held) : to_mathint(units);
     require u > 0 && u <= to_mathint(held);
-    mathint floor = saleFloor(goods, u);
+    mathint floor = saleFloor(u);
     uint256 s = buyerMock.statedView();
     require to_mathint(s) >= floor && s >= minOut && s > 0;
     require buyerMock.approvedView() >= s && cash.balanceOf(buyerMock) >= s;
@@ -503,7 +517,7 @@ rule aSaleAtOrOverTheFloorLands(env e, uint256 units, uint256 minOut, bytes data
 rule theBuyerIsToldTheLeastTheDoorTakes(env e, uint256 units, uint256 minOut, bytes data) {
     require saleRecord(goods) == record;
     mathint u = units == max_uint256 ? to_mathint(goods.balanceOf(currentContract)) : to_mathint(units);
-    mathint floor = saleFloor(goods, u);
+    mathint floor = saleFloor(u);
     require floor <= max_uint256;
     mathint c0 = buyerMock.calls();
 
@@ -612,7 +626,7 @@ rule onlyACollectMovesTheSaleRecord(env e, method f, calldataarg args, address c
 rule aSaleCanClearAtAPositiveFloor(env e, uint256 units, uint256 minOut, bytes data) {
     require saleRecord(goods) == record;
     mathint u = units == max_uint256 ? to_mathint(goods.balanceOf(currentContract)) : to_mathint(units);
-    mathint floor = saleFloor(goods, u);
+    mathint floor = saleFloor(u);
     uint256 paid = sell(e, goods, units, buyerMock, minOut, data);
     satisfy floor > 0 && floor < max_uint256 && to_mathint(paid) == floor;
 }

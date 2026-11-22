@@ -1,8 +1,9 @@
 // Ace hub -- the feasibility probe, and obligation O20: protocol revenue leaves its pot only by being swept WHOLE.
 //
-// THE POT'S WRITERS, read off the code: LoanAccounting.accrueProtocolFee adds to it; _sweepRevenue zeroes it before
-// the transfer and, on a swallowed piggyback failure, restores the same amount. So across any call the pot either
-// rises, stays, or falls to exactly zero. A partial fall would be revenue leaving by some other door.
+// THE POT'S WRITERS, read off the code: one pot per quote token, `Protocol.protocolRevenue[quote]`, which every market in
+// that quote shares. LoanAccounting.accrueProtocolFee adds to it; `sweepRevenue(quote)` zeroes it before the transfer,
+// and a refused transfer reverts the call whole. So across any call the pot either rises, stays, or falls to exactly
+// zero. A partial fall would be revenue leaving by some other door.
 //
 // THE ARITHMETIC IS A BLACK BOX: every 512-bit mulDiv (Uniswap's FullMath, OZ's Math) and Mul512.gt512 is an
 // uninterpreted, deterministic function, a superset of what the real routines answer. O20 never reads a computed value, so this only
@@ -20,7 +21,7 @@ methods {
     function Math.mulDiv(uint256 x, uint256 y, uint256 d, Math.Rounding r) internal returns (uint256) => ozRounded(x, y, d, r);
     function Mul512.gt512(uint256 a, uint256 b, uint256 c, uint256 d) internal returns (bool) => gt512Ghost(a, b, c, d);
 
-    function protocolRevenueOf(bytes32) external returns (uint256) envfree; // AceHarness: the pot, read through Storage.markets()
+    function protocolRevenueOf(address) external returns (uint256) envfree; // AceHarness: a quote's pot, read through Storage.revenue()
 
     // NO `unresolved external` CATCH-ALL, EVER, ON THE HUB: see HubLoans.spec. It silently turned the hub's library
     // calls into no-ops, which made this rule's first "28 verified" hollow.
@@ -41,15 +42,15 @@ function ozRounded(uint256 x, uint256 y, uint256 d, Math.Rounding r) returns uin
     return ozExpand(x, y, d);
 }
 
-// O20: across any hub call, a market's revenue pot rises, holds, or is swept to zero -- never trimmed
+// O20: across any hub call, a quote token's revenue pot rises, holds, or is swept to zero -- never trimmed
 // MULTICALL IS EXCLUDED, for two reasons. It replays ARBITRARY calldata into the hub by self-delegatecall, which the
 // prover cannot resolve (its counterexample is that havoc, not a hub path). And its legs are the verbs this rule
 // checks one by one; the rule's single-call form does not compose over a batch, which may sweep and then accrue.
-rule revenueLeavesOnlyWhole(env e, method f, calldataarg args, bytes32 id)
+rule revenueLeavesOnlyWhole(env e, method f, calldataarg args, address q)
     filtered { f -> !f.isView && f.contract == currentContract && f.selector != sig:multicall(bytes[]).selector }
 {
-    mathint before = protocolRevenueOf(id);
+    mathint before = protocolRevenueOf(q);
     f(e, args);
-    mathint after = protocolRevenueOf(id);
+    mathint after = protocolRevenueOf(q);
     assert after < before => after == 0, "protocol revenue left the pot other than by a whole sweep";
 }

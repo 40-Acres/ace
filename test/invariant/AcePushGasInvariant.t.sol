@@ -20,7 +20,7 @@ import {WarpClock} from "../utils/WarpClock.sol";
 /// @title AcePushGasHandler
 /// @notice Drives `repay`, `finalize`, `forceClose`, the strict uncapped `sweepRevenue` and `deleverage` at a BOUNDED limit, on a quote it can turn hostile.
 /// @notice Each bounded action first bisects its own least completing limit in snapshots, then runs once for real near that edge.
-/// @dev The latch trips on a pool that moved without its push or its fallback, a stamp without a sweep event, a refusal after the call,
+/// @dev The latch trips on a pool that moved without its push or its fallback, a keeper verb that sweeps, a refusal after the call,
 /// @dev or an outcome that is not monotone in the limit. The support verbs share ONE selector so the bounded actions dominate the draw.
 contract AcePushGasHandler is WarpClock, DeleverageCrank {
     Ace public immutable ace;
@@ -43,7 +43,7 @@ contract AcePushGasHandler is WarpClock, DeleverageCrank {
     uint256 internal constant TOP_G = 3_000_000; // its top: a verb refused here is refused for a reason that is not gas
     uint256 internal constant STEP = 256; // the bisection's resolution
     uint256 internal constant UNDER = 15_000; // how far under its least limit a bounded action may be sent
-    uint256 internal constant OVER = 200_000; // how far over: past a burned push's budget and the sweep gate behind it
+    uint256 internal constant OVER = 200_000; // how far over: past a burned push's budget
 
     uint8 internal constant REPAY = 0;
     uint8 internal constant FINALIZE = 1;
@@ -66,16 +66,13 @@ contract AcePushGasHandler is WarpClock, DeleverageCrank {
         uint256 kept;
         bool swept;
         uint256 sweptAmt;
-        bool sweepFailed;
-        uint256 sweepKept;
     }
 
     /// @dev The ledger and balances a bounded call may move, read on either side of it.
     struct Book {
         uint256 owed;
         uint256 lenderBal;
-        uint64 stamp;
-        uint256 revenue;
+        uint256 revenue; // the quote's protocol revenue pot
         uint256 treasuryBal;
     }
 
@@ -134,7 +131,7 @@ contract AcePushGasHandler is WarpClock, DeleverageCrank {
     /// @dev Read between the bisection and the real call, it made the real call cheaper than every probe and tripped the partition.
     function sweepBounded(uint256 gasSeed) external {
         _bump("sweep.calls");
-        bytes memory data = abi.encodeCall(Ace.sweepRevenue, (mid));
+        bytes memory data = abi.encodeCall(Ace.sweepRevenue, (address(usdc)));
         Book memory b0 = _book();
         if (!_tryAt(KEEPER, data, TOP_G)) {
             _bump("sweep.refused");
@@ -144,11 +141,11 @@ contract AcePushGasHandler is WarpClock, DeleverageCrank {
         Obs memory o = _real(KEEPER, data, e.g);
         Book memory b1 = _book();
         if (!_judgeEdge(o, e, "sweep")) return;
-        if (b0.revenue > 0 && !o.swept && !o.sweepFailed) _trip("sweep: the strict sweep succeeded having swept nothing");
+        if (b0.revenue > 0 && !o.swept) _trip("sweep: the strict sweep succeeded having swept nothing");
         _judgeSweep(o, b0, b1, "sweep");
     }
 
-    /// @notice A fresh loan cranked at a bounded limit: its piggyback sweep is best-effort, so no limit at or over the crank's least may revert.
+    /// @notice A fresh loan cranked at a bounded limit: no sweep rides it, so no limit at or over the crank's least may revert.
     function deleverageBounded(uint256 gasSeed) external {
         _bump("lev.calls");
         uint256 id = _openLoan(0);
@@ -168,9 +165,9 @@ contract AcePushGasHandler is WarpClock, DeleverageCrank {
         Obs memory o = _real(address(this), data, e.g);
         Book memory b1 = _book();
         _heal();
-        if (!o.ok && o.sel == PushGasShort.selector) _trip("lev: deleverage reverted PushGasShort: its piggyback sweep is not best-effort");
+        if (!o.ok && o.sel == PushGasShort.selector) _trip("lev: deleverage reverted PushGasShort");
         if (!_judgeEdge(o, e, "lev")) return;
-        _judgeSweep(o, b0, b1, "lev");
+        _judgeNoSweep(o, b0, b1, "lev", false);
     }
 
     /* ---- the door ---- */
@@ -197,7 +194,7 @@ contract AcePushGasHandler is WarpClock, DeleverageCrank {
         if (!_judgeEdge(o, e, "door")) return;
         if (read.loan(id).closedAt == 0) _trip("door: a close completed without closing the loan");
         _judgePush(o, b0, b1);
-        _judgeSweep(o, b0, b1, "door");
+        _judgeNoSweep(o, b0, b1, "door", true);
     }
 
     /// @dev The door's caller and calldata, with its precondition staged: the debt funded, distress proved, or the clock moved.
@@ -259,21 +256,24 @@ contract AcePushGasHandler is WarpClock, DeleverageCrank {
         }
     }
 
-    /// @dev The sweep: delivered in full, restored as named, or silent with no stamp and no payment.
+    /// @dev The strict sweep: delivered in full and the pot emptied, or silent with no payment.
     function _judgeSweep(Obs memory o, Book memory b0, Book memory b1, string memory verb) internal {
         if (b1.treasuryBal < b0.treasuryBal) _trip("sweep: the treasury's balance fell");
         uint256 tre = b1.treasuryBal - b0.treasuryBal;
         if (o.swept) {
             _bump(string.concat(verb, ".swept"));
-            if (tre != o.sweptAmt || b1.revenue != 0) _trip("sweep: RevenueSwept without its whole-counter transfer");
-        } else if (o.sweepFailed) {
-            _bump(string.concat(verb, ".sweepFailed"));
-            if (tre != 0 || b1.revenue != o.sweepKept) _trip("sweep: a failed sweep that does not hold exactly what it named");
+            if (tre != o.sweptAmt || b1.revenue != 0) _trip("sweep: RevenueSwept without its whole-pot transfer");
         } else {
-            if (b1.stamp != b0.stamp) _trip("sweep: a period was stamped without a revenue event");
             if (tre != 0) _trip("sweep: the treasury was paid without a revenue event");
-            if (b0.revenue > 0 && _now() >= uint256(b0.stamp) + 1 days) _bump(string.concat(verb, ".sweepSkipped"));
         }
+    }
+
+    /// @dev A close or a crank sweeps nothing: no `RevenueSwept`, the treasury unpaid, the pot never lower; a close leaves it exactly as it was.
+    function _judgeNoSweep(Obs memory o, Book memory b0, Book memory b1, string memory verb, bool potFixed) internal {
+        if (o.swept) _trip(string.concat(verb, ": a keeper verb emitted RevenueSwept"));
+        if (b1.treasuryBal != b0.treasuryBal) _trip(string.concat(verb, ": a keeper verb moved the treasury's balance"));
+        if (b1.revenue < b0.revenue) _trip(string.concat(verb, ": a keeper verb lowered the revenue pot"));
+        if (potFixed && b1.revenue != b0.revenue) _trip(string.concat(verb, ": a close moved the revenue pot"));
     }
 
     /// @dev The edge a partition violation was found at, so a red run names its limits without a replay.
@@ -305,7 +305,7 @@ contract AcePushGasHandler is WarpClock, DeleverageCrank {
     }
 
     /// @dev The least completing limit to `STEP`, then a limit drawn close around it (even seeds) or from it to `OVER` above it (odd).
-    /// @dev The close draw is where a refusal's shape is judged; the wide one reaches the sweep gates a burned push pushes up.
+    /// @dev The close draw is where a refusal's shape is judged; the wide one reaches past a burned push's budget.
     function _edge(address who, bytes memory data, uint256 gasSeed) internal returns (Edge memory e) {
         e.hi = TOP_G;
         if (_tryAt(who, data, FLOOR_G)) {
@@ -349,19 +349,18 @@ contract AcePushGasHandler is WarpClock, DeleverageCrank {
             if (t == Lender.Collected.selector) (o.collected, o.paid) = (true, abi.decode(logs[i].data, (uint256)));
             if (t == Lender.LenderPushFailed.selector) (o.pushFailed, o.kept) = (true, abi.decode(logs[i].data, (uint256)));
             if (t == Ace.RevenueSwept.selector) (o.swept, o.sweptAmt) = (true, _firstWord(logs[i].data));
-            if (t == Ace.RevenueSweepFailed.selector) (o.sweepFailed, o.sweepKept) = (true, _firstWord(logs[i].data));
         }
     }
 
+    /// @dev `RevenueSwept` carries ONE unindexed word, the amount: a two-word decode reverts inside the handler and drops the sweep.
     function _firstWord(bytes memory d) internal pure returns (uint256 w) {
-        (w,) = abi.decode(d, (uint256, uint64));
+        w = abi.decode(d, (uint256));
     }
 
     function _book() internal view returns (Book memory b) {
         (,, b.owed) = read.lenderPools(LENDER, address(usdc));
         b.lenderBal = usdc.balanceOf(LENDER);
-        b.stamp = read.marketState(mid).lastSweptAt;
-        b.revenue = read.protocolRevenue(mid);
+        b.revenue = read.revenuePot(address(usdc));
         b.treasuryBal = usdc.balanceOf(treasury);
     }
 
@@ -498,16 +497,17 @@ contract AcePushGasInvariantTest is WarpClock {
         targetContract(address(handler));
     }
 
-    /// @notice No bounded action moved the pool, the counter, the stamp or a balance without the event and the transfer that name it.
+    /// @notice No bounded action moved the pool, the revenue pot or a balance without the event and the transfer that name it.
     function invariant_pushAndSweepAccountForWhatTheyMoved() public view {
         assertEq(handler.violations(), 0, handler.violation());
     }
 
     /// @notice The hub holds exactly the quote its books assign: resting cash, revenue, borrower credits, fee escrows and the lender's pool.
     /// @dev A cleared counter or pool whose tokens never left breaks this even when no event was checked.
+    /// @dev The revenue pot is per quote and read once; this campaign runs one market in its quote.
     function invariant_hubHoldsExactlyWhatItsBooksAssign() public view {
         MarketState memory s = read.marketState(mid);
-        uint256 booked = s.cash + s.protocolRevenue + s.quoteOwedTotal;
+        uint256 booked = s.cash + s.quoteOwedTotal + read.revenuePot(address(usdc));
         uint256[] memory ids = ace.marketLoans(mid, 0, ace.marketLoansLength(mid));
         for (uint256 i; i < ids.length; ++i) {
             booked += read.feeEscrowOf(ids[i]);
@@ -540,7 +540,7 @@ contract AcePushGasInvariantTest is WarpClock {
     /// @notice The per-verb tally, and the anti-vacuity guard: in EVERY run a bounded terminal close was driven and completed.
     /// @dev Three of six selectors are doors and each lands from its least limit up, so a run with no landing is not a seed's bad luck.
     function afterInvariant() public view {
-        string[26] memory tags = [
+        string[22] memory tags = [
             "step.open",
             "step.repayPartial",
             "step.collect",
@@ -557,23 +557,17 @@ contract AcePushGasInvariantTest is WarpClock {
             "door.paid",
             "door.fallback",
             "door.nopush",
-            "door.swept",
-            "door.sweepFailed",
-            "door.sweepSkipped",
             "sweep.calls",
             "sweep.landed",
             "sweep.short",
             "sweep.swept",
             "lev.calls",
-            "lev.landed",
-            "lev.sweepSkipped"
+            "lev.landed"
         ];
         console2.log("=== AcePushGasHandler verb hits (LAST sequence only) ===");
         for (uint256 i; i < tags.length; i++) {
             console2.log(tags[i], handler.tally(tags[i]));
         }
-        console2.log("lev.swept / lev.refused", handler.tally("lev.swept"), handler.tally("lev.refused"));
-        console2.log("sweep.sweepFailed / sweep.dry", handler.tally("sweep.sweepFailed"), handler.tally("sweep.dry"));
         assertGt(handler.tally("door.calls"), 0, "VACUOUS: no bounded terminal close was driven in this run");
         assertGt(handler.tally("door.landed"), 0, "VACUOUS: no bounded terminal close completed in this run");
         assertEq(

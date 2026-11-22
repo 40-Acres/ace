@@ -30,7 +30,7 @@ that exercise them.
 | `src/entities/launch/` | Runway: `LaunchTokenFactory`, `LaunchToken`, `LaunchLock`, `LockAccount`, `LaunchOpsBudget`, `RunwayHook`; `LaunchVault`, the launch lending vault |
 | `src/entities/curated/`, `src/entities/inkind/` | The vault products `CuratorTerms` (the curated collateral table) and `InKindTerms` (appraiser-signed quotes) |
 | `src/entities/vesting/ScheduleLock.sol` | The schedule and account base `LaunchLock` inherits |
-| `src/curator/` | `AceVault` (with `AceVaultFlows`, `AceVaultCaps`, `AceVaultInKind` and `AceVaultTail`), `AceVaultLens`, `AceVaultFactory` and `PriceGrid` |
+| `src/curator/` | `AceVault`, `AceVaultLens` and `AceVaultFactory`; its libraries in `src/curator/libraries/`: `AceVaultFlows`, `AceVaultCaps`, `AceVaultInKind` and `AceVaultTail` (linked), `AceVaultNav` (internal), and `PriceGrid` |
 | `src/oracle/`, `src/config/`, `src/interfaces/`, `src/utils/` | Price records the hub can read, default market parameters, interfaces, helpers |
 | `vendor/` | Third-party source copied verbatim, licences beside it: Uniswap's liquidity-launcher `InitializerHook`, OpenZeppelin's `VestingWalletUpgradeable`, and a copy of v4's `PoolManager` that only the tests deploy |
 | `test/` | Unit, fuzz, invariant and fork tests |

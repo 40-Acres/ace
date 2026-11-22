@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {MockBlockableERC20} from "../mocks/MockBlockableERC20.sol";
 import {MockFeeOnTransferERC20} from "../mocks/MockFeeOnTransferERC20.sol";
-import {AceVaultFlows} from "../../src/curator/AceVaultFlows.sol";
+import {AceVaultFlows} from "../../src/curator/libraries/AceVaultFlows.sol";
 import {Listing, Quote} from "./InKindSurface.sol";
 import {InKindRig} from "./InKindRig.sol";
 

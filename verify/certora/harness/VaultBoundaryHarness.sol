@@ -2,8 +2,9 @@
 pragma solidity 0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {CapListing, ProductConfig} from "../../../src/curator/AceVaultCaps.sol";
-import {AceVaultFlows, VaultConfig} from "../../../src/curator/AceVaultFlows.sol";
+import {CapListing, ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
+import {AceVaultFlows, VaultConfig} from "../../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVaultNav} from "../../../src/curator/libraries/AceVaultNav.sol";
 import {VaultForwardHarness} from "./VaultForwardHarness.sol";
 
 /// @title VaultBoundaryHarness
@@ -16,17 +17,17 @@ contract VaultBoundaryHarness is VaultForwardHarness {
 
     /// @notice Gross NAV's high-water.
     function navHigh() external view returns (uint256) {
-        return AceVaultFlows.layout().navHigh;
+        return AceVaultFlows.vaultLayout().navHigh;
     }
 
     /// @notice Gross NAV's fall below its high-water, the figure the total's room counts.
     function drawdown() external view returns (uint256) {
-        return Math.saturatingSub(AceVaultFlows.layout().navHigh, grossNav());
+        return Math.saturatingSub(AceVaultFlows.vaultLayout().navHigh, grossNav());
     }
 
-    /// @notice The pile the next sync would leave at today's gross, which `totalAssets` takes off gross.
+    /// @notice The deferred gain the next sync would leave at today's gross, which `totalAssets` takes off gross.
     function pendingPile() external view returns (uint256) {
-        return _pendingUnvested(grossNav());
+        return AceVaultNav.deferredAt(grossNav(), VEST_WINDOW);
     }
 
     /// @notice Whether the vault's lock is held.
@@ -36,6 +37,6 @@ contract VaultBoundaryHarness is VaultForwardHarness {
 
     /// @notice The shares every standing exit request has escrowed on the vault.
     function requestedShares() external view returns (uint256) {
-        return AceVaultFlows.layout().requestedShares;
+        return AceVaultFlows.vaultLayout().requestedShares;
     }
 }

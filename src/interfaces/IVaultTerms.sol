@@ -2,17 +2,17 @@
 pragma solidity 0.8.36;
 
 import {MarketParams} from "../ace/hub/Types.sol";
-import {BorrowRequest, Terms} from "../curator/AceVaultFlows.sol";
+import {BorrowRequest, Terms} from "../curator/libraries/AceVaultFlows.sol";
 import {Extension} from "./IRollPolicy.sol";
 
-/// @notice Which lending door a product's write call brackets.
+/// @notice Which lending verb a product's write call brackets.
 enum Lend {
     Borrow,
     Extend,
     Refinance // a refinance, or a top-up in place, whose consent is the same refinance answer
 }
 
-/// @notice What a holder asks the refinance door for: the successor's draw and term, the payout's floors, and any collateral shed.
+/// @notice What a holder asks `refinanceFor` for: the successor's draw and term, the payout's floors, and any collateral shed.
 struct RefinanceRequest {
     address collateral;
     uint256 principal;
@@ -75,19 +75,19 @@ interface IVaultTerms {
     /// @return The cap, `type(uint256).max` for none.
     function entryCap(address receiver, uint256 nav) external view returns (uint256);
 
-    /// @notice Write the product's own record for a lending door: a borrow's after the pledge arrives and before any cash rests. THE VAULT ONLY.
+    /// @notice Write the product's own record for a lending verb: a borrow's after the pledge arrives and before any cash rests. THE VAULT ONLY.
     /// @notice An extension's runs after its fee is pulled and before the hub's extend; a refinance's once the vault holds the title, before any rest.
     /// @notice A top-up's runs before its rest, the holder keeping the title.
-    /// @param kind Which lending door.
+    /// @param kind Which lending verb.
     /// @param mp The market.
     /// @param loanId The loan being extended, refinanced or topped up, zero for a borrow.
     /// @param data The product's own payload.
     function beforeLend(Lend kind, MarketParams calldata mp, uint256 loanId, bytes calldata data) external;
 
-    /// @notice Write the product's own record after a lending door: a borrow's once the cash and the title have left the vault. THE VAULT ONLY.
+    /// @notice Write the product's own record after a lending verb: a borrow's once the cash and the title have left the vault. THE VAULT ONLY.
     /// @notice An extension's runs once the hub's extend took the fee priced; a refinance's once both titles and the net are home.
     /// @notice A top-up's runs once the hub paid the holder and the vault drained the market.
-    /// @param kind Which lending door.
+    /// @param kind Which lending verb.
     /// @param mp The market.
     /// @param loanId The loan opened, extended, refinanced into or topped up.
     /// @param holder The loan's title holder.

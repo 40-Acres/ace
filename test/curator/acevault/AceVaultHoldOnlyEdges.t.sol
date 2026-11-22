@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {PolicyRefused} from "../../../src/ace/hub/Borrower.sol";
 import {AceVault, VaultConfig} from "../../../src/curator/AceVault.sol";
-import {AceVaultFlows} from "../../../src/curator/AceVaultFlows.sol";
+import {AceVaultFlows} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {Listing} from "../../../src/entities/curated/CuratorTerms.sol";
 import {CuratedVaults} from "../../utils/CuratedVaults.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
@@ -217,6 +217,32 @@ contract AceVaultHoldOnlyEdgesTest is AceVaultRig {
         assertEq(_hold(), held, "PREMISE: the stored second stands");
         assertGt(vault.unvested() * 10_000, vault.totalAssets() * vault.GATE_BPS(), "PREMISE: the pile is over the gain band");
         assertGt(vault.previewRedeem(vlens.requestedShares(address(vault))), vault.idle(), "PREMISE: the request still outweighs idle");
+        usdc.mint(bob, 1_000e6);
+        vm.startPrank(bob);
+        usdc.approve(address(vault), 1_000e6);
+        vm.expectRevert(AceVault.GainVesting.selector);
+        vault.deposit(1_000e6, bob);
+        vm.stopPrank();
+        _assertTheGateRefuses(honest);
+    }
+
+    /// @notice The hold's gain-gate leg reads the band against NAV, as entry does: a pile over it against NAV still refuses the roll, under it against gross.
+    /// @dev The band against NAV is `u > 5% of (gross - u)`; against gross it is `u > 5% of gross`. A pile of 4.9% of gross sits between, so only NAV sees it.
+    function test_HoldOnly_InTheGainBandOnNavNotOnGrossTheRollIsStillRefused() public {
+        (uint256 honest, uint48 held) = _storedUnderARequest();
+        _warpTo(uint256(held) - 1 hours);
+        uint256 gross = vault.grossNav();
+        uint256 pile = gross - vault.totalAssets(); // the deferred gain a sync now would leave
+        assertGt(49 * gross, 1_000 * pile, "PREMISE: the sale's pile has decayed under 4.9% of gross");
+        _gift((49 * gross - 1_000 * pile) / 951);
+        uint256 u = vault.unvested();
+        assertEq(_hold(), held, "PREMISE: the stored second stands");
+        assertTrue(_material(u), "PREMISE: the pile is material");
+        assertGt(u * 10_000, vault.totalAssets() * vault.GATE_BPS(), "PREMISE: over the gain band against NAV");
+        assertLe(u * 10_000, vault.grossNav() * vault.GATE_BPS(), "PREMISE: and under it against gross");
+        assertGt(vault.previewRedeem(vlens.requestedShares(address(vault))), vault.idle(), "PREMISE: the request still outweighs idle");
+        (bytes4 reason,) = _gate();
+        assertEq(reason, AceVault.GainVesting.selector, "the lens did not name the gain gate");
         usdc.mint(bob, 1_000e6);
         vm.startPrank(bob);
         usdc.approve(address(vault), 1_000e6);

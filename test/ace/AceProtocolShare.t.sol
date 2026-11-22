@@ -351,7 +351,7 @@ contract AceProtocolShareTest is Test {
         _repay(twin.ace, b, twin.read.debtOf(b));
         assertEq(usdc.balanceOf(alice) - aliceBefore, aliceCut, "the closing push pays the lender the same");
         assertEq(bobBefore - usdc.balanceOf(borrower), bobPaid, "and the borrower nets the same refund");
-        assertEq(read.protocolRevenue(id), twin.read.protocolRevenue(twin.id), "the booked protocol cut is untouched by the cut");
+        assertEq(read.revenuePot(address(usdc)), twin.read.revenuePot(address(usdc)), "the booked protocol cut is untouched by the cut");
 
         uint256 c = _openOn(ace, pm, id, P, TEN30);
         uint256 fee = AllInFeeSpec.feeAllIn(P, TEN30, RATE, 0);
@@ -422,12 +422,12 @@ contract AceProtocolShareTest is Test {
         assertTrue(ok, "fixture: the top-up is admitted");
         assertEq(quoted, fee, "the preview quotes the live share");
 
-        uint256 revenueBefore = read.protocolRevenue(id);
+        uint256 revenueBefore = read.revenuePot(address(usdc));
         uint256 bal = usdc.balanceOf(borrower);
         vm.prank(borrower);
         assertEq(ace.drawMore(loanId, amount, OFF), fee, "the top-up charges the all-in at the live share");
         assertEq(usdc.balanceOf(borrower) - bal, amount - fee, "and nets it from the payout");
-        assertEq(read.protocolRevenue(id) - revenueBefore, AllInFeeSpec.protocolFee(fee, s), "and banks the live share's slice");
+        assertEq(read.revenuePot(address(usdc)) - revenueBefore, AllInFeeSpec.protocolFee(fee, s), "and banks the live share's slice");
     }
 
     function _assertExtendAt(uint256 s, bool viaPermit) internal {
@@ -444,7 +444,7 @@ contract AceProtocolShareTest is Test {
         assertEq(quoted, fee, "the preview quotes the live share");
 
         usdc.mint(who, fee);
-        uint256 revenueBefore = read.protocolRevenue(id);
+        uint256 revenueBefore = read.revenuePot(address(usdc));
         uint256 charged;
         if (viaPermit) {
             vm.prank(who);
@@ -459,7 +459,7 @@ contract AceProtocolShareTest is Test {
             vm.stopPrank();
         }
         assertEq(charged, fee, "the extension charges the all-in at the live share");
-        assertEq(read.protocolRevenue(id) - revenueBefore, AllInFeeSpec.protocolFee(fee, s), "and banks the live share's slice");
+        assertEq(read.revenuePot(address(usdc)) - revenueBefore, AllInFeeSpec.protocolFee(fee, s), "and banks the live share's slice");
     }
 
     function _assertRefinanceAt(uint256 s, bool away) internal {
@@ -472,11 +472,11 @@ contract AceProtocolShareTest is Test {
 
         uint256 newP = 20_000e6;
         uint256 fee = AllInFeeSpec.feeAllIn(newP, TEN30, rate, s);
-        uint256 revenueBefore = read.protocolRevenue(dst);
+        uint256 revenueBefore = read.revenuePot(address(usdc));
         vm.prank(borrower);
         uint256 newId = ace.refinanceTo(MigrateArgs(loanId, dst, newP, TEN30, OFF, 0, address(0)));
         assertEq(read.feeEscrowOf(newId), AllInFeeSpec.feeEscrow(fee, s), "the successor's escrow is the live share's cut");
-        assertEq(read.protocolRevenue(dst) - revenueBefore, AllInFeeSpec.protocolFee(fee, s), "and its protocol cut is the live share's slice");
+        assertEq(read.revenuePot(address(usdc)) - revenueBefore, AllInFeeSpec.protocolFee(fee, s), "and its protocol cut is the live share's slice");
     }
 
     /// @dev The fee's three pots, each moved by exactly the live share's cut of it.
@@ -505,7 +505,7 @@ contract AceProtocolShareTest is Test {
     }
 
     function _pots(uint256 loanId) internal view returns (Pots memory p) {
-        p.revenue = read.protocolRevenue(id);
+        p.revenue = read.revenuePot(address(usdc));
         p.owed = read.poolOwed(id);
         if (loanId != 0) p.escrow = read.feeEscrowOf(loanId);
     }
@@ -573,6 +573,6 @@ contract AceProtocolShareTest is Test {
         for (uint256 i = 1; i <= r.loanCount(); i++) {
             pot += r.feeEscrowOf(i);
         }
-        assertEq(usdc.balanceOf(address(h)), resting + m.protocolRevenue + pot + owed + m.quoteOwedTotal, "solvency identity");
+        assertEq(usdc.balanceOf(address(h)), resting + r.revenuePot(address(usdc)) + pot + owed + m.quoteOwedTotal, "solvency identity");
     }
 }

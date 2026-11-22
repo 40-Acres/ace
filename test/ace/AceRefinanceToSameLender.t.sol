@@ -49,7 +49,7 @@ contract AceRefinanceToSameLenderTest is ExtendRig {
         (b.claim, b.escrow) = (read.claimOf(id, loanId), read.feeEscrowOf(loanId));
         (b.cashSrc, b.cashDst) = (ace.restingOf(id), ace.restingOf(sib));
         (b.resting, b.lent, b.owed) = read.lenderPools(alice, address(usdc));
-        (b.revenue, b.balance) = (read.protocolRevenue(sib), usdc.balanceOf(borrower));
+        (b.revenue, b.balance) = (read.revenuePot(address(usdc)), usdc.balanceOf(borrower));
 
         vm.expectCall(address(yes), abi.encodePacked(IRollPolicy.admitsExtension.selector), 0);
         uint256 newId = _to(loanId, sib, principal, TEN7);
@@ -62,7 +62,7 @@ contract AceRefinanceToSameLenderTest is ExtendRig {
         assertEq(owed1, b.owed + b.claim + LoanMath.tickCut(fee), "owed takes the old claim back whole, plus the new tick cut: nothing was reused");
         assertEq(read.claimOf(sib, newId), principal, "the successor's claim is its principal");
         assertEq(read.feeEscrowOf(newId), LoanMath.escrowCut(fee), "its escrow is funded");
-        assertEq(read.protocolRevenue(sib), b.revenue + LoanMath.protocolCut(fee), "the destination books the protocol cut");
+        assertEq(read.revenuePot(address(usdc)), b.revenue + LoanMath.protocolCut(fee), "the destination books the protocol cut");
         assertEq(usdc.balanceOf(borrower), b.balance + principal - fee + b.escrow - P, "the net out is paid in the call");
         _assertSolventOver(id, sib, alice);
     }

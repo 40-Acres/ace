@@ -64,7 +64,7 @@ contract AceLens {
     uint256 private constant B_QUOTE_OWED = B_BASE + 7;
     uint256 private constant B_SHORTFALL = B_BASE + 8; // +9 is `orders`, read through the hub's getter
 
-    /// @dev Member offsets inside one `Market`: params occupy 0..16, state 17..25, mappings after.
+    /// @dev Member offsets inside one `Market`: params occupy 0..16, state 17..23, mappings after.
     /// @dev A wrong index reads a plausible number and reverts nothing, so never edit this by hand.
     /// @dev Re-verify these against the compiler's own storage layout after ANY change to `Market`.
     /// @dev A field APPENDED to MarketState still shifts every constant below it, unlike a LoanBook append.
@@ -72,12 +72,13 @@ contract AceLens {
     /// @dev `inventoryAsk` is a `bool` appended LAST, into the word the lender's address leaves room in, so adding it moved no slot.
     /// @dev The ENCODED width is 19 words: abi.encode pads every field, so the id preimage packs nothing.
     uint256 private constant M_STATE = 17; // MarketParams inline slots; a field that adds or drops a SLOT shifts everything below
-    uint256 private constant M_STATE_WORDS = 9;
-    uint256 private constant M_CLAIM = 26;
-    uint256 private constant M_INV_POT = 28; // +27 is the openedLoans array, not a gap
+    uint256 private constant M_STATE_WORDS = 7;
+    uint256 private constant M_CLAIM = 24;
+    uint256 private constant M_INV_POT = 26; // +25 is the openedLoans array, not a gap
 
     uint256 private constant L_POOLS = uint256(Storage.LENDERS); // `pools`, member 0 of the `lenders` root: an entry is _entry(quote, _entry(lender, root))
     uint256 private constant L_ROLL_POLICY = uint256(Storage.LENDERS) + 3; // `rollPolicyOf`, member 3 of the `lenders` root
+    uint256 private constant P_REVENUE = uint256(Storage.PROTOCOL) + 1; // the revenue pots, member 1 of the `protocol` root: _entry(quote, root + 1)
     uint256 private constant UNIT_SCALE = 1 << 96; // the one price frame genesis writes into every market; a record declaring another is refused
 
     /// @notice Bind the lens to `ace`, refusing a hub that does not quote its rates per 365-day year: `rateBps` reads the field as one.
@@ -224,11 +225,17 @@ contract AceLens {
         s.drawCount = uint64(uint256(w[1]));
         s.cumulativeBackedBurns = uint256(w[2]);
         s.netSyntheticOutflow = uint256(w[3]);
-        s.protocolRevenue = uint256(w[4]);
-        s.lastSweptAt = uint64(uint256(w[5]));
-        s.unitScale = uint256(w[6]);
-        s.quoteOwedTotal = uint256(w[7]);
-        s.realizedLossAtBook = uint256(w[8]);
+        s.unitScale = uint256(w[4]);
+        s.quoteOwedTotal = uint256(w[5]);
+        s.realizedLossAtBook = uint256(w[6]);
+    }
+
+    /// @notice The protocol's revenue pot in one quote token: every market's protocol cut in it since the last `sweepRevenue(quote)`.
+    /// @dev ONE POT PER QUOTE, not per market: sum it once per token, never once per market in that token.
+    /// @param quote The token whose pot to read.
+    /// @return The quote atoms booked to the protocol in that token and not yet swept.
+    function protocolRevenue(address quote) external view returns (uint256) {
+        return _word(_entry(quote, P_REVENUE));
     }
 
     /// @notice What a loan has credited one claimant and not yet paid out; the hub's `owedOf`, off-chain.

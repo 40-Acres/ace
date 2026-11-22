@@ -272,7 +272,7 @@ contract AceMarketGateTest is WarpClock {
         vm.stopPrank();
         assertGt(unitsOut, 0, "a stranger's buyInventory ran");
 
-        ace.sweepRevenue(mid);
+        ace.sweepRevenue(address(usdc));
 
         // and the ONE door that does check still refuses the party the market never named
         vault.mint(bob, COLL);

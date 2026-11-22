@@ -5,7 +5,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 import {CuratorVaultBase} from "../curator/CuratorVaultBase.sol";
 import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
-import {BorrowRequest} from "../../src/curator/AceVaultFlows.sol";
+import {BorrowRequest} from "../../src/curator/libraries/AceVaultFlows.sol";
 import {AceVault} from "../../src/curator/AceVault.sol";
 import {Loan} from "../../src/ace/hub/Types.sol";
 

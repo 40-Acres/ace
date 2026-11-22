@@ -8,7 +8,7 @@ import {AceFixtures} from "../../utils/AceFixtures.sol";
 import {Ace} from "../../../src/ace/hub/Ace.sol";
 import {CuratedVaults} from "../../utils/CuratedVaults.sol";
 import {VaultSeed} from "../../utils/VaultSeed.sol";
-import {BorrowRequest} from "../../../src/curator/AceVaultFlows.sol";
+import {BorrowRequest} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {AceVault, VaultConfig} from "../../../src/curator/AceVault.sol";
 import {Listing, Row} from "../../../src/entities/curated/CuratorTerms.sol";
 

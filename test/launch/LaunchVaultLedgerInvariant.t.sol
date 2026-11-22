@@ -11,7 +11,7 @@ import {Ace} from "../../src/ace/hub/Ace.sol";
 import {OpenBounds} from "../../src/ace/hub/Types.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {LaunchVault} from "../../src/entities/launch/LaunchVault.sol";
-import {PriceGrid} from "../../src/curator/PriceGrid.sol";
+import {PriceGrid} from "../../src/curator/libraries/PriceGrid.sol";
 import {LaunchLock} from "../../src/entities/launch/LaunchLock.sol";
 import {LockAccount} from "../../src/entities/launch/LockAccount.sol";
 import {RunwayHook} from "../../src/entities/launch/RunwayHook.sol";

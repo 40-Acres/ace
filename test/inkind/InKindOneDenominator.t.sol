@@ -4,7 +4,7 @@ pragma solidity 0.8.36;
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {MockBlockableERC20} from "../mocks/MockBlockableERC20.sol";
-import {VaultConfig} from "../../src/curator/AceVaultFlows.sol";
+import {VaultConfig} from "../../src/curator/libraries/AceVaultFlows.sol";
 import {Listing, Quote} from "./InKindSurface.sol";
 import {InKindRig} from "./InKindRig.sol";
 

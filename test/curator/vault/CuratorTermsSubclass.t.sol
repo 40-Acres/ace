@@ -6,7 +6,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {PolicyRefused} from "../../../src/ace/hub/Borrower.sol";
 import {Loan, MarketParams} from "../../../src/ace/hub/Types.sol";
 import {AceVault} from "../../../src/curator/AceVault.sol";
-import {AceVaultFlows, BorrowRequest, Terms} from "../../../src/curator/AceVaultFlows.sol";
+import {AceVaultFlows, BorrowRequest, Terms} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {CuratorTerms, CuratorTermsConfig, Listing, Row} from "../../../src/entities/curated/CuratorTerms.sol";
 import {IAceVaultDoor} from "../../../src/interfaces/IAceVaultDoor.sol";
 import {Extension, IRollPolicy} from "../../../src/interfaces/IRollPolicy.sol";
@@ -103,7 +103,7 @@ contract CuratorProbeTerms is CuratorTerms {
 }
 
 /// @title CuratorTermsSubclassTest
-/// @notice A product can extend CuratorTerms' vault answers, and the vault asks the extension on every lending door.
+/// @notice A product can extend CuratorTerms' vault answers, and the vault asks the extension on every lending verb.
 /// @notice The reshaped pledge is the one the vault pulls and the hub holds; the gate binds a borrow, a top-up and a refinance the base would admit.
 /// @notice An extension refusal binds the holder's own extend at the hub, which reaches the product only through `admitsExtension`.
 contract CuratorTermsSubclassTest is AceVaultBaseRig {
@@ -357,7 +357,7 @@ contract CuratorTermsSubclassTest is AceVaultBaseRig {
 }
 
 /// @title CuratorTermsProbeTest
-/// @notice The vault reaches every CuratorTerms answer a product overrides: the room, the refinance draw and both write calls, on every lending door.
+/// @notice The vault reaches every CuratorTerms answer a product overrides: the room, the refinance draw and both write calls, on every lending verb.
 /// @notice Each write call is handed its door's kind, the market it lends in, the loan and the holder; the base's helpers build the base's own market.
 contract CuratorTermsProbeTest is AceVaultBaseRig {
     uint256 internal constant MIN_P = 10e6;
@@ -436,7 +436,7 @@ contract CuratorTermsProbeTest is AceVaultBaseRig {
         pt.afterLend(Lend.Borrow, mp, 0, borrower, "");
     }
 
-    /// @notice Each lending door hands `_productBeforeLend` its own kind, the market it lends in, and the loan: zero for a borrow, the loan for the rest.
+    /// @notice Each lending verb hands `_productBeforeLend` its own kind, the market it lends in, and the loan: zero for a borrow, the loan for the rest.
     function test_BeforeLendNamesEachDoor() public {
         pt.set(BORROW, 0, ALL, ALL);
         _borrowExpecting(abi.encodeWithSelector(CuratorProbeTerms.Before.selector, Lend.Borrow, _borrowMarket(), uint256(0)));
@@ -475,7 +475,7 @@ contract CuratorTermsProbeTest is AceVaultBaseRig {
         assertEq(read.loan(opened).borrower, borrower, "a borrow lands past a gate on the other two kinds");
     }
 
-    /// @notice Each lending door hands `_productAfterLend` its kind, its market, the loan it opened or kept, and the holder, once the lend has landed.
+    /// @notice Each lending verb hands `_productAfterLend` its kind, its market, the loan it opened or kept, and the holder, once the lend has landed.
     function test_AfterLendNamesEachDoorsLoanAndHolder() public {
         uint256 loanId = _loan();
         bytes32 own = ace.loanMarket(loanId);

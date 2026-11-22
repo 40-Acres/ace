@@ -102,9 +102,8 @@ contract AceLensViewsTest is WarpClock {
 
         MarketState memory ls = lens.marketState(id);
         MarketState memory rs = read.marketState(id);
-        assertEq(ls.protocolRevenue, rs.protocolRevenue, "protocolRevenue");
+        assertEq(lens.protocolRevenue(address(usdc)), read.revenuePot(address(usdc)), "protocolRevenue(quote)");
         assertEq(ls.unitScale, rs.unitScale, "unitScale");
-        assertEq(ls.lastSweptAt, rs.lastSweptAt, "lastSweptAt");
         assertEq(ls.quoteOwedTotal, rs.quoteOwedTotal, "quoteOwedTotal");
 
         (uint256 lr, uint256 ll_, uint256 lo) = lens.lenderPools(alice, address(usdc));

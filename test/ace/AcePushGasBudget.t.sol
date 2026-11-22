@@ -5,19 +5,15 @@ import {VmSafe} from "forge-std/Vm.sol";
 import {WarpClock} from "../utils/WarpClock.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {Lender} from "../../src/ace/hub/Lender.sol";
-import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
-import {RevenueRouter} from "../../src/ace/treasury/RevenueRouter.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockHookERC20} from "../mocks/MockHookERC20.sol";
 import {MockHostileGasERC20} from "../mocks/MockHostileGasERC20.sol";
 import {MockProxyERC20, MockUsdcImpl} from "../mocks/MockProxyERC20.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
-import {ProtocolPolicy} from "../../src/config/Defaults.sol";
 import {AceReader} from "../utils/AceReader.sol";
-import {DeleverageCrank} from "../utils/DeleverageCrank.sol";
 import {PushGasRig} from "../utils/PushGasRig.sol";
 
 /// @dev The calls every quote shape here answers, so one rig drives them all.
@@ -77,7 +73,7 @@ abstract contract PushGasDoorRig is WarpClock {
     uint256 internal constant FROM_ZERO_MARGIN = 20_000; // SSTORE_SET: what one credit slot emptied before inclusion can add
 
     uint8 internal constant REPAY = 0; // the closing repay
-    uint8 internal constant FINALIZE = 1; // the one door no sweep rides
+    uint8 internal constant FINALIZE = 1; // the settlement at distress
     uint8 internal constant FORCE = 2; // forceClose, the settle verb at tenor
     uint8 internal constant DOORS = 3; // how many terminal doors this rig drives; the closing crank, the fourth, is pinned in AceDeleverageClosesDust
 
@@ -87,7 +83,7 @@ abstract contract PushGasDoorRig is WarpClock {
     uint8 internal constant OTHER = 3; // reverted anything else
 
     uint8 internal constant P_DONE = 0; // completed, swept or not
-    uint8 internal constant P_SWEPT = 1; // completed with a sweep event of either kind
+    uint8 internal constant P_SWEPT = 1; // completed with a sweep event
     uint8 internal constant P_NOT_OK = 2; // anything but a sweepless completion
     uint8 internal constant P_NOT_SHORT = 3; // anything but PushGasShort
     uint8 internal constant P_DELIVERED = 4; // completed with RevenueSwept
@@ -95,7 +91,6 @@ abstract contract PushGasDoorRig is WarpClock {
     bytes32 internal constant COLLECTED_SIG = Lender.Collected.selector;
     bytes32 internal constant PUSH_FAILED_SIG = Lender.LenderPushFailed.selector;
     bytes32 internal constant SWEPT_SIG = Ace.RevenueSwept.selector;
-    bytes32 internal constant SWEEP_FAILED_SIG = Ace.RevenueSweepFailed.selector;
 
     /// @dev What one probe saw, read before the snapshot is restored.
     struct Run {
@@ -104,11 +99,9 @@ abstract contract PushGasDoorRig is WarpClock {
         uint256 collectedAmount;
         bool pushFailed;
         bool swept;
-        bool sweepFailed;
         uint256 pushCalls; // self-calls to `pushToken`: one per attempted transfer
         uint256 owed; // the lender's pool after
-        uint64 stamp; // the market's `lastSweptAt` after
-        uint256 revenue; // the market's protocol revenue after
+        uint256 revenue; // the quote's protocol revenue pot after
         bool closed;
         uint256 debt;
         uint256 used; // gas the call consumed, from outside
@@ -211,12 +204,11 @@ abstract contract PushGasDoorRig is WarpClock {
 
     /// @dev The outcome and the ledger after the call, read before the snapshot is restored.
     function _classify(Run memory r, bool ok, bytes memory ret, uint256 loanId) internal view {
-        if (ok) r.out = (r.swept || r.sweepFailed) ? OK_SWEPT : OK;
+        if (ok) r.out = r.swept ? OK_SWEPT : OK;
         else r.out = ret.length >= 4 && bytes4(ret) == PushGasRig.shortSelector() ? SHORT : OTHER;
         r.ret = ret;
         r.owed = _owed();
-        r.stamp = read.marketState(mid).lastSweptAt;
-        r.revenue = read.protocolRevenue(mid);
+        r.revenue = read.revenuePot(quote);
         r.closed = read.loan(loanId).closedAt != 0;
         r.debt = read.debtOf(loanId);
     }
@@ -228,7 +220,6 @@ abstract contract PushGasDoorRig is WarpClock {
             if (t == COLLECTED_SIG) (r.collected, r.collectedAmount) = (true, abi.decode(logs[i].data, (uint256)));
             if (t == PUSH_FAILED_SIG) r.pushFailed = true;
             if (t == SWEPT_SIG) r.swept = true;
-            if (t == SWEEP_FAILED_SIG) r.sweepFailed = true;
         }
     }
 
@@ -333,93 +324,25 @@ contract AcePushGasBudgetTest is PushGasDoorRig {
         }
     }
 
-    /* ============ THE SWEEP: best-effort, gated before its stamp, and run after the lender push ============ */
+    /* ============ THE SWEEP: no close sweeps, and the standalone door is strict and uncapped ============ */
 
-    /// @notice A SWEEP BURNING ITS WHOLE BUDGET NEVER STARVES THE LENDER PUSH: it runs after it, and at its gate both land.
-    /// @dev PINS `SWEEP_TAIL`: short of it, the gate admits a burning sweep whose own fallback then runs dry and reverts the close.
-    /// @dev A treasury-only burn keeps the lender's push honest, so the row is about the sweep's cost alone.
-    function test_Sweep_ABudgetBurningSweepNeverStarvesTheLenderPush() public {
+    /// @notice forceClose PAYS THE LENDER AND SWEEPS NOTHING: `Collected` fires, no `RevenueSwept`, and the treasury and the pot are unchanged.
+    /// @dev Under a fat limit, where a sweep riding the close would have run; the protocol's cut waits in its quote's pot for `sweepRevenue`.
+    function test_ForceClose_PaysTheLenderAndSweepsNothing() public {
         (uint256 id, address who, bytes memory data) = _door(FORCE);
-        usdc.setBurnOnlyTo(treasury);
-        usdc.setBurnAll(true);
-        uint256 okSwept = _least(who, data, id, LO, HI, P_SWEPT);
-        uint256 plain = _down(who, data, id, okSwept, 5_000, OK);
-        uint256 admit = _least(who, data, id, plain, okSwept, P_NOT_OK);
-        assertEq(admit, okSwept, "the gate admitted a sweep whose own fallback could not then complete: SWEEP_TAIL is short");
-        Run memory r = _run(who, data, admit, id);
-        assertTrue(r.sweepFailed, "the burning sweep took its fallback");
-        assertEq(r.revenue, read.protocolRevenue(mid), "and restored the revenue whole");
-        assertTrue(r.collected, "and the lender push in front of it paid");
-        assertEq(r.owed, 0, "the whole pool");
-        assertEq(r.pushCalls, 2, "two transfers attempted, one each");
-    }
-
-    /// @notice NO REVERT BAND BETWEEN THE LENDER-ONLY THRESHOLD AND THE LENDER-PLUS-SWEEP ONE, stepped down across the gap.
-    /// @dev Every limit from the least completing one up past the sweep's gate completes, sweeping or not.
-    /// @dev The sweep follows the push, so a band could only come from a gate admitting a sweep its own tail cannot finish.
-    function test_Sweep_NoRevertBandBetweenTheLenderAndTheSweepThresholds() public {
-        (uint256 id, address who, bytes memory data) = _door(FORCE);
-        usdc.setBurnOnlyTo(treasury);
-        usdc.setBurnAll(true);
-        uint256 okSwept = _least(who, data, id, LO, HI, P_SWEPT);
-        uint256 plain = _down(who, data, id, okSwept, 5_000, OK);
-        uint256 gStar = _least(who, data, id, LO, plain, P_DONE);
-        emit log_named_uint("forceClose completes from (lender push only)", gStar);
-        emit log_named_uint("and sweeps from (lender push plus sweep)    ", okSwept);
-        for (uint256 x = okSwept + 5_000; x >= gStar; x -= 1_000) {
-            assertTrue(_holds(_run(who, data, x, id), P_DONE), "a revert band sits between the two thresholds");
-        }
-        for (uint256 x = okSwept - 1_500; x <= okSwept + 1_500; x += 50) {
-            assertTrue(_holds(_run(who, data, x, id), P_DONE), "a revert band sits at the sweep's gate");
-        }
-    }
-
-    /// @notice forceClose PAYS THE LENDER BEFORE IT SWEEPS: the strict push runs first, the best-effort sweep spends what is left.
-    /// @dev So no sweep, however it behaves, can starve the push in front of it, and the sweep needs no reserve to leave behind.
-    /// @dev Read off the hub's own log order under a fat limit, where both legs run: `Collected` precedes `RevenueSwept`.
-    function test_ForceClose_PaysTheLenderBeforeItSweeps() public {
-        (uint256 id, address who, bytes memory data) = _door(FORCE);
+        uint256 banked = read.revenuePot(quote);
+        assertGt(banked, 0, "premise: origination banked revenue a riding sweep could have moved");
+        uint256 had = IRigQuote(quote).balanceOf(treasury);
         vm.recordLogs();
         vm.prank(who);
         (bool ok,) = address(ace).call{gas: HI}(data);
         assertTrue(ok, "premise: the close landed");
-        VmSafe.Log[] memory logs = vm.getRecordedLogs();
-        uint256 paidAt = type(uint256).max;
-        uint256 sweptAt = type(uint256).max;
-        for (uint256 i; i < logs.length; i++) {
-            if (logs[i].emitter != address(ace) || logs[i].topics.length == 0) continue;
-            if (logs[i].topics[0] == COLLECTED_SIG) paidAt = i;
-            if (logs[i].topics[0] == SWEPT_SIG || logs[i].topics[0] == SWEEP_FAILED_SIG) sweptAt = i;
-        }
-        assertTrue(paidAt != type(uint256).max && sweptAt != type(uint256).max, "premise: both legs ran");
-        assertLt(paidAt, sweptAt, "the sweep ran ahead of the lender push, so a sweep could still starve it");
-    }
-
-    /// @notice A STARVED SWEEP WRITES NOTHING: no event, no stamp, the counter stays, and a later funded sweep delivers.
-    /// @dev At forceClose's least limit the sweep is due and cannot be funded; skipping it must not spend the period.
-    function test_Sweep_AStarvedSweepSkipsWritesNoStampStaysDue() public {
-        (uint256 id, address who, bytes memory data) = _door(FORCE);
-        uint64 stamp = read.marketState(mid).lastSweptAt;
-        uint256 banked = read.protocolRevenue(mid);
-        assertGt(banked, 0, "premise: origination banked revenue to sweep");
-        assertGe(_now(), stamp + 1 days, "premise: the piggyback is due");
-        uint256 g = _least(who, data, id, LO, HI, P_DONE);
-
-        vm.recordLogs();
-        vm.prank(who);
-        (bool ok,) = address(ace).call{gas: g}(data);
-        assertTrue(ok, "the close landed at its least limit");
         Run memory seen;
         _readLogs(seen, vm.getRecordedLogs());
-        assertFalse(seen.swept || seen.sweepFailed, "a starved sweep emitted a revenue event");
-        assertTrue(seen.collected, "while the lender push paid");
-        assertEq(read.marketState(mid).lastSweptAt, stamp, "and stamped a period it never swept");
-        assertEq(read.protocolRevenue(mid), banked, "and moved the counter");
-
-        uint256 had = IRigQuote(quote).balanceOf(treasury);
-        ace.sweepRevenue(mid);
-        assertEq(IRigQuote(quote).balanceOf(treasury) - had, banked, "a later funded sweep delivers every wei");
-        assertEq(read.protocolRevenue(mid), 0, "and empties the counter");
+        assertTrue(seen.collected, "the lender push paid");
+        assertFalse(seen.swept, "and the close emitted RevenueSwept");
+        assertEq(IRigQuote(quote).balanceOf(treasury), had, "the treasury gained nothing from the close");
+        assertEq(read.revenuePot(quote), banked, "and the pot kept every atom");
     }
 
     /// @notice STANDALONE `sweepRevenue` IS STRICT AND UNCAPPED: the transfer takes the caller's gas, and under its need the call REVERTS.
@@ -427,9 +350,9 @@ contract AcePushGasBudgetTest is PushGasDoorRig {
     /// @dev Its two early returns stay free: with nothing banked it demands nothing at all.
     function test_SweepRevenue_UnderItsLeastLimitTheStrictSweepRevertsNotSkips() public {
         uint256 id = _open(TEN30);
-        uint256 banked = read.protocolRevenue(mid);
+        uint256 banked = read.revenuePot(quote);
         assertGt(banked, 0, "premise: revenue to sweep");
-        bytes memory data = abi.encodeCall(Ace.sweepRevenue, (mid));
+        bytes memory data = abi.encodeCall(Ace.sweepRevenue, (quote));
         uint256 g = _least(keeper, data, id, 1_000, HI, P_DELIVERED);
         Run memory under = _run(keeper, data, g - 1, id);
         assertEq(under.out, OTHER, "one gas under the least delivering limit reverts, and never as PushGasShort");
@@ -437,13 +360,13 @@ contract AcePushGasBudgetTest is PushGasDoorRig {
         assertEq(under.revenue, banked, "and nothing moved");
         Run memory at = _run(keeper, data, g, id);
         assertTrue(at.swept, "the least limit delivers");
-        assertEq(at.revenue, 0, "the whole counter");
+        assertEq(at.revenue, 0, "the whole pot");
 
-        ace.sweepRevenue(mid);
-        assertEq(read.protocolRevenue(mid), 0, "premise: nothing left to sweep");
+        ace.sweepRevenue(quote);
+        assertEq(read.revenuePot(quote), 0, "premise: nothing left to sweep");
         vm.prank(keeper);
         (bool ok,) = address(ace).call{gas: LO}(data);
-        assertTrue(ok, "an empty sweep demands no budget: it returns before the gate");
+        assertTrue(ok, "an empty sweep demands no budget: it returns before the transfer");
     }
 
     /* ============ THE CAP: a hostile quote burns at most the budget per push ============ */
@@ -459,10 +382,10 @@ contract AcePushGasBudgetTest is PushGasDoorRig {
         assertGe(one, (budget * 9) / 10, "and the push was really handed the budget");
 
         (uint256 b, address w2, bytes memory force) = _door(FORCE);
-        uint256 two = _burnOverRefusal(w2, force, b);
-        emit log_named_uint("forceClose: a full burn over a refusal (sweep and push)", two);
-        assertLe(two, 2 * budget, "the two pushes spent more than two budgets");
-        assertGe(two, (2 * budget * 9) / 10, "and both were really handed a budget");
+        uint256 fc = _burnOverRefusal(w2, force, b);
+        emit log_named_uint("forceClose: a full burn over a refusal (one push, no sweep)", fc);
+        assertLe(fc, budget, "a burning quote spent more than the budget on forceClose's one push");
+        assertGe(fc, (budget * 9) / 10, "and the push was really handed the budget");
     }
 
     function _burnOverRefusal(address who, bytes memory data, uint256 id) internal returns (uint256) {
@@ -510,7 +433,6 @@ contract AcePushGasBudgetTest is PushGasDoorRig {
         assertEq(PushGasRig.pushGasOf(Ace(h)), max, "the ceiling constructs and publishes itself");
         assertEq(PushGasRig.pushGasOf(ace), PushGasRig.PUSH_GAS, "and the fixture hub runs the fixture budget");
         assertGe(ace.PUSH_FLOOR(), (ace.PUSH_GAS() * 64) / 63, "the published push floor leaves the callee less than its budget");
-        assertGt(ace.SWEEP_FLOOR(), ace.PUSH_FLOOR(), "the sweep's floor does not sit over the push's, so a close at its estimate could sweep");
     }
 
     /// @notice THE PUBLISHED FLOOR IS THE DEMAND, AND IT ROUNDS UP BY ONE GAS where 64/63 has a remainder.
@@ -636,13 +558,12 @@ contract AcePushGasShapesTest is PushGasDoorRig {
     }
 
     /// @notice AT EVERY DOOR'S LEAST LIMIT THE LENDER IS PAID, on both shapes: one push, `Collected`, the pool empty.
-    /// @dev forceClose's due sweep is skipped there, stamp and counter untouched: the least limit funds the lender alone.
+    /// @dev No close sweeps, so forceClose's least limit funds the lender alone and leaves the quote's pot untouched.
     function test_Estimate_EveryDoorPushesAtItsLeastLimit() public {
         for (uint8 shape; shape < 2; shape++) {
             for (uint8 door; door < DOORS; door++) {
                 (uint256 id, address who, bytes memory data) = _door(door);
-                uint64 stamp = read.marketState(mid).lastSweptAt;
-                uint256 banked = read.protocolRevenue(mid);
+                uint256 banked = read.revenuePot(quote);
                 uint256 g = _least(who, data, id, LO, HI, P_DONE);
                 Run memory r = _run(who, data, g, id);
                 string memory tag = string.concat(shape == 0 ? "usdc shape " : "plain erc20 ", _name(door));
@@ -653,8 +574,7 @@ contract AcePushGasShapesTest is PushGasDoorRig {
                 assertEq(r.pushCalls, 1, "one transfer, the lender's");
                 assertTrue(r.closed, "and the loan closed");
                 if (door == FORCE) {
-                    assertEq(r.stamp, stamp, "a skipped sweep stamped a period");
-                    assertEq(r.revenue, banked, "or moved the counter");
+                    assertEq(r.revenue, banked, "the close moved the revenue pot");
                 }
             }
             _swap();
@@ -732,116 +652,5 @@ contract AcePushGasHookTest is PushGasDoorRig {
         _hook().setCost(20_000);
         Run memory cheap = _run(who, data, HI, id);
         assertTrue(cheap.collected, "a hook inside the budget is paid");
-    }
-}
-
-/// @title AcePushGasRouter
-/// @notice THE TREASURY IS A ROUTER WHOSE BALANCE EMPTIES ON EVERY SWEEP OF ITS OWN, so a front-run can raise the sweep's cost.
-contract AcePushGasRouterTest is PushGasDoorRig {
-    function _newQuote() internal override returns (address) {
-        return address(new MockERC20("USD Coin", "USDC", 6));
-    }
-
-    function _treasury() internal override returns (address) {
-        return address(new RevenueRouter(address(0xAD), address(0x5117)));
-    }
-
-    /// @notice A ROUTER SWEEP FRONT-RUNNING forceClose CANNOT REVERT IT OR STARVE EITHER LEG: at the least sweeping limit both land.
-    /// @dev The estimate paid a funded router; inclusion pays an emptied one, a from-zero write dearer INSIDE the sweep's budget.
-    /// @dev The lender push runs first and the router is only the sweep's callee, so the drift never reaches the lender's pre-check.
-    function test_Drift_ARouterSweepFrontRunCannotStarveForceCloseLenderPush() public {
-        _open(TEN30);
-        ace.sweepRevenue(mid);
-        assertGt(IRigQuote(quote).balanceOf(treasury), 0, "premise: the router holds revenue");
-        (uint256 id, address who, bytes memory data) = _door(FORCE);
-        assertGt(read.protocolRevenue(mid), 0, "premise: fresh revenue is due");
-        uint256 s = _least(who, data, id, LO, HI, P_DELIVERED);
-
-        address[] memory t = new address[](1);
-        t[0] = quote;
-        RevenueRouter(treasury).sweep(t);
-        assertEq(IRigQuote(quote).balanceOf(treasury), 0, "premise: the front-run emptied the router");
-        Run memory r = _run(who, data, s, id);
-        assertEq(r.out, OK_SWEPT, "the front-run reverted the close at its estimate");
-        assertTrue(r.swept, "or starved the sweep");
-        assertTrue(r.collected, "or the lender push in front of it");
-        assertEq(r.owed, 0, "the whole pool");
-    }
-}
-
-/// @title AcePushGasDeleverage
-/// @notice `deleverage`'s trailing sweep: best-effort, gated on the same budget, and never a reason for the crank to revert.
-contract AcePushGasDeleverageTest is PushGasDoorRig, DeleverageCrank {
-    uint16 internal constant BAND_BPS = 3000;
-
-    function _newQuote() internal override returns (address) {
-        return address(new MockERC20("USD Coin", "USDC", 6));
-    }
-
-    function _treasury() internal override returns (address) {
-        return address(new RevenueRouter(address(0xAD), address(0x5117)));
-    }
-
-    function _deleverageQuote() internal view override returns (address) {
-        return quote;
-    }
-
-    function _params(MarketParams memory p) internal pure override {
-        p.deleverageFloorEpsBps = ProtocolPolicy.DELEVERAGE_FLOOR_EPS_BPS;
-        p.deleverageBandBps = BAND_BPS;
-        p.deleverageTargetBps = 4000;
-        p.deleverageStopBps = 1;
-    }
-
-    function setUp() public override {
-        super.setUp();
-        record.setMinPrice(AceFixtures.px(2e18, quote, address(coll)));
-    }
-
-    /// @dev The record told the band is broken at the loan's CURRENT trigger, and the crank's calldata.
-    function _crankData(uint256 id) internal returns (bytes memory) {
-        uint256 trig = read.triggerPrice(id);
-        record.setBelowBand(FullMath.mulDivRoundingUp(trig, 1e18, 1e18 - uint256(BAND_BPS) * 1e14));
-        record.setMinPrice(trig + trig / 20);
-        return abi.encodeCall(Ace.deleverage, (id, 0, ""));
-    }
-
-    /// @notice A DUE SWEEP RIDES A FUNDED CRANK AND IS SKIPPED BY A STARVED ONE, and the starved crank still lands.
-    function test_Deleverage_ADueSweepRidesAFundedCrankAndSkipsAStarvedOne() public {
-        uint256 id = _open(0);
-        _warpBy(1 days);
-        bytes memory data = _crankData(id);
-        uint64 stamp = read.marketState(mid).lastSweptAt;
-        uint256 banked = read.protocolRevenue(mid);
-        uint256 debt = read.debtOf(id);
-        assertGt(banked, 0, "premise: revenue is due");
-        uint256 g = _least(address(this), data, id, LO, HI, P_DONE);
-        Run memory starved = _run(address(this), data, g, id);
-        assertEq(starved.out, OK, "the least crank emitted a sweep event");
-        assertLt(starved.debt, debt, "premise: the crank sold");
-        assertEq(starved.stamp, stamp, "a skipped sweep stamped a period");
-        assertEq(starved.revenue, banked, "or moved the counter");
-        Run memory funded = _run(address(this), data, HI, id);
-        assertTrue(funded.swept, "a funded crank did not sweep what was due");
-        assertEq(funded.revenue, 0, "the whole counter");
-    }
-
-    /// @notice A ROUTER SWEEP FRONT-RUNNING A CRANK CANNOT REVERT IT, and the sweep still delivers at the estimate.
-    function test_Drift_ARouterSweepFrontRunCannotRevertDeleverage() public {
-        uint256 id = _open(0);
-        ace.sweepRevenue(mid);
-        assertGt(IRigQuote(quote).balanceOf(treasury), 0, "premise: the router holds revenue");
-        _open(0); // a second draw banks fresh revenue
-        _warpBy(1 days);
-        bytes memory data = _crankData(id);
-        uint256 s = _least(address(this), data, id, LO, HI, P_DELIVERED);
-
-        address[] memory t = new address[](1);
-        t[0] = quote;
-        RevenueRouter(treasury).sweep(t);
-        assertEq(IRigQuote(quote).balanceOf(treasury), 0, "premise: the front-run emptied the router");
-        Run memory r = _run(address(this), data, s, id);
-        assertEq(r.out, OK_SWEPT, "the front-run reverted the crank at its estimate");
-        assertTrue(r.swept, "or starved the sweep");
     }
 }

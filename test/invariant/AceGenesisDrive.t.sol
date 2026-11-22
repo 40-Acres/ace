@@ -90,7 +90,7 @@ contract AceGenesisDriveTest is StdInvariant, Test {
         for (uint256 t; t < 3; t++) {
             address tok = address(handler.quoteTokens(t));
             assertEq(
-                MockERC20(tok).balanceOf(address(ace)), _bookedQuote(tok), "solvency: hub balance != cash + protocolRevenue + unitOwed + quoteOwed + feeEscrows"
+                MockERC20(tok).balanceOf(address(ace)), _bookedQuote(tok), "solvency: hub balance != cash + unitOwed + quoteOwed + feeEscrows + the revenue pot"
             );
         }
     }
@@ -117,7 +117,8 @@ contract AceGenesisDriveTest is StdInvariant, Test {
         /// @dev `totalLent` and `unitOwed` left `MarketState` for the (lender, quote) pool, which spans
         /// @dev a lender's markets -- so neither is a per-market witness any more. The canary's loan
         /// @dev count below is the sharper statement of the same thing: nothing lent here at all.
-        assertEq(s.protocolRevenue + s.quoteOwedTotal, 0, "CANARY: a pot filled in an unaddressed market");
+        /// @dev Protocol revenue left too, for a per-quote pot the canary shares with every market in its quote.
+        assertEq(s.quoteOwedTotal, 0, "CANARY: a pot filled in an unaddressed market");
         assertEq(s.cumulativeBackedBurns + s.netSyntheticOutflow, 0, "CANARY: the synthetic ledger moved in an unaddressed market");
         assertEq(ace.marketLoansLength(m), 0, "CANARY: a loan opened in a market no action ever named");
     }

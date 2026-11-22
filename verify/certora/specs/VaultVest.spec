@@ -2,7 +2,7 @@
 // and the pile's two other writes, the burn on a NAV fall and the last requester's release, each at its own line.
 //
 // THE LEMMA UNDER VaultArithmetic.spec's TWO PARAMETRIC VEST RULES. The vault assigns `vestMaturity` at exactly one site,
-// `_stampVest`, which `_sync` reaches on a NAV rise; `grep -rn vestMaturity src` shows every other hit is a read.
+// `AceVaultNav.stampVest`, which `_sync` reaches on a NAV rise; `grep -rn vestMaturity src` shows every other hit is a read.
 // That grep is the composition's evidence, since a storage hook fails the vault's storage analysis under via-IR. So a bound
 // proved here, from every start and for every amount, holds across every verb by that written step, with no per-verb run.
 //
@@ -92,7 +92,7 @@ rule aStampReadsBackExactlyItsRise(env e, uint256 amount) {
 }
 
 // THE IDENTITY UNDER THE READ-BACK, on its own and with no contract in it: a basis floored over r seconds left of a W-second
-// window, read back ceiled over the same r, is exactly what was grossed. The rule above composes it with `_grossed`'s maturity.
+// window, read back ceiled over the same r, is exactly what was grossed. The rule above composes it with `AceVaultNav.grossed`'s maturity.
 rule theFlooredBasisReadsBackExactly(uint256 x, uint64 w, uint64 r) {
     require x > 0 && w > 0 && r > 0 && r <= w;
     mathint b = (x * w) / r;
@@ -112,7 +112,7 @@ rule aStampNeverLowersNav(env e, uint256 amount) {
 
 // ---- the vest's two other writes: the burn on a NAV fall, and the last requester's release ----
 
-// THE BURN, `_burnVest`, the sync's write on a fall of `d`: it rescales the basis by (u - d) / u, FLOORED, where u is the pile
+// THE BURN, `AceVaultNav.burnVest`, the sync's write on a fall of `d`: it rescales the basis by (u - d) / u, FLOORED, where u is the pile
 // read now. So the pile then reads at most u - d, none once d reaches u: the fall burns the pile first and NAV does not move
 // under it. And it reads at least u - d - 1: the floor and the ceiled read release at most one wei of the pile into NAV.
 // The maturity is untouched, so the burn moves no vest time. With r = maturity - now in (0, W] and x = basis * r / W, u is
@@ -172,7 +172,7 @@ rule aBurnCanShrinkAPile(env e, uint256 d) {
     satisfy to_mathint(unvested(e)) < u && unvested(e) > 0;
 }
 
-// THE RELEASE, `_release(g)`, the last requester's write: the whole pile vests at once and the mark takes the gross the sync
+// THE RELEASE, `AceVaultNav.release(g)`, the last requester's write: the whole pile vests at once and the mark takes the gross the sync
 // read, so nothing deferred is left for a claim to leave behind.
 rule aReleaseZeroesThePile(env e, uint256 g) {
     aWindowAhead(e);

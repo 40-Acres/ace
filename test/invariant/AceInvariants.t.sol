@@ -226,7 +226,7 @@ contract AceInvariantsTest is StdInvariant, Test {
             /// @dev both moved to the (lender, quote) pool, which a canary shares with nothing because its
             /// @dev lender is its own. `marketLoansLength == 0` below is the sharper witness for the first,
             /// @dev and `_invariant_lentIsTheClaimBook` holds the pool leg at the granularity it lives at.
-            assertEq(s.protocolRevenue, 0, "canary: it banked a fee for a draw it never funded");
+            /// @dev Protocol revenue is not checked either: it pools per quote, which the canary shares with the markets beside it.
             assertEq(s.quoteOwedTotal, 0, "canary: quote credited to a claimant it never had");
             assertEq(s.cumulativeBackedBurns, 0, "canary: a backed burn in a market that settled nothing");
             assertEq(s.netSyntheticOutflow, 0, "canary: synthetic left a market that issued none");
@@ -793,36 +793,31 @@ contract AceInvariantsTest is StdInvariant, Test {
     /// @dev The ask has no funder parameter -- the buyer IS msg.sender, so nothing is left to refuse.
     /// @dev It succeeded `invariant_onlyTheVenueMayFill`, which retired the same way with the venue.
 
-    // ---- 7. Revenue routing: two disjoint pots, one exit each ----
+    // ---- 7. Revenue routing: one pot per quote token, one exit ----
 
-    uint256[6] private _lastRevenueOf; // per market over `allMarketAt`'s index space, CANARIES INCLUDED
+    mapping(address => uint256) private _lastRevenueOf; // per QUOTE TOKEN: the one revenue pot each
     mapping(address => uint256) private _lastTreasuryOf; // per QUOTE TOKEN: one treasury balance each
 
-    /// @notice protocolRevenue may only ever fall into the treasury, never be clawed back out of it.
-    /// @notice ONE pot, ONE exit, against the shipped TREASURY (AceFixtures.TREASURY).
+    /// @notice A quote's revenue pot only rises, or falls to EXACTLY zero by a sweep whose whole amount the treasury gained.
+    /// @notice ONE pot per quote, ONE exit, against the shipped TREASURY (AceFixtures.TREASURY).
     /// @dev Treasury monotonicity is armed every call: no fuzzed action may pay the treasury back out.
-    /// @dev Conservation arms when a pot falls, pinning that the treasury took at least that much.
-    /// @dev THE TWO GHOSTS SIT AT DIFFERENT SCOPES: `protocolRevenue` is per MARKET, the treasury per TOKEN.
-    /// @dev THE ONE LATCHING PROPERTY, so it runs ONCE PER STEP and never inside a per-market loop.
-    /// @dev Looped, one market's call advances the treasury latch and the next reddens on correct behaviour.
-    /// @dev DROPS ARE SUMMED, never levels differenced, so an accrual cannot net off a sweep elsewhere.
-    /// @dev CANARIES ARE IN THE WALK: one that banks and loses revenue in an action shows zero at both ends.
+    /// @dev Conservation arms when a pot falls, pinning that it fell to zero and the treasury took exactly what it held.
+    /// @dev THE POT IS READ ONCE PER TOKEN, never inside a per-market loop: every market in the quote shares it.
+    /// @dev THE ONE LATCHING PROPERTY, so it runs ONCE PER STEP.
+    /// @dev No handler action both accrues and sweeps, so a fall is one whole sweep and the treasury's gain equals it.
     function _invariant_revenueOnlyLeavesViaTheSweep() public {
         address[2] memory toks = [address(usdc), address(handler.dai())];
         for (uint256 t; t < toks.length; t++) {
-            uint256 tre = MockERC20(toks[t]).balanceOf(TREASURY);
-            assertGe(tre, _lastTreasuryOf[toks[t]], "REVENUE: the treasury balance fell -- nothing may claw it back");
-            uint256 dropped;
-            for (uint256 i; i < handler.allMarketCount(); i++) {
-                if (handler.quoteOf(i) != toks[t]) continue;
-                uint256 rev = read.marketState(handler.allMarketAt(i)).protocolRevenue;
-                if (rev < _lastRevenueOf[i]) dropped += _lastRevenueOf[i] - rev;
-                _lastRevenueOf[i] = rev;
+            address q = toks[t];
+            uint256 tre = MockERC20(q).balanceOf(TREASURY);
+            assertGe(tre, _lastTreasuryOf[q], "REVENUE: the treasury balance fell -- nothing may claw it back");
+            uint256 rev = read.revenuePot(q);
+            if (rev < _lastRevenueOf[q]) {
+                assertEq(rev, 0, "REVENUE: the pot fell but not to zero: only a whole sweep may lower it");
+                assertEq(tre - _lastTreasuryOf[q], _lastRevenueOf[q], "REVENUE: the pot fell by other than the treasury's gain");
             }
-            if (dropped != 0) {
-                assertGe(tre - _lastTreasuryOf[toks[t]], dropped, "REVENUE: protocolRevenue fell further than the treasury was paid");
-            }
-            _lastTreasuryOf[toks[t]] = tre;
+            _lastRevenueOf[q] = rev;
+            _lastTreasuryOf[q] = tre;
         }
     }
 
@@ -842,7 +837,8 @@ contract AceInvariantsTest is StdInvariant, Test {
             assertGt(s.unitScale, 0, "GENESIS: a created market carries no unit scale");
             /// @dev The pooled legs are gone from `MarketState`, so a stranger market's whole footprint is
             /// @dev what it books itself -- and a stranger has no lender pool of its own to inspect either.
-            assertEq(s.cash + s.protocolRevenue + s.quoteOwedTotal, 0, "GENESIS: a market no action ever addressed acquired a balance");
+            /// @dev Protocol revenue left `MarketState` for a per-quote pot every market in the quote shares, so it is not a stranger's own.
+            assertEq(s.cash + s.quoteOwedTotal, 0, "GENESIS: a market no action ever addressed acquired a balance");
         }
     }
 
@@ -943,13 +939,13 @@ contract AceInvariantsTest is StdInvariant, Test {
 
     // ---- 8. Deterministic coverage proofs: the invariants above are not asserting over dead state ----
 
-    /// @notice The WHOLE protocol fee stays in the hub and lands in `protocolRevenue`.
+    /// @notice The WHOLE protocol fee stays in the hub and lands in the quote's revenue pot.
     /// @dev Replaces `test_Coverage_BribeCarveLeavesTheHub`, which pinned an origination carve pushed OUT to a sink; both died with the carve.
     /// @dev Deleting that invariant beat keeping it: a sink that never receives trivially never falls, so it would have gone VACUOUS, not red.
     function test_Coverage_WholeProtocolFeeStaysInTheHub() public {
-        uint256 revenueBefore = read.marketState(mid).protocolRevenue;
+        uint256 revenueBefore = read.revenuePot(address(usdc));
         handler.open(0, 0, 4_000e6);
-        assertGt(read.marketState(mid).protocolRevenue - revenueBefore, 0, "the origination fee accrued to revenue");
+        assertGt(read.revenuePot(address(usdc)) - revenueBefore, 0, "the origination fee accrued to revenue");
         assertEq(usdc.balanceOf(address(ace)), _bookedQuote(), "and every wei of it is still booked in the hub");
         assertGt(handler.loansOpened(), 0, "the coverage open really opened a loan");
     }
@@ -1333,23 +1329,22 @@ contract AceInvariantsTest is StdInvariant, Test {
 
     // DELETED with the token: `test_Coverage_AMoveWithAccrualOnBothEndsIsMeasured` drove unit transfers, and there is no move
 
-    /// @notice Origination banks a protocol cut, and a FUZZED crank -- never a direct sweepRevenue -- delivers it to the treasury.
-    function test_Coverage_RevenueReachesTreasuryViaCrank() public {
+    /// @notice Origination banks a protocol cut, and the handler's own per-quote `sweepRevenue` action delivers the whole pot to the treasury.
+    /// @dev No keeper verb sweeps any more, so the direct sweep is the one delivery the campaign drives; this row keeps it reachable.
+    function test_Coverage_RevenueReachesTreasuryViaTheSweepAction() public {
         uint256 nBefore = handler.loanIds().length;
         handler.open(0, 0, 4_000e6);
-        assertEq(handler.loanIds().length, nBefore + 1, "PREMISE: the open landed, so the last id is the loan it opened");
-        uint256 fresh = nBefore; // the loan just opened: every ctor loan has matured, and a matured loan refuses the crank
-        assertGt(read.protocolRevenue(mid), 0, "origination banked a protocol cut");
-        // a DELTA, not a zero: the ctor baseline settles a loan, and the warp it needs clears SWEEP_PERIOD and pays the treasury
-        uint256 paidBefore = usdc.balanceOf(TREASURY);
+        assertEq(handler.loanIds().length, nBefore + 1, "PREMISE: the open landed");
+        uint256 pot = read.revenuePot(address(usdc));
+        assertGt(pot, 0, "origination banked a protocol cut");
+        uint256 paidBefore = usdc.balanceOf(TREASURY); // a DELTA, not a zero: the treasury's history is the baseline's, not this row's
+        uint256 landedBefore = handler.sweepsLandedOf(address(usdc));
 
-        handler.setRate(1.2e18); // real reward growth over the baseline, so the crank really fires
-        handler.warp(Constants.SWEEP_PERIOD + 1); // clears SWEEP_PERIOD and stays inside every tenor, so the crank is admitted and may push
-        handler.deleverage(fresh);
+        handler.sweepRevenue(0); // an even seed picks the usdc quote
 
-        assertGt(usdc.balanceOf(TREASURY), paidBefore, "a fuzzed crank delivered revenue to the treasury");
-        assertEq(read.protocolRevenue(mid), 0, "and cleared the counter it swept");
-        assertEq(handler.callCount("deleverage"), 1, "the delivery really came through the deleverage action");
+        assertEq(usdc.balanceOf(TREASURY) - paidBefore, pot, "the sweep action paid the treasury the quote's whole pot");
+        assertEq(read.revenuePot(address(usdc)), 0, "and the pot fell to exactly zero");
+        assertEq(handler.sweepsLandedOf(address(usdc)), landedBefore + 1, "the delivery really came through the sweep action");
     }
 
     /// @notice A refinance really closes and reopens: the old loan retires and a fresh one funds.

@@ -5,7 +5,7 @@ import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {MockStakeVault} from "../../mocks/MockStakeVault.sol";
 import {MockPersistenceRecord} from "../../mocks/MockPersistenceRecord.sol";
 import {AceVault} from "../../../src/curator/AceVault.sol";
-import {AceVaultFlows, Terms} from "../../../src/curator/AceVaultFlows.sol";
+import {AceVaultFlows, Terms} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {IAceVaultDoor} from "../../../src/interfaces/IAceVaultDoor.sol";
 import {AceVaultDoorRig} from "../vault/AceVaultDoorRig.sol";
 

@@ -68,13 +68,13 @@ contract AceDrawMoreTest is DrawMoreRig {
         uint256 e0 = read.feeEscrowOf(loanId);
         uint256 r0 = _unearned(loanId, e0); // exact here: no draw has re-anchored this loan yet
         uint256 bal0 = usdc.balanceOf(borrower);
-        uint256 rev0 = read.protocolRevenue(id);
+        uint256 rev0 = read.revenuePot(address(usdc));
         (,, uint256 owed0) = read.poolOf(id);
         vm.prank(borrower);
         uint256 got = hub.drawMore(loanId, A, _none());
         assertEq(got, fee, "the verb returns the fee on the term left");
         assertEq(usdc.balanceOf(borrower), bal0 + A - fee, "the holder took the amount less the fee");
-        assertEq(read.protocolRevenue(id), rev0 + LoanMath.protocolCut(fee), "the protocol cut is revenue");
+        assertEq(read.revenuePot(address(usdc)), rev0 + LoanMath.protocolCut(fee), "the protocol cut is revenue");
         (,, uint256 owed1) = read.poolOf(id);
         assertEq(owed1, owed0 + (e0 - r0) + LoanMath.tickCut(fee), "owed takes the earned old escrow and the tick cut");
         assertEq(read.feeEscrowOf(loanId), r0 + LoanMath.escrowCut(fee), "the escrow keeps the unearned old part and the new escrow cut");

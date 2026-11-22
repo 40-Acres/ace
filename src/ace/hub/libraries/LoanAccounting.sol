@@ -105,11 +105,11 @@ library LoanAccounting {
 
     /* ========== 2. ESCROW: what the term earned, and what it refunds ========== */
 
-    /// @dev The whole protocol fee accrues; there is no carve.
+    /// @dev The whole protocol fee accrues to the pot of the market's quote, which every market in that quote shares; there is no carve.
     /// @dev Named rather than inlined despite one `+=`: the solvency identity needs ONE audit point for revenue entering.
-    /// @dev NOTHING bypasses it: this `+=` is the only accrual to the pot; the sweep's catch only restores what it cleared.
+    /// @dev NOTHING bypasses it: this `+=` is the only accrual to the pot, and the sweep's clear its only other write.
     function accrueProtocolFee(Market storage M, uint256 amount) internal {
-        M.s.protocolRevenue += amount;
+        Storage.revenue()[M.p.quote] += amount;
     }
 
     /// @dev The units a disposal may size against: the debt-securing portion, less what settlement must keep.

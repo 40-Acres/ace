@@ -3,9 +3,9 @@ pragma solidity 0.8.36;
 
 import {Vm} from "forge-std/Vm.sol";
 import {AceVault} from "../../src/curator/AceVault.sol";
-import {CapListing, ProductConfig} from "../../src/curator/AceVaultCaps.sol";
+import {CapListing, ProductConfig} from "../../src/curator/libraries/AceVaultCaps.sol";
 import {AceVaultFactory} from "../../src/curator/AceVaultFactory.sol";
-import {VaultConfig} from "../../src/curator/AceVaultFlows.sol";
+import {VaultConfig} from "../../src/curator/libraries/AceVaultFlows.sol";
 import {CuratorTerms, CuratorTermsConfig, Listing} from "../../src/entities/curated/CuratorTerms.sol";
 import {VaultSeed} from "./VaultSeed.sol";
 

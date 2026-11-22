@@ -335,6 +335,23 @@ contract AceSettlementTest is WarpClock {
         assertEq(read.fundingFloor(id, loanId), T4, "M_FLOOR_PRICE");
         assertEq(read.claimOf(id, loanId), 4_500e6, "M_CLASS");
         assertEq(read.loan(loanId).debt, 4_500e6, "B_LOANS");
+
+        /// @dev State words 4-6 after the two revenue words left `MarketState`, and the protocol's per-quote pot.
+        assertEq(read.marketState(id).unitScale, 1 << 96, "M_STATE + 4: unitScale, the fixed frame");
+        assertEq(read.quoteOwedTotal(id), read.marketState(id).quoteOwedTotal, "M_STATE + 5: quoteOwedTotal's own offset agrees with the decode");
+        assertEq(read.marketState(id).realizedLossAtBook, 0, "M_STATE + 6: no settlement has come up short");
+        uint256 fee = LoanMath.originationFee(4_500e6, ProtocolPolicy.MIN_TENOR, PocDeployConfig.LENDER_APR_BPS);
+        assertGt(fee, 0, "guard: the open charged a fee");
+        assertEq(read.revenuePot(address(usdc)), LoanMath.protocolCut(fee, ace.protocolShareBps()), "PROTOCOL + 1: the pot holds the open's cut");
+
+        /// @dev M_INV_POT against an independent ledger: the pot and the units the settlement credited partition the lot.
+        uint256 lot = read.loan(loanId).collateralUnits;
+        record.setBelow(true);
+        vm.prank(keeper);
+        ace.finalize(loanId);
+        uint256 pot = read.invPotOf(id, loanId);
+        assertGt(pot, 0, "M_INV_POT: the settled loan left its lender a pot");
+        assertEq(pot + read.unitsOwedOf(loanId, borrower) + read.unitsOwedOf(loanId, keeper), lot, "M_INV_POT: pot plus credited units is the lot");
     }
 
     /// @dev What reaches `totalCash` at open: the lender cut NET of the withheld early-exit escrow.

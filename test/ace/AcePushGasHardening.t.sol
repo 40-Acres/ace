@@ -20,12 +20,11 @@ import {PushGasDoorRig, IRigQuote} from "./AcePushGasBudget.t.sol";
 
 /// @title AcePushGasRail
 /// @notice THE RAIL AND THE FLOORS AGAINST THE RULED NUMBERS, never against `Constants`: a row reading the constant moves with it.
-/// @dev The ruled values: a budget in [60,000, 250,000], `PUSH_TAIL` 40,000, `SWEEP_TAIL` 47,000, the ceil of 64/63 ().
+/// @dev The ruled values: a budget in [60,000, 250,000], `PUSH_TAIL` 40,000, the ceil of 64/63 ().
 contract AcePushGasRailTest is Test {
     uint256 internal constant RULED_MIN = 60_000;
     uint256 internal constant RULED_MAX = 250_000;
     uint256 internal constant RULED_PUSH_TAIL = 40_000;
-    uint256 internal constant RULED_SWEEP_TAIL = 47_000;
 
     /// @notice FOR EVERY BUDGET IN THE RAIL THE HUB PUBLISHES THE RULED FLOORS, derived here by a second formula (OZ `ceilDiv`).
     /// @dev And the published push floor, less its tail, is enough for EIP-150 to forward the whole budget: what a keeper relies on.
@@ -37,7 +36,6 @@ contract AcePushGasRailTest is Test {
         uint256 whole = Math.ceilDiv(p * 64, 63);
         assertEq(a.PUSH_GAS(), p, "the hub publishes a budget it was not given");
         assertEq(a.PUSH_FLOOR(), whole + RULED_PUSH_TAIL, "PUSH_FLOOR is not ceil(64p/63) + the ruled 40,000");
-        assertEq(a.SWEEP_FLOOR(), whole + RULED_SWEEP_TAIL, "SWEEP_FLOOR is not ceil(64p/63) + the ruled 47,000");
         uint256 w = a.PUSH_FLOOR() - RULED_PUSH_TAIL;
         assertGe(w - w / 64, p, "the published floor's whole part would not forward the budget under EIP-150");
     }
@@ -52,7 +50,7 @@ contract AcePushGasRailTest is Test {
         assertEq(bytes4(e), PushGasOutOfRange.selector, "and not by the rail's own name");
     }
 
-    /// @notice THE RULED ENDS, ONE GAS EITHER SIDE, AND THE MAINNET FLOORS THE DECISION PUBLISHES (141,588 and 148,588 at 100,000).
+    /// @notice THE RULED ENDS, ONE GAS EITHER SIDE, AND THE MAINNET PUSH FLOOR THE DECISION PUBLISHES (141,588 at 100,000).
     /// @dev Pinned by argument because a fuzz row is a sampler: the four boundary points are the ones a rail mutation moves.
     function test_Rail_TheRuledEndsAndTheMainnetFloorsAreExact() public {
         (address h, bytes memory e) = PushGasRig.tryHub(AceFixtures.TREASURY, RULED_MIN - 1);
@@ -67,7 +65,6 @@ contract AcePushGasRailTest is Test {
         assertEq(AceFixtures.PUSH_GAS, 100_000, "the fixture no longer runs the ruled mainnet budget");
         (h,) = PushGasRig.tryHub(AceFixtures.TREASURY, 100_000);
         assertEq(Ace(h).PUSH_FLOOR(), 141_588, "the mainnet push floor moved off the recorded 141,588");
-        assertEq(Ace(h).SWEEP_FLOOR(), 148_588, "the mainnet sweep floor moved off the recorded 148,588");
     }
 }
 
@@ -159,7 +156,7 @@ contract AcePushGasRestoreTest is PushGasProbeRig {
 
     /// @notice UNDER THE LEAST LIMIT EVERY DOOR REVERTS `PushGasShort` HAVING NEVER CALLED THE QUOTE, and nothing it did survives.
     /// @dev `pushCalls == 0` pins the check AHEAD of the call: a post-check would also refuse, but only after the quote had run.
-    /// @dev The CEI clear sits before the check, so the pool, the loan, the debt and the sweep's stamp and counter must all read as before.
+    /// @dev The CEI clear sits before the check, so the pool, the loan, the debt and the revenue pot must all read as before.
     function test_PreCheck_AShortLimitNeverCallsTheQuoteAndMovesNothing() public {
         for (uint8 door; door < DOORS; door++) {
             _shortRows(door);
@@ -170,13 +167,12 @@ contract AcePushGasRestoreTest is PushGasProbeRig {
     struct Before {
         uint256 owed;
         uint256 debt;
-        uint64 stamp;
         uint256 revenue;
     }
 
     function _shortRows(uint8 door) internal {
         (uint256 id, address who, bytes memory data) = _door(door);
-        Before memory b = Before(_owed(), read.debtOf(id), read.marketState(mid).lastSweptAt, read.protocolRevenue(mid));
+        Before memory b = Before(_owed(), read.debtOf(id), read.revenuePot(quote));
         uint256 least = _least(who, data, id, LO, HI, P_DONE);
         string memory tag = string.concat(_name(door), ": under the least limit");
         _assertShort(_probe(who, data, least - 1, id), b, tag);
@@ -191,7 +187,6 @@ contract AcePushGasRestoreTest is PushGasProbeRig {
         assertEq(s.r.owed, b.owed, string.concat(tag, ", the CEI clear survived the revert"));
         assertFalse(s.r.closed, string.concat(tag, ", the loan closed"));
         assertEq(s.r.debt, b.debt, string.concat(tag, ", the debt moved"));
-        assertEq(s.r.stamp, b.stamp, string.concat(tag, ", the sweep stamped"));
         assertEq(s.r.revenue, b.revenue, string.concat(tag, ", the revenue counter moved"));
         assertEq(s.lenderGot + s.treasuryGot, 0, string.concat(tag, ", quote moved"));
     }
@@ -209,32 +204,29 @@ contract AcePushGasRestoreFromCreditedPoolTest is AcePushGasRestoreTest {
 
 /// @title AcePushGasSweepGate
 /// @notice THE STANDALONE SWEEP HAS NO GATE: it is strict and uncapped, demanding what its transfer costs and nothing when empty.
-/// @dev Was the pin of the published `SWEEP_FLOOR` at the standalone door; that floor now gates the keeper piggyback alone.
 contract AcePushGasSweepGateTest is PushGasProbeRig {
     function _newQuote() internal override returns (address) {
         return address(new MockERC20("USD Coin", "USDC", 6));
     }
 
-    /// @notice THE STRICT SWEEP DEMANDS ITS TRANSFER, NOT THE PUBLISHED BUDGET: its least delivering limit sits under `SWEEP_FLOOR`.
-    /// @dev The floor gates the keeper PIGGYBACK alone; the standalone door forwards the caller's gas and needs only what the transfer costs.
+    /// @notice THE STRICT SWEEP DEMANDS ITS TRANSFER AND NOTHING WHEN EMPTY: an empty pot's least limit sits under a delivering one's.
+    /// @dev The door forwards the caller's gas and needs only what the transfer costs; no published budget gates it.
     function test_SweepRevenue_TheStrictDoorDemandsNoPublishedFloor() public {
         uint256 id = _open(TEN30);
-        bytes memory data = abi.encodeCall(Ace.sweepRevenue, (mid));
-        assertGt(read.protocolRevenue(mid), 0, "premise: revenue is banked");
+        bytes memory data = abi.encodeCall(Ace.sweepRevenue, (quote));
+        assertGt(read.revenuePot(quote), 0, "premise: revenue is banked");
         uint256 deliver = _least(keeper, data, id, 1_000, HI, P_DELIVERED);
-        ace.sweepRevenue(mid);
-        assertEq(read.protocolRevenue(mid), 0, "premise: nothing is banked now");
+        ace.sweepRevenue(quote);
+        assertEq(read.revenuePot(quote), 0, "premise: nothing is banked now");
         uint256 empty = _least(keeper, data, id, 1_000, HI, P_DONE);
         emit log_named_uint("sweepRevenue delivers from       ", deliver);
         emit log_named_uint("sweepRevenue with nothing banked ", empty);
-        emit log_named_uint("SWEEP_FLOOR                      ", ace.SWEEP_FLOOR());
         assertLt(empty, deliver, "an empty sweep demands less than a delivering one: the early return comes first");
-        assertLt(deliver, ace.SWEEP_FLOOR(), "the strict door demanded the piggyback's budget: a gate still binds it");
     }
 }
 
 /// @title AcePushGasInertSweep
-/// @notice A HUB WITH NO TREASURY SWEEPS NOTHING AND DEMANDS NOTHING: the strict sweep's first early return precedes its gate.
+/// @notice A HUB WITH NO TREASURY SWEEPS NOTHING: the strict sweep's first early return comes before any transfer.
 contract AcePushGasInertSweepTest is PushGasProbeRig {
     function _newQuote() internal override returns (address) {
         return address(new MockERC20("USD Coin", "USDC", 6));
@@ -244,21 +236,18 @@ contract AcePushGasInertSweepTest is PushGasProbeRig {
         return address(0);
     }
 
-    /// @notice WITH REVENUE BANKED AND NO TREASURY, `sweepRevenue` LANDS FAR UNDER THE FLOOR, calls nothing, stamps nothing, keeps the counter.
+    /// @notice WITH REVENUE BANKED AND NO TREASURY, `sweepRevenue` lands, calls nothing, and keeps the pot.
     function test_SweepRevenue_AnInertTreasuryDemandsNoBudgetAndMovesNothing() public {
         uint256 id = _open(TEN30);
-        uint256 banked = read.protocolRevenue(mid);
-        uint64 stamp = read.marketState(mid).lastSweptAt;
+        uint256 banked = read.revenuePot(quote);
         assertGt(banked, 0, "premise: revenue is banked, so only the treasury check can return early");
-        bytes memory data = abi.encodeCall(Ace.sweepRevenue, (mid));
+        bytes memory data = abi.encodeCall(Ace.sweepRevenue, (quote));
         uint256 least = _least(keeper, data, id, 1_000, HI, P_DONE);
         emit log_named_uint("inert sweepRevenue lands from", least);
-        assertLt(least, ace.SWEEP_FLOOR(), "an inert sweep demanded the budget: the treasury check does not come first");
         Seen memory s = _probe(keeper, data, least, id);
         assertEq(s.r.out, OK, "the inert sweep emitted a revenue event or reverted");
         assertEq(s.r.pushCalls, 0, "and it called the quote");
-        assertEq(s.r.revenue, banked, "and it moved the counter");
-        assertEq(s.r.stamp, stamp, "and it stamped a period");
+        assertEq(s.r.revenue, banked, "and it moved the pot");
     }
 }
 
@@ -356,8 +345,7 @@ contract AcePushGasDemandTest is PushGasProbeRig {
 }
 
 /// @title AcePushGasDeleverageBand
-/// @notice `deleverage`'s trailing sweep against a treasury-only BURN: the door the ruled `SWEEP_TAIL` was re-measured on.
-/// @dev The forceClose band rows cannot see this door, and after the push-first reorder it is the binding one (23,320 against 23,194).
+/// @notice `deleverage` at any limit from its least: no sweep rides the crank, so its outcome is monotone in the limit.
 contract AcePushGasDeleverageBandTest is PushGasProbeRig, DeleverageCrank {
     uint16 internal constant BAND_BPS = 3000;
     MockHostileGasERC20 internal usdc;
@@ -391,64 +379,29 @@ contract AcePushGasDeleverageBandTest is PushGasProbeRig, DeleverageCrank {
         return abi.encodeCall(Ace.deleverage, (id, 0, ""));
     }
 
-    /// @dev A due sweep, a crank's calldata, and the treasury-only burn armed.
-    function _burningCrank() internal returns (uint256 id, bytes memory data) {
+    /// @dev A loan a day old and a crank's calldata, the band broken at its trigger.
+    function _crankAt() internal returns (uint256 id, bytes memory data) {
         id = _open(0);
         _warpBy(1 days);
         data = _crankData(id);
-        assertGt(read.protocolRevenue(mid), 0, "premise: revenue is due");
-        usdc.setBurnOnlyTo(treasury);
-        usdc.setBurnAll(true);
     }
 
-    /// @notice NO REVERT BAND ACROSS THE SWEEP'S GATE ON A CRANK: at the gate's least admitting limit the burned sweep fails and the crank lands.
-    /// @dev Short of `SWEEP_TAIL` the gate would admit a sweep whose own fallback then runs dry, reverting a safety crank.
-    function test_Deleverage_NoRevertBandAcrossTheSweepGate_UnderABudgetBurningTreasury() public {
-        (uint256 id, bytes memory data) = _burningCrank();
-        uint256 banked = read.protocolRevenue(mid);
-        uint256 debt = read.debtOf(id);
-        uint256 okSwept = _least(address(this), data, id, LO, HI, P_SWEPT);
-        uint256 plain = _down(address(this), data, id, okSwept, 5_000, OK);
-        uint256 admit = _least(address(this), data, id, plain, okSwept, P_NOT_OK);
-        assertEq(admit, okSwept, "the gate admitted a sweep whose own fallback could not then complete: SWEEP_TAIL is short");
-        uint256 gStar = _least(address(this), data, id, LO, plain, P_DONE);
-        emit log_named_uint("deleverage completes from ", gStar);
-        emit log_named_uint("and carries the sweep from", okSwept);
-
-        Seen memory at = _probe(address(this), data, okSwept, id);
-        assertTrue(at.r.sweepFailed, "the burned sweep took its fallback");
-        assertEq(at.r.revenue, banked, "and restored the counter whole");
-        assertEq(at.treasuryGot, 0, "and moved nothing to the treasury");
-        assertLt(at.r.debt, debt, "while the crank sold");
-        _scanNoBand(id, data, gStar, okSwept);
-    }
-
-    /// @dev Every limit 1,000 apart from the sweep's gate plus 5,000 down to the crank's least, and 50 apart across the gate.
-    function _scanNoBand(uint256 id, bytes memory data, uint256 gStar, uint256 okSwept) internal {
-        for (uint256 x = okSwept + 5_000; x >= gStar; x -= 1_000) {
-            assertTrue(_done(_run(address(this), data, x, id)), "a revert band sits between the crank's and the sweep's thresholds");
-        }
-        for (uint256 x = okSwept - 1_500; x <= okSwept + 1_500; x += 50) {
-            assertTrue(_done(_run(address(this), data, x, id)), "a revert band sits at the sweep's gate");
-        }
-    }
-
-    // A CRANK AT ANY LIMIT FROM ITS LEAST COMPLETES, the burned sweep skipped or taken, and never reverts `PushGasShort`.
+    // A CRANK AT ANY LIMIT FROM ITS LEAST COMPLETES, with no sweep event, and never reverts `PushGasShort`.
     /// forge-config: default.fuzz.runs = 16
     function testFuzz_Deleverage_NeverRevertsAtOrAboveItsLeastLimit(uint256 gSeed) public {
-        (uint256 id, bytes memory data) = _burningCrank();
+        (uint256 id, bytes memory data) = _crankAt();
         uint256 least = _least(address(this), data, id, LO, HI, P_DONE);
-        assertEq(_run(address(this), data, least, id).out, OK, "the least crank carried the sweep: the piggyback is not best-effort");
+        assertEq(_run(address(this), data, least, id).out, OK, "the least crank emitted a sweep event");
         uint256 g = bound(gSeed, least, least + 400_000);
         Run memory r = _run(address(this), data, g, id);
-        assertTrue(_done(r), "a crank at or over its least limit reverted: the best-effort sweep is not best-effort");
+        assertTrue(_done(r), "a crank at or over its least limit reverted: its outcome is not monotone in the limit");
     }
 }
 
 /// @title AcePushGasAnyLimit
 /// @notice AT ANY LIMIT A CLOSE EITHER ACCOUNTS FOR ITS PUSH TO THE WEI OR REVERTS HAVING CALLED NOTHING, on every door and three quote shapes.
 /// @dev The partition the bisection helpers assume is tested here too: no success under the least limit, no revert over it.
-/// @dev A stamp without a sweep event, a cleared pool without a transfer, or a failure naming the wrong amount each break the row.
+/// @dev A close that moves the revenue pot, a cleared pool without a transfer, or a failure naming the wrong amount each break the row.
 contract AcePushGasAnyLimitTest is PushGasProbeRig {
     MockHostileGasERC20 internal usdc;
 
@@ -464,10 +417,9 @@ contract AcePushGasAnyLimitTest is PushGasProbeRig {
         uint8 shape = shapeSeed % 3;
         if (shape == 1) usdc.setBurnAll(true);
         if (shape == 2) usdc.setReverting(true);
-        uint64 stamp0 = read.marketState(mid).lastSweptAt;
-        uint256 rev0 = read.protocolRevenue(mid);
+        uint256 rev0 = read.revenuePot(quote);
         uint256 least = _least(who, data, id, LO, HI, P_DONE);
-        uint256 g = bound(gSeed, least - 50_000, least + 60_000); // the edges: the pre-check, and forceClose's sweep gate ~28k above it
+        uint256 g = bound(gSeed, least - 50_000, least + 60_000); // the edge is the pre-check; the band above it once held forceClose's sweep gate
         Seen memory s = _probe(who, data, g, id);
 
         if (g < least) {
@@ -478,7 +430,7 @@ contract AcePushGasAnyLimitTest is PushGasProbeRig {
         assertTrue(_done(s.r), "a limit at or over the least completing one reverted");
         assertTrue(s.r.closed, "and completed without closing the loan");
         _assertPushAccounted(s);
-        _assertSweepAccounted(s, stamp0, rev0);
+        _assertNoSweep(s, rev0);
     }
 
     function _assertPushAccounted(Seen memory s) internal pure {
@@ -493,18 +445,11 @@ contract AcePushGasAnyLimitTest is PushGasProbeRig {
         }
     }
 
-    function _assertSweepAccounted(Seen memory s, uint64 stamp0, uint256 rev0) internal pure {
-        if (s.r.swept) {
-            assertEq(s.treasuryGot, rev0, "a delivered sweep did not move the whole counter");
-            assertEq(s.r.revenue, 0, "and left some of it banked");
-        } else if (s.r.sweepFailed) {
-            assertEq(s.treasuryGot, 0, "a failed sweep moved quote");
-            assertEq(s.r.revenue, rev0, "and did not restore the counter whole");
-        } else {
-            assertEq(s.r.stamp, stamp0, "a sweep that announced nothing stamped a period");
-            assertEq(s.r.revenue, rev0, "or moved the counter");
-            assertEq(s.treasuryGot, 0, "or paid the treasury");
-        }
+    /// @dev No close sweeps: at every limit and shape the pot and the treasury read as before, and no `RevenueSwept` fires.
+    function _assertNoSweep(Seen memory s, uint256 rev0) internal pure {
+        assertFalse(s.r.swept, "a close emitted RevenueSwept");
+        assertEq(s.r.revenue, rev0, "a close moved the revenue pot");
+        assertEq(s.treasuryGot, 0, "or paid the treasury");
     }
 }
 

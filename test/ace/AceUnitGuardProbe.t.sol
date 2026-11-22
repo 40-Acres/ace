@@ -66,7 +66,7 @@ contract AceUnitGuardProbeTest is AceGuardProbeRig {
         _probe("setRollPolicy", address(ace), abi.encodeCall(Ace.setRollPolicy, (address(0))));
         _probe("finalize", address(ace), abi.encodeCall(Ace.finalize, (loanId)));
         _probe("forceClose", address(ace), abi.encodeCall(Ace.forceClose, (loanId)));
-        _probe("sweepRevenue", address(ace), abi.encodeCall(Ace.sweepRevenue, (id)));
+        _probe("sweepRevenue", address(ace), abi.encodeCall(Ace.sweepRevenue, (address(usdc))));
         _probe("buyInventory", address(ace), abi.encodeCall(Ace.buyInventory, (loanId, 0, 0, borrower)));
         _probe("retitle", address(ace), abi.encodeCall(Ace.retitle, (loanId, borrower, alice)));
         _probe("setCreditOperatorWithSig", address(ace), abi.encodeCall(Ace.setCreditOperatorWithSig, (borrower, alice, true, 0, type(uint256).max, "")));

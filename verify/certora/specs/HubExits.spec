@@ -4,10 +4,11 @@
 // construction, so a `collect` paying the treasury, the custodian or its own caller instead of `to` survives them. And
 // O20 (HubRevenue.spec) proves revenue leaves only whole, not WHERE it goes. These rules pin both destinations:
 //   1. `collect` PAYS EXACTLY `to` (`aCollectPaysExactlyItsRecipient`): the caller's whole credit, and no other balance moves.
-//   2. THE STANDALONE SWEEP PAYS EXACTLY THE TREASURY (`aSweepPaysExactlyTheTreasury`): what left the pot, and nothing else moves.
-//   3. REVENUE LEAVES ONLY INTO THE TREASURY (`revenueLeavesOnlyToTheTreasury`, every verb): a fall in a market's pot is
-//      matched by at least as much reaching the treasury, which covers the keeper piggyback inside `deleverage` and
-//      `forceClose`.
+//   2. THE SWEEP PAYS EXACTLY THE TREASURY (`aSweepPaysExactlyTheTreasury`): what left the quote's pot, and nothing else moves.
+//   3. REVENUE LEAVES ONLY INTO THE TREASURY (`revenueLeavesOnlyToTheTreasury`, every verb): a fall in the quote's pot is
+//      matched by at least as much reaching the treasury.
+//   4. SETTLEMENT NEVER PAYS THE TREASURY (`aSettlementNeverPaysTheTreasury`): no revenue sweep rides `forceClose`, so
+//      with the market's lender not the treasury, the treasury's balance holds.
 //
 // THE MODEL is HubSolvency.spec's, verbatim in the methods block: the munged hub, `quoteToken` a plain ERC-20 whose own
 // code runs for every call the hub makes on it, the hub's own `pushToken` hop dispatched to its real body, and the
@@ -66,8 +67,9 @@ methods {
     function quoteToken.balanceOf(address) external returns (uint256) envfree;
     function treasuryOf() external returns (address) envfree; // AceHarness: the hub keeps TREASURY internal
     function lenderOwed(address, address) external returns (uint256) envfree;
-    function protocolRevenueOf(bytes32) external returns (uint256) envfree; // AceHarness
-    function marketQuoteOf(bytes32) external returns (address) envfree; // AceHarness
+    function protocolRevenueOf(address) external returns (uint256) envfree; // AceHarness: one quote's pot
+    function loanMarket(uint256) external returns (bytes32) envfree;
+    function marketLenderOf(bytes32) external returns (address) envfree; // AceHarness
 }
 
 persistent ghost fmDown(uint256, uint256, uint256) returns uint256;
@@ -146,28 +148,27 @@ rule aCollectCanPay(env e, address to) {
     satisfy paid > 0;
 }
 
-// ---- 2. THE STANDALONE SWEEP PAYS EXACTLY THE TREASURY ----
+// ---- 2. THE SWEEP PAYS EXACTLY THE TREASURY ----
 
-rule aSweepPaysExactlyTheTreasury(env e, bytes32 m, address other) {
+// the quote under proof is `quoteToken`, the one token the model moves for real
+rule aSweepPaysExactlyTheTreasury(env e, address other) {
     address t = treasuryOf();
     require e.msg.sender != currentContract && t != currentContract;
-    require marketQuoteOf(m) == quoteToken;
     require other != t && other != currentContract;
-    mathint rev0 = protocolRevenueOf(m);
+    mathint rev0 = protocolRevenueOf(quoteToken);
     mathint t0 = quoteToken.balanceOf(t);
     mathint other0 = quoteToken.balanceOf(other);
-    sweepRevenue(e, m);
-    assert quoteToken.balanceOf(t) == t0 + (rev0 - protocolRevenueOf(m)), "a sweep's treasury did not receive what left the pot";
+    sweepRevenue(e, quoteToken);
+    assert quoteToken.balanceOf(t) == t0 + (rev0 - protocolRevenueOf(quoteToken)), "a sweep's treasury did not receive what left the pot";
     assert quoteToken.balanceOf(other) == other0, "a sweep moved a balance other than the treasury's and the hub's";
 }
 
 // witness: a sweep really pays the treasury, so the destination asserts are not passing on zero
-rule aSweepCanPayTheTreasury(env e, bytes32 m) {
+rule aSweepCanPayTheTreasury(env e) {
     address t = treasuryOf();
     require e.msg.sender != currentContract && t != currentContract;
-    require marketQuoteOf(m) == quoteToken;
     mathint t0 = quoteToken.balanceOf(t);
-    sweepRevenue(e, m);
+    sweepRevenue(e, quoteToken);
     satisfy quoteToken.balanceOf(t) > t0;
 }
 
@@ -175,22 +176,25 @@ rule aSweepCanPayTheTreasury(env e, bytes32 m) {
 
 // The treasury is not the caller: a verb pulls quote only from its caller (HubAttribution.spec claim 3), so with it
 // barred the treasury's balance never falls and a rise of at least the pot's fall is the sweep's whole delivery.
-rule revenueLeavesOnlyToTheTreasury(env e, method f, calldataarg args, bytes32 m) filtered { f -> hubVerb(f) } {
+rule revenueLeavesOnlyToTheTreasury(env e, method f, calldataarg args) filtered { f -> hubVerb(f) } {
     address t = treasuryOf();
     require e.msg.sender != currentContract && t != currentContract && t != e.msg.sender;
-    require marketQuoteOf(m) == quoteToken;
-    mathint rev0 = protocolRevenueOf(m);
+    mathint rev0 = protocolRevenueOf(quoteToken);
     mathint t0 = quoteToken.balanceOf(t);
     f(e, args);
-    mathint fell = rev0 - protocolRevenueOf(m);
+    mathint fell = rev0 - protocolRevenueOf(quoteToken);
     assert fell > 0 => quoteToken.balanceOf(t) - t0 >= fell, "protocol revenue left its pot for somewhere other than the treasury";
 }
 
-// witness: the keeper piggyback really sweeps inside a settlement, so rule 3 is not passing on the standalone door alone
-rule aSettlementCanSweepToTheTreasury(env e, uint256 id) {
+// ---- 4. SETTLEMENT NEVER PAYS THE TREASURY ----
+
+// `forceClose`'s one quote leg is the push to the market's lender, so with that lender not the treasury, and the treasury
+// neither the caller nor the hub, the treasury's balance holds: the protocol's cut waits in its pot for `sweepRevenue`
+rule aSettlementNeverPaysTheTreasury(env e, uint256 id) {
     address t = treasuryOf();
     require e.msg.sender != currentContract && t != currentContract && t != e.msg.sender;
+    require marketLenderOf(loanMarket(id)) != t;
     mathint t0 = quoteToken.balanceOf(t);
     forceClose(e, id);
-    satisfy quoteToken.balanceOf(t) > t0;
+    assert quoteToken.balanceOf(t) == t0, "a settlement paid the treasury";
 }

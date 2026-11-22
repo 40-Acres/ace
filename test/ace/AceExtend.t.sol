@@ -79,7 +79,7 @@ contract AceExtendTest is ExtendRig {
     function _book(uint256 loanId, address payer) internal view returns (Book memory b) {
         b.hub = usdc.balanceOf(address(ace));
         b.payer = usdc.balanceOf(payer);
-        b.revenue = read.protocolRevenue(id);
+        b.revenue = read.revenuePot(address(usdc));
         (, b.lent, b.owed) = read.poolOf(id);
         b.claim = read.claimOf(id, loanId);
         b.resting = ace.restingOf(id);
@@ -99,7 +99,7 @@ contract AceExtendTest is ExtendRig {
         ace.extend(loanId, 0, "");
         assertEq(usdc.balanceOf(borrower), b.payer - fee, "the caller paid the whole fee");
         assertEq(usdc.balanceOf(address(ace)), b.hub + fee, "and the hub holds it");
-        assertEq(read.protocolRevenue(id), b.revenue + LoanMath.protocolCut(fee), "the protocol cut is revenue");
+        assertEq(read.revenuePot(address(usdc)), b.revenue + LoanMath.protocolCut(fee), "the protocol cut is revenue");
         (, uint256 lent, uint256 owed) = read.poolOf(id);
         assertEq(owed, b.owed + (f0 - r) + LoanMath.tickCut(fee), "owed takes the earned old escrow and the tick cut");
         assertEq(lent, b.lent, "lent does not move");

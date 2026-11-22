@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
 import {AceVault} from "../../src/curator/AceVault.sol";
-import {BorrowRequest} from "../../src/curator/AceVaultFlows.sol";
+import {BorrowRequest} from "../../src/curator/libraries/AceVaultFlows.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {GateRefused} from "../../src/ace/hub/Lender.sol";
 import {IAceLenderOps} from "../../src/interfaces/IAceLenderOps.sol";

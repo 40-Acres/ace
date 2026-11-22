@@ -14,8 +14,8 @@ import {ExtensionAddsNoTime, ExtensionTooEarly, UnderPrice} from "../../../src/a
 import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
 import {Loan, MarketParams} from "../../../src/ace/hub/Types.sol";
 import {AceVault} from "../../../src/curator/AceVault.sol";
-import {CapListing, ProductConfig} from "../../../src/curator/AceVaultCaps.sol";
-import {BorrowRequest, Terms, VaultConfig} from "../../../src/curator/AceVaultFlows.sol";
+import {CapListing, ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
+import {BorrowRequest, Terms, VaultConfig} from "../../../src/curator/libraries/AceVaultFlows.sol";
 import {IAceVaultDoor} from "../../../src/interfaces/IAceVaultDoor.sol";
 import {RecordingTerms} from "./AceVaultExtendFor.t.sol";
 

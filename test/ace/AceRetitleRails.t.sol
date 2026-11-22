@@ -150,7 +150,7 @@ contract AceRetitleRailsTreasuryTest is WarpClock {
         vm.startPrank(holder);
         coll.approve(address(pm), UNITS);
         loanId = ace.open(id, UNITS, P, TEN7, holder, OpenBounds(0, 0, 0));
-        ace.sweepRevenue(id);
+        ace.sweepRevenue(address(usdc));
         vm.stopPrank();
         assertGt(usdc.balanceOf(address(router)), 0, "PREMISE: the router IS the hub's treasury: the sweep paid it");
     }
@@ -221,7 +221,7 @@ contract AceRetitleRailsTreasuryTest is WarpClock {
         loanId = d.ace.open(d.id, UNITS, P, TEN7, who, OpenBounds(0, 0, 0));
         vm.stopPrank();
         uint256 before = usdc.balanceOf(WALLET);
-        d.ace.sweepRevenue(d.id);
+        d.ace.sweepRevenue(address(usdc));
         assertGt(usdc.balanceOf(WALLET), before, "PREMISE: the wallet IS this hub's treasury: the sweep paid it");
     }
 

@@ -101,7 +101,7 @@ contract AceWideDecimalGapTest is WarpClock {
 
     /// @dev The quote the hub's books say it holds: cash, revenue, and what it owes claimants.
     function _booked() internal view returns (uint256) {
-        return read.poolResting(id) + read.protocolRevenue(id) + read.poolOwed(id) + read.quoteOwedTotal(id);
+        return read.poolResting(id) + read.revenuePot(address(quote)) + read.poolOwed(id) + read.quoteOwedTotal(id);
     }
 
     // ============ 1. the ticket: the sharpest practical consequence of a 0-decimal quote ============

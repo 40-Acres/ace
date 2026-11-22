@@ -129,7 +129,7 @@ contract AceMoneyPathTest is Test {
         for (uint256 i = 1; i <= read.loanCount(); i++) {
             pot += read.feeEscrowOf(i);
         }
-        assertEq(usdc.balanceOf(address(ace)), resting + s.protocolRevenue + pot + owed + s.quoteOwedTotal, "solvency identity");
+        assertEq(usdc.balanceOf(address(ace)), resting + read.revenuePot(address(usdc)) + pot + owed + s.quoteOwedTotal, "solvency identity");
     }
 
     // ============ lender side: the market's resting cash ============
@@ -357,7 +357,7 @@ contract AceMoneyPathTest is Test {
 
         uint256 loanId = _open(COLL, 4_500e6);
 
-        assertEq(read.protocolRevenue(id), protocolFee, "protocol share to reserves");
+        assertEq(read.revenuePot(address(usdc)), protocolFee, "protocol share to reserves");
         assertEq(ace.restingOf(id), 10_500e6, "the market keeps only its undrawn cash");
         vm.prank(alice);
         uint256 paid = ace.collect(address(usdc), alice);
@@ -381,7 +381,7 @@ contract AceMoneyPathTest is Test {
         /// @dev WAS A THREE-RUNG SUM with a floor per rung, and the REMAINDER of those floors swept to the
         /// @dev protocol as unplaceable dust. One claim takes the whole lender fee exactly, so there is no
         /// @dev split to floor and no residue to sweep: the cut is the cut, and the pool takes the rest.
-        assertEq(read.protocolRevenue(id), protocolCut, "the protocol takes its cut and no dust beside it");
+        assertEq(read.revenuePot(address(usdc)), protocolCut, "the protocol takes its cut and no dust beside it");
         assertEq(read.poolOwed(id), tickFee, "and the lender's whole share reaches the pool, unfloored");
         _assertSolvency();
     }

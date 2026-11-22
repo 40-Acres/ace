@@ -216,6 +216,7 @@ function cashIn(bytes32 m) returns uint256 {
     return cash;
 }
 
+// the protocol's revenue pot in market `m`'s quote, which every market in that quote shares
 function revenueIn(bytes32 m) returns uint256 {
     address q; uint256 cash; uint256 rev; uint256 pot;
     q, cash, rev, pot = marketOf(m);
@@ -725,7 +726,7 @@ rule forceCloseAsksNoPolicy(env e, uint256 id) {
 }
 
 // O50's claim leg: settlement closes the loan, retires its claim whole, `lent` falls by exactly that claim, the escrow is
-// earned whole, and protocol revenue never rises (a piggyback sweep may lower it)
+// earned whole, and protocol revenue never moves: settlement books no protocol fee, and no revenue sweep rides it
 rule aSettlementRetiresTheClaimWhole(env e, uint256 id) {
     sceneHolds(e, id);
     bytes32 m = homeOf(id);
@@ -739,7 +740,7 @@ rule aSettlementRetiresTheClaimWhole(env e, uint256 id) {
     assert claimOf(m, id) == 0, "settlement left a claim";
     assert to_mathint(lentIn(m)) == lent0 - claim0, "settlement moved lent by other than the claim it retired";
     assert feeEscrowOf(id) == 0, "settlement left a fee escrow";
-    assert to_mathint(revenueIn(m)) <= rev0, "settlement took protocol revenue";
+    assert to_mathint(revenueIn(m)) == rev0, "settlement moved protocol revenue";
 }
 
 // ---- ANTI-HOLLOW: the token model moves quote when the code does ----

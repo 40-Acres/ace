@@ -385,7 +385,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     /// @dev `totalAssets` is `min(gross, mark) - unvested`, so a ladder the loss did not clear is a
     /// @dev deduction against value that no longer exists: the view floors at zero, `_requireEntryOpen`
     /// @dev reads `EndOfLife`, and every exit prices to nothing while real cash sits in the vault.
-    /// @dev MUTATION TARGET: delete the `_burnVest` call in `_sync` and this must fail, not merely drift.
+    /// @dev MUTATION TARGET: delete the `AceVaultNav.burnVest` call in `_sync` and this must fail, not merely drift.
     function test_Vest_ASettlementBiggerThanTheLadderClearsItRatherThanBricking() public {
         AceVault v = _newVault(0);
         uint256 loanId = _primedPremium(v);
@@ -459,7 +459,7 @@ contract CuratorVaultVestingTest is CuratorVaultBase {
     /// @dev R1, ported from the hub. With no live shares outstanding there is no share price to defend.
     /// @dev Without it the residue is ownerless cash and the next dust depositor takes it: the hub
     /// @dev measured a 10 USDC deposit withdrawing 25.2 before the release was added.
-    /// @dev MUTATION TARGET: drop the `_release(g)` call in `claimExit` and this must fail.
+    /// @dev MUTATION TARGET: drop the `AceVaultNav.release(g)` call in `claimExit` and this must fail.
     function test_Vest_AFullExitReleasesTheLadder() public {
         AceVault v = _newVault(0);
         _premiumThenAllCash(v);

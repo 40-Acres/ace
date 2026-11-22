@@ -4,7 +4,6 @@ pragma solidity 0.8.36;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
@@ -17,10 +16,11 @@ import {HubRatePeriod} from "../interfaces/HubRatePeriod.sol";
 import {Extension, IRollPolicy} from "../interfaces/IRollPolicy.sol";
 import {IVaultDoor} from "../interfaces/IVaultDoor.sol";
 import {IVaultTerms, Lend} from "../interfaces/IVaultTerms.sol";
-import {AceVaultCaps, CapListing, ProductConfig} from "./AceVaultCaps.sol";
-import {AceVaultFlows, BorrowRequest, Ctx, Request, Terms, VaultConfig, VaultLayout} from "./AceVaultFlows.sol";
-import {AceVaultInKind} from "./AceVaultInKind.sol";
-import {AceVaultTail} from "./AceVaultTail.sol";
+import {AceVaultCaps, CapListing, ProductConfig} from "./libraries/AceVaultCaps.sol";
+import {AceVaultFlows, BorrowRequest, Ctx, Request, Terms, VaultConfig, VaultLayout} from "./libraries/AceVaultFlows.sol";
+import {AceVaultInKind} from "./libraries/AceVaultInKind.sol";
+import {AceVaultNav} from "./libraries/AceVaultNav.sol";
+import {AceVaultTail} from "./libraries/AceVaultTail.sol";
 
 /// @title AceVault
 /// @notice An ERC-4626 vault that holds its cash and lends it on the terms its write-once product contract `TERMS` answers.
@@ -29,11 +29,12 @@ import {AceVaultTail} from "./AceVaultTail.sol";
 /// @dev No upgrade, and a genesis seed of dead shares; the asset must be non-fee-on-transfer, non-rebasing and hookless, as NAV counts its balance.
 /// @dev Trust a vault only by `AceVaultFactory.isAceVault` on the factory a chain's book names: a subclass or a copy is other bytecode.
 /// @dev Terms used below. Gross NAV is idle cash plus the vault's balance at the hub; NAV, `totalAssets`, is gross NAV less the deferred gain.
-/// @dev The mark is gross NAV at the last sync, plus entries and less exits since. A rise past it vests over `VEST_WINDOW`; what still vests is the pile.
+/// @dev The mark is gross NAV at the last sync, plus entries and less exits since; a rise past it is deferred, `unvested()`, vesting over `VEST_WINDOW`.
 /// @dev A pot is a defaulted loan's collateral the hub settled to this vault; entry waits on an unsold one unless the guardian exempts it.
 /// @dev The trough hold keeps entry shut after a material loss over an unsold pot, until the recovery that follows has vested; never in kind.
+/// @dev The rules of all four (the sync, the deferred gain, the hold and the fee) are `AceVaultNav`'s; this contract calls them with its figures.
 /// @dev Modes: hub-ask recovers a pot by the hub's inventory ask, door mode hands it to `DOOR` to sell, in kind pays it to the shares that bore the loss.
-/// @dev A lending door is a verb that lends: `borrow` (the core door), `extendFor`, `refinanceFor` or `drawMoreFor`; `DOOR`, the door, sells seized goods.
+/// @dev The lending verbs are `borrow`, `extendFor`, `refinanceFor` and `drawMoreFor`; "the door" always means `DOOR`, which sells seized goods.
 /// @dev An exit request escrows shares for a later claim, like an ERC-7540 async redeem with no price locked; the requests' hold is idle kept for them.
 contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
     using SafeERC20 for IERC20;
@@ -60,7 +61,7 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
     error OverRequest(); // asked past the caller's request
     error ClaimUnderMin(); // the claim pays less than the caller's minimum
     error InventoryUnsold(); // a settled pot of this vault's has not sold, or in kind is not yet home or came home this block: entry waits
-    error RecoveryVesting(); // a material loss over an unsold pot has cleared: entry waits to its stored second while the whole vesting pile stays material
+    error RecoveryVesting(); // a material loss over an unsold pot has cleared: entry waits to its stored second while the whole deferred gain stays material
     error NotGuardian(); // only the guardian exempts a dead pot, and a vault with none has no override
     error PotsMoved(uint256 settledPots); // a pot settled since the guardian read the count: re-read and resubmit
     error OverSupply(); // in kind, entry mints no share past 2^160, so no holder's tracked count can overflow
@@ -69,8 +70,8 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
     uint64 public constant REQUEST_LEASE = 30 days; // a request lapses this long after it was last made or renewed
     uint64 public constant MIN_VEST_WINDOW = 1 hours; // below this a gain matures before an entrant has held any risk
     uint64 public constant MAX_VEST_WINDOW = 7 days; // the longest a NAV rise may defer before it is spendable
-    uint16 public constant GATE_BPS = AceVaultFlows.GATE_BPS; // entry shuts while a gain over this share of NAV vests
-    uint16 public constant HOLD_BPS = AceVaultFlows.HOLD_BPS; // the trough hold weighs a loss or a pile against this share of the mark, and MIN_SEED atoms
+    uint16 public constant GATE_BPS = AceVaultNav.GATE_BPS; // entry shuts while a gain over this share of NAV vests
+    uint16 public constant HOLD_BPS = AceVaultNav.HOLD_BPS; // a loss or deferred gain is material past this share of the mark and MIN_SEED atoms
     uint256 public constant MIN_SEED = AceVaultFlows.MIN_SEED; // the least genesis seed, in atoms: dead shares a rounding walk has to wear through
     uint64 public constant MIN_CAP_TIMELOCK = 1 days;
     uint64 public constant MAX_CAP_TIMELOCK = 14 days;
@@ -78,7 +79,6 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
     uint64 public constant MAX_TENOR_RAIL = AceVaultCaps.MAX_TENOR_RAIL; // in kind the constructor caps the rail at AceVaultInKind.MAX_TENOR_RAIL, 30 days
     uint256 public constant ASK_RESERVE = AceVaultFlows.ASK_RESERVE; // gas a product read keeps back: a cold call plus the worst caller tail
     uint256 private constant VIRTUAL_SHARES = AceVaultFlows.VIRTUAL_SHARES; // resists inflation; MUST agree with _decimalsOffset()
-    uint48 private constant TROUGH_MARKED = type(uint48).max; // the hold's mark: a material loss (fall, booking or drawdown) seen over an unsold pot
 
     address public immutable ACE;
     address public immutable CURATOR; // capital held here never blocks an LP's release, so it can lose its vesting-gain share to a last requester
@@ -171,24 +171,31 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
 
     /// @notice The fee threshold in assets: a collection lifts it to NAV; an entry or an exit carries it per virtual share, so no flow moves the gap per share.
     function feeHighWater() public view returns (uint256) {
-        return AceVaultFlows.layout().feeHighWater;
+        return AceVaultFlows.vaultLayout().feeHighWater;
     }
 
     /// @notice Whether lending is stopped: no placement, no extension, and entry shut.
     function draining() public view returns (bool) {
-        return AceVaultFlows.layout().draining;
+        return AceVaultFlows.vaultLayout().draining;
     }
 
-    // ---- valuation and the requests' hold ----
+    // ---- valuation: NAV and the sync, by AceVaultNav's rules ----
 
-    /// @notice Gross NAV less the unvested pile: a rise vests, and a fall burns the pile first and passes the rest through, so a sync never lowers it.
+    /// @notice Gross NAV less the deferred gain: a rise vests, and a fall burns it first and passes the rest through, so a sync never lowers it.
     function totalAssets() public view override returns (uint256) {
         return _totalAssetsAt(grossNav());
     }
 
-    /// @dev `totalAssets` at a gross the caller already read; the core door prices the requests' hold at it, off the gross its sync read.
+    /// @dev `totalAssets` at a gross the caller already read, such as the one its own sync returned.
     function _totalAssetsAt(uint256 gross) internal view returns (uint256) {
-        return Math.saturatingSub(gross, _pendingUnvested(gross));
+        return AceVaultNav.navAt(gross, VEST_WINDOW);
+    }
+
+    /// @dev `totalAssets` and the deferred gain the next sync would leave, off one gross read.
+    function _navParts() private view returns (uint256 nav, uint256 deferred) {
+        uint256 gross = grossNav();
+        deferred = AceVaultNav.deferredAt(gross, VEST_WINDOW);
+        nav = Math.saturatingSub(gross, deferred);
     }
 
     /// @notice NAV before deferral: the asset balance plus the hub's (vault, asset) pool, resting, lent and owed.
@@ -202,33 +209,17 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
         return IERC20(asset()).balanceOf(address(this));
     }
 
-    /// @notice What a placement may take: idle less what the standing requests hold; nothing while draining.
-    function lendable() public view returns (uint256) {
-        return draining() ? 0 : _instantCashAt(totalAssets());
+    /// @notice Value observed but not yet recognized; the live figure, decayed to this instant.
+    function unvested() public view returns (uint256) {
+        return AceVaultNav.unvested(VEST_WINDOW);
     }
 
-    /// @dev Idle and the requests' hold at a NAV the caller already read, so a verb prices the requests' hold without reading the hub again.
-    function _holdsAt(uint256 nav) internal view returns (uint256 exitable, uint256 heldReq) {
-        exitable = idle();
-        if (AceVaultFlows.layout().draining) return (exitable, 0);
-        heldReq = Math.min(exitable, _requestWorth(nav));
-    }
-
-    /// @dev The standing requests' worth at `nav`, rounded down, over the supply a quote at `nav` prices against.
-    function _requestWorth(uint256 nav) internal view returns (uint256) {
-        return Math.mulDiv(AceVaultFlows.layout().requestedShares, nav + 1, _quoteSupply(nav));
-    }
-
-    /// @dev THE EXIT GATE: whether idle covers the requests' worth at the last sync's NAV; storage and one balance, never a hub view.
-    function _exitsCovered() internal view returns (bool) {
-        VaultLayout storage $ = AceVaultFlows.layout();
-        return $.requestedShares == 0 || _requestWorth(_totalAssetsAt($.navMark)) <= idle();
-    }
-
-    /// @dev What an instant exit may take at `nav`: idle less the requests' hold, all of idle while draining.
-    function _instantCashAt(uint256 nav) internal view returns (uint256) {
-        (uint256 exitable, uint256 heldReq) = _holdsAt(nav);
-        return exitable - heldReq;
+    /// @dev Observe gross NAV and book it into the mark, the deferred gain and the trough hold. FIRST in every verb that moves value.
+    /// @return gross The gross NAV observed, which is also the mark this leaves.
+    function _sync() internal returns (uint256 gross) {
+        gross = grossNav();
+        uint256 rise = AceVaultNav.sync(gross, VEST_WINDOW, IN_KIND, ACE, asset());
+        if (rise != 0) emit ValueDeferred(rise);
     }
 
     /// @dev The virtual offset backing every 4626 conversion, so inherited previews match the mints.
@@ -236,153 +227,61 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
         return 6;
     }
 
-    /// @dev Observe gross NAV: a rise is stamped into the vest and a fall burns it pro rata; a new high lifts `navHigh`. FIRST in every verb that moves value.
-    /// @return gross The gross NAV observed, which is also the mark this leaves.
-    function _sync() internal returns (uint256 gross) {
-        gross = grossNav();
-        VaultLayout storage $ = AceVaultFlows.layout();
-        uint256 mark = $.navMark;
-        if (gross > mark) _stampVest(gross - mark);
-        else if (gross < mark) _burnVest(mark - gross);
-        $.navMark = gross;
-        if (gross > $.navHigh) $.navHigh = gross;
-        if (!IN_KIND) _markTrough(mark, gross);
+    /// @dev The supply plus the virtual offset: the frame every conversion and the fee high-water's carry price in.
+    function _virtualSupply() private view returns (uint256) {
+        return totalSupply() + VIRTUAL_SHARES;
     }
 
-    /// @dev THE TROUGH HOLD, `_sync`'s leg: a material loss over an unsold pot marks; the next sync with none unsold stores a material pile's maturity, else 0.
-    function _markTrough(uint256 mark, uint256 gross) private {
-        VaultLayout storage $ = AceVaultFlows.layout();
-        bool marked = $.troughHold == TROUGH_MARKED;
-        if (!marked && !AceVaultFlows.material(_loss(mark, gross), mark)) return;
-        bool unsold = _unsold();
-        if (marked == unsold) return; // marked over a pot still unsold, or a loss with none unsold: nothing moves
-        $.troughHold = unsold ? TROUGH_MARKED : AceVaultFlows.material(unvested(), gross) ? uint48($.vestMaturity) : 0; // a maturity is at most a week out
+    /// @dev Whether shares past the seed's are out: THE ONE live-supply test every zero-supply branch reads, verb and view alike.
+    function _hasLiveShares() private view returns (bool) {
+        return totalSupply() > SEED_SHARES;
     }
 
-    /// @dev The loss a sync from `mark` to `gross` weighs: the fall or the booked value a door collect left in `BOOKED`, and with either the drawdown.
-    function _loss(uint256 mark, uint256 gross) private view returns (uint256 loss) {
-        loss = Math.max(Math.saturatingSub(mark, gross), TransientSlot.tload(TransientSlot.asUint256(AceVaultFlows.BOOKED)));
-        if (loss != 0) loss = Math.max(loss, _drawdown(gross));
+    /// @dev Shares for assets at a NAV the caller already read: OZ's own formula, as OZ's `_convertToShares` re-reads `totalAssets()` itself.
+    function _sharesAt(uint256 assets, uint256 nav, Math.Rounding rounding) internal view returns (uint256) {
+        return Math.mulDiv(assets, _virtualSupply(), nav + 1, rounding);
     }
 
-    /// @dev Whether the stored hold alone shuts entry, from storage, blind to a hub pot: a second to come, a material pile, no unexempted key, no gain gate.
-    function _shutByHoldAlone() private view returns (bool) {
-        VaultLayout storage $ = AceVaultFlows.layout();
-        uint48 holdUntil = $.troughHold;
-        if (holdUntil == 0 || holdUntil == TROUGH_MARKED || block.timestamp >= holdUntil || ($.openSeized != 0 && $.exemptSettled == 0)) return false;
-        (uint256 deferred, uint256 mark) = (unvested(), $.navMark);
-        return AceVaultFlows.material(deferred, mark) && !_vesting(deferred, Math.saturatingSub(mark, deferred));
+    /// @dev Assets for shares at a NAV the caller already read; the exact inverse of `_sharesAt`.
+    function _assetsAt(uint256 shares, uint256 nav, Math.Rounding rounding) internal view returns (uint256) {
+        return Math.mulDiv(shares, nav + 1, _virtualSupply(), rounding);
     }
 
-    // ---- the drawdown and the caps ----
+    // ---- the performance fee ----
 
-    /// @dev The drawdown at `gross`, gross NAV's fall below its high-water: the one figure the total's room and the lens both read.
-    function _drawdown(uint256 gross) private view returns (uint256) {
-        return Math.saturatingSub(AceVaultFlows.layout().navHigh, gross);
+    /// @notice Collect the performance fee against the NAV the sync observes.
+    function collectFee() external nonReentrant {
+        _collectFeeAt(_totalAssetsAt(_sync()));
     }
 
-    /// @notice A collateral's effective cap: its row while listed, else the wildcard's.
-    function effectiveCap(address collateral) public view returns (uint256) {
-        return AceVaultCaps.effective(AceVaultFlows.layout(), collateral);
+    /// @dev Mint the curator's fee shares at `nav`, then lift the high-water to it if it passes, or re-stamp it with no live supply; a zero fee does neither.
+    function _collectFeeAt(uint256 nav) internal {
+        if (PERF_FEE_BPS == 0) return;
+        uint256 shares = _pendingFeeShares(nav);
+        if (shares != 0) {
+            _mint(CURATOR, shares);
+            emit FeeCharged(shares, nav);
+        }
+        AceVaultNav.liftHighWater(nav, _hasLiveShares());
     }
 
-    /// @notice Set a key's cap and list it: at or under its effective cap it lands at once, by the curator or the guardian; above it, it waits.
-    /// @notice The key is a collateral, `address(0)` for the wildcard, or this vault for the total; in kind the wildcard stays zero and the asset is no key.
-    function submitCap(address key, uint192 cap) external {
-        key; // these compile to nothing; they keep the inputs' ABI names, as the body reads them in the library
-        cap;
-        _return(_fwd(address(AceVaultCaps)));
+    /// @notice The fee shares a collection would mint now.
+    function pendingFeeShares() public view returns (uint256) {
+        return _pendingFeeShares(totalAssets());
     }
 
-    /// @notice Delist a collateral so the wildcard applies: at once unless the wildcard is above its row, else after the timelock.
-    function submitDelist(address collateral) external {
-        collateral; // compiles to nothing; it keeps the input's ABI name
-        _return(_fwd(address(AceVaultCaps)));
+    /// @dev The fee shares a collection at `nav` mints; none for a vault charging none or with no live supply.
+    function _pendingFeeShares(uint256 nav) internal view returns (uint256) {
+        if (PERF_FEE_BPS == 0) return 0;
+        return AceVaultNav.feeShares(nav, PERF_FEE_BPS, totalSupply(), _hasLiveShares());
     }
 
-    /// @notice Make a key's pending change live once it has waited out the timelock. PERMISSIONLESS.
-    function acceptCap(address key) external {
-        key; // compiles to nothing; it keeps the input's ABI name
-        _return(_fwd(address(AceVaultCaps)));
+    /// @dev The supply a quote at `nav` prices against: the fee its verb collects first is already outstanding, plus the virtual offset.
+    function _quoteSupply(uint256 nav) internal view returns (uint256) {
+        return _virtualSupply() + _pendingFeeShares(nav);
     }
 
-    /// @notice Drop a key's pending change. The curator or the guardian.
-    function revokePendingCap(address key) external {
-        key; // compiles to nothing; it keeps the input's ABI name
-        _return(_fwd(address(AceVaultCaps)));
-    }
-
-    // ---- the core door and the roll policy ----
-
-    /// @notice Borrow against collateral at the product's terms: the vault opens to itself, then pays and hands title over.
-    /// @notice The draw is bound to the ask, railed by the tenor bounds, and held under lendable cash, the collateral's room and the total.
-    /// @param request What the borrower asks; the product's terms decide what it admits, within it.
-    /// @param data The product's own payload, such as a signed quote.
-    /// @param permit2 A Permit2 SignatureTransfer for the collateral, or empty to pull on allowance.
-    /// @return loanId The loan, titled to the caller.
-    function borrow(BorrowRequest calldata request, bytes calldata data, bytes calldata permit2) external nonReentrant returns (uint256 loanId) {
-        if (draining()) revert Draining();
-        uint256 gross = _sync();
-        (MarketParams memory mp, Terms memory draw) = _terms(msg.sender, request, data);
-        bytes32 id = AceVaultFlows.place(Ctx(asset(), MANAGER, _instantCashAt(_totalAssetsAt(gross)), _room(mp, draw.principal, gross)), mp, draw, permit2);
-        IVaultTerms(TERMS).beforeLend(Lend.Borrow, mp, 0, data);
-        loanId = _lend(id, mp, draw, request.minPayout, request.deadline);
-        IVaultTerms(TERMS).afterLend(Lend.Borrow, mp, loanId, msg.sender, data);
-        _sync();
-    }
-
-    /// @dev The product's answer for this request, then the base's checks on it: the mode, the binding to the ask and the tenor rail.
-    function _terms(address borrower, BorrowRequest calldata request, bytes calldata data) private view returns (MarketParams memory mp, Terms memory draw) {
-        (mp, draw) = IVaultTerms(TERMS).borrowTerms(borrower, request, data);
-        draw = AceVaultCaps.admit(request, mp, draw, AceVaultCaps.hubAsk(IN_KIND, DOOR), MIN_TENOR, MAX_TENOR);
-    }
-
-    /// @dev The room for `principal` at `gross`, which must be `borrow`'s sync read: `OverTotal` past the total, else the least of the row's and the product's.
-    function _room(MarketParams memory mp, uint256 principal, uint256 gross) private view returns (uint256) {
-        (uint256 row, uint256 total) = AceVaultCaps.room(ACE, asset(), mp.collateral, gross - idle(), _drawdown(gross));
-        if (principal > total) revert AceVaultCaps.OverTotal();
-        return Math.min(row, _ask(abi.encodeCall(IVaultTerms.room, (mp))));
-    }
-
-    /// @dev The core door's hub leg, then the payout and the title to the caller.
-    function _lend(bytes32 id, MarketParams memory mp, Terms memory draw, uint256 minPayout, uint64 deadline) private returns (uint256 loanId) {
-        uint256 payout;
-        (loanId, payout) = AceVaultFlows.lend(ACE, id, mp, draw, minPayout, deadline);
-        IERC20(asset()).safeTransfer(msg.sender, payout);
-        IERC721(TITLE).transferFrom(address(this), msg.sender, loanId);
-    }
-
-    /// @notice The vault is its own roll policy: it consents to one of its loans running longer exactly while it would lend there now.
-    /// @notice The hub asks it for any caller, a stranger included: the exit gate binds a stranger's lengthening as it binds the holder's.
-    /// @dev A plain view the hub asks under its lock, so its own legs read no hub view; the product's word is asked last, and any failure there is a no.
-    /// @param ext The extension the hub asks about.
-    /// @param data The caller's payload.
-    /// @return The selector to consent; zero refuses.
-    function admitsExtension(Extension calldata ext, bytes calldata data) external view returns (bytes4) {
-        bool yes = ext.dst.lender == address(this) && !draining() && _legsOpen(ext) && (ext.newExpiry <= ext.expiry || _exitsCovered() || _shutByHoldAlone())
-            && _consents(ext, data);
-        return yes ? IRollPolicy.admitsExtension.selector : bytes4(0);
-    }
-
-    /// @dev The cap and rail legs of an extension: its collateral's effective cap and the total nonzero, and every tenor inside the rail.
-    function _legsOpen(Extension calldata ext) private view returns (bool) {
-        VaultLayout storage $ = AceVaultFlows.layout();
-        MarketParams calldata dst = ext.dst;
-        return AceVaultCaps.effective($, dst.collateral) != 0 && $.caps[address(this)].cap != 0 && dst.minTenor >= MIN_TENOR && dst.maxTenor <= MAX_TENOR
-            && Math.saturatingSub(ext.newExpiry, block.timestamp) <= MAX_TENOR;
-    }
-
-    /// @dev The product's consent, `Probe.askBool`'s shape without its gas floor: yes only for a success returning exactly the word one.
-    function _consents(Extension calldata ext, bytes calldata data) private view returns (bool) {
-        return _ask(abi.encodeCall(IVaultTerms.admitsExtension, (ext, data))) == 1;
-    }
-
-    /// @dev One word from the product, any failure read as zero: `AceVaultFlows.ask` on `TERMS`, the read the refinance and top-up doors share.
-    function _ask(bytes memory callData) private view returns (uint256) {
-        return AceVaultFlows.ask(TERMS, callData);
-    }
-
-    // ---- the ERC-4626 entry path ----
+    // ---- LP entry ----
 
     /// @notice The share count `deposit` mints, with the pending fee already priced in.
     function previewDeposit(uint256 assets) public view override returns (uint256) {
@@ -394,11 +293,6 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
     function previewMint(uint256 shares) public view override returns (uint256) {
         uint256 nav = totalAssets();
         return Math.mulDiv(shares, nav + 1, _quoteSupply(nav), Math.Rounding.Ceil);
-    }
-
-    /// @dev The supply a quote at `nav` prices against: the fee its verb collects first is already outstanding, plus the virtual offset.
-    function _quoteSupply(uint256 nav) internal view returns (uint256) {
-        return _virtualSupply() + _pendingFeeShares(nav);
     }
 
     /// @notice Deposit assets for shares priced pro-rata against NAV; refused while entry is shut, as `maxDeposit` reads.
@@ -413,6 +307,25 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
         uint256 nav = _openEntry();
         assets = _assetsAt(shares, nav, Math.Rounding.Ceil);
         _enter(receiver, assets, shares, nav);
+    }
+
+    /// @dev Entry's opening, returning the NAV it prices at: the sync, the gates, then the fee, last because in kind its mint would move the batch they read.
+    function _openEntry() internal returns (uint256 nav) {
+        nav = _totalAssetsAt(_sync()); // the sync moves no value, so the gross it read is still gross
+        uint256 deferred = unvested();
+        if (_hasLiveShares()) {
+            if (nav == 0) revert EndOfLife();
+            if (AceVaultNav.gainVesting(deferred, nav, VEST_FLOOR)) revert GainVesting();
+        }
+        if (_unsold()) revert InventoryUnsold();
+        if (AceVaultNav.troughHeld(deferred, nav + deferred)) revert RecoveryVesting(); // past the unsold gate the sync left no mark standing
+        _collectFeeAt(nav);
+    }
+
+    /// @dev Whether entry waits on a pot: one unsold at the hub or a door, or in kind a batch opened this block over tracked shares.
+    function _unsold() internal view returns (bool) {
+        if (IN_KIND && AceVaultInKind.inKindLayout().foldBlock == block.number && AceVaultInKind.inKindLayout().trackedSupply != 0) return true;
+        return AceVaultNav.potsUnsold(ACE, asset());
     }
 
     /// @dev Refuses past the entry cap at `nav`, in assets for `mint` as for `deposit`; in kind also past `MAX_SUPPLY`, the fee collected first counted.
@@ -430,52 +343,15 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
         emit Deposit(caller, receiver, assets, shares);
     }
 
-    /// @dev Mint `shares` for `assets` already held, lifting the mark, `navHigh` and the fee high-water with the entry, so it reads as no growth.
+    /// @dev Mint `shares` for `assets` already held, and book the entry so it reads as no growth.
     function _mintBooked(address receiver, uint256 assets, uint256 shares) private {
         _mint(receiver, shares);
-        VaultLayout storage $ = AceVaultFlows.layout();
-        if (PERF_FEE_BPS != 0) {
-            (uint256 highWater, uint256 virtualSupply) = ($.feeHighWater, _virtualSupply());
-            $.feeHighWater = Math.max(highWater + assets, Math.mulDiv(highWater, virtualSupply, virtualSupply - shares, Math.Rounding.Ceil));
-        }
-        $.navMark += assets;
-        $.navHigh += assets;
+        AceVaultNav.bookEntry(assets, shares, _virtualSupply(), PERF_FEE_BPS != 0);
     }
 
     /// @dev The entry cap at `nav`: zero while draining, else the product's, read by a raw static call that answers zero on any failure.
     function _capAt(address receiver, uint256 nav) private view returns (uint256) {
         return draining() ? 0 : _ask(abi.encodeCall(IVaultTerms.entryCap, (receiver, nav)));
-    }
-
-    /// @dev Entry's opening, returning the NAV it prices at: the sync, the gates, then the fee, last because in kind its mint would move the batch they read.
-    function _openEntry() internal returns (uint256 nav) {
-        nav = _totalAssetsAt(_sync()); // the sync moves no value, so the gross it read is still gross
-        uint256 deferred = unvested();
-        if (_hasLiveShares()) {
-            if (nav == 0) revert EndOfLife();
-            if (_vesting(deferred, nav)) revert GainVesting();
-        }
-        if (_unsold()) revert InventoryUnsold();
-        if (_troughHeld(deferred, nav + deferred)) revert RecoveryVesting(); // past the unsold gate the sync left no mark standing
-        _collectFeeAt(nav);
-    }
-
-    /// @dev Whether shares past the seed's are out: THE ONE live-supply test every zero-supply branch reads, verb and view alike.
-    function _hasLiveShares() private view returns (bool) {
-        return totalSupply() > SEED_SHARES;
-    }
-
-    /// @dev Whether entry waits on a pot: a hub pot or door key no exemption covers, or in kind a batch opened this block over tracked shares.
-    function _unsold() internal view returns (bool) {
-        if (IN_KIND && AceVaultInKind.layout().foldBlock == block.number && AceVaultInKind.layout().trackedSupply != 0) return true;
-        (uint256 unsoldPots, uint256 settledPots) = _hubCounts();
-        VaultLayout storage $ = AceVaultFlows.layout();
-        return AceVaultFlows.unsold(unsoldPots, $.openSeized, settledPots, $.exemptSettled);
-    }
-
-    /// @dev The hub's two counts for this vault in its asset: its settled pots not yet sold, and its pots ever settled.
-    function _hubCounts() private view returns (uint256 unsoldPots, uint256 settledPots) {
-        return IAceLenderOps(ACE).lenderUnresolved(address(this), asset());
     }
 
     /// @notice ERC-4626: zero while entry is shut (spent, a gain vesting, an unsold pot or its recovery, a drain), else the cap; never reverts on the product.
@@ -500,45 +376,38 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
         return IN_KIND ? Math.min(shares, AceVaultInKind.headroom(quoteSupply)) : shares;
     }
 
-    /// @dev `_openEntry`'s gates as a view, on the pile its sync would leave; the verb collects its fee only after them, so the view reads what they read.
+    /// @dev `_openEntry`'s gates as a view, on the deferred gain its sync would leave; the verb charges its fee after them, so the view reads what they read.
     /// @return shut Whether entry would refuse.
     /// @return nav The NAV entry would price at, `totalAssets` off one gross read.
     function _entryShut() internal view returns (bool shut, uint256 nav) {
         uint256 deferred;
         (nav, deferred) = _navParts();
-        shut = _unsold() || _troughHeld(deferred, nav + deferred) || (_hasLiveShares() && (nav == 0 || _vesting(deferred, nav)));
+        shut = _unsold() || AceVaultNav.troughHeld(deferred, nav + deferred)
+            || (_hasLiveShares() && (nav == 0 || AceVaultNav.gainVesting(deferred, nav, VEST_FLOOR)));
     }
 
-    /// @dev `totalAssets` and the pile the next sync would leave, off one gross read.
-    function _navParts() private view returns (uint256 nav, uint256 deferred) {
-        uint256 gross = grossNav();
-        deferred = _pendingUnvested(gross);
-        nav = Math.saturatingSub(gross, deferred);
+    // ---- the cash exits may take, and the requests' hold ----
+
+    /// @notice What a placement may take: idle less what the standing requests hold; nothing while draining.
+    function lendable() public view returns (uint256) {
+        return draining() ? 0 : _instantCashAt(totalAssets());
     }
 
-    /// @dev The trough hold over pile `deferred` at `gross`: it binds while the pile is material and its second has not come; a mark is a second never come.
-    function _troughHeld(uint256 deferred, uint256 gross) private view returns (bool) {
-        return AceVaultFlows.material(deferred, gross) && block.timestamp < AceVaultFlows.layout().troughHold;
+    /// @dev What an instant exit may take at `nav`: idle less the requests' hold, all of idle while draining.
+    function _instantCashAt(uint256 nav) internal view returns (uint256 cash) {
+        cash = idle();
+        if (!draining()) cash -= Math.min(cash, _requestWorth(nav));
     }
 
-    /// @dev Whether a pile this large against NAV is still vesting: entry waits, so no entrant buys a recovery cheap.
-    function _vesting(uint256 deferred, uint256 nav) internal view returns (bool) {
-        return AceVaultFlows.gainVesting(deferred, nav, VEST_FLOOR);
+    /// @dev The standing requests' worth at `nav`, rounded down, over the supply a quote at `nav` prices against.
+    function _requestWorth(uint256 nav) internal view returns (uint256) {
+        return Math.mulDiv(AceVaultFlows.vaultLayout().requestedShares, nav + 1, _quoteSupply(nav));
     }
 
-    /// @dev Shares for assets at a NAV the caller already read: OZ's own formula, as OZ's `_convertToShares` re-reads `totalAssets()` itself.
-    function _sharesAt(uint256 assets, uint256 nav, Math.Rounding rounding) internal view returns (uint256) {
-        return Math.mulDiv(assets, _virtualSupply(), nav + 1, rounding);
-    }
-
-    /// @dev Assets for shares at a NAV the caller already read; the exact inverse of `_sharesAt`.
-    function _assetsAt(uint256 shares, uint256 nav, Math.Rounding rounding) internal view returns (uint256) {
-        return Math.mulDiv(shares, nav + 1, _virtualSupply(), rounding);
-    }
-
-    /// @dev The supply plus the virtual offset: the frame every conversion and the fee high-water's carry price in.
-    function _virtualSupply() private view returns (uint256) {
-        return totalSupply() + VIRTUAL_SHARES;
+    /// @dev THE EXIT GATE: whether idle covers the requests' worth at the last sync's NAV; storage and one balance, never a hub view.
+    function _exitsCovered() internal view returns (bool) {
+        VaultLayout storage $ = AceVaultFlows.vaultLayout();
+        return $.requestedShares == 0 || _requestWorth(_totalAssetsAt($.navMark)) <= idle();
     }
 
     // ---- the instant exit: no exit path calls the product ----
@@ -598,8 +467,7 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
 
     /// @dev The instant exit behind `redeem` and `withdraw`, naming one amount; not OZ's `_withdraw`, as its refusals sit between the spend and the burn.
     function _exitNow(address receiver, address owner, uint256 wantAssets, uint256 wantShares) private returns (uint256 assets, uint256 shares) {
-        _sync();
-        uint256 nav = totalAssets();
+        uint256 nav = _totalAssetsAt(_sync());
         _collectFeeAt(nav);
         (assets, shares) =
             wantShares != 0 ? (_assetsAt(wantShares, nav, Math.Rounding.Floor), wantShares) : (wantAssets, _sharesAt(wantAssets, nav, Math.Rounding.Ceil));
@@ -616,15 +484,9 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
         emit Withdraw(by, receiver, owner, assets, shares);
     }
 
-    /// @dev Book an exit of `assets` for `shares` at `nav`: the high-water scales per virtual share, never under `nav - assets`; mark and high fall by it.
+    /// @dev Book an exit of `assets` for `shares` already burnt at `nav`, then pay it.
     function _payExit(address receiver, uint256 assets, uint256 shares, uint256 nav) private {
-        VaultLayout storage $ = AceVaultFlows.layout();
-        if (PERF_FEE_BPS != 0) {
-            uint256 virtualSupply = _virtualSupply();
-            $.feeHighWater = Math.max(Math.mulDiv($.feeHighWater, virtualSupply, virtualSupply + shares), Math.saturatingSub(nav, assets));
-        }
-        $.navMark = Math.saturatingSub($.navMark, assets); // the cash leaves gross with the transfer below, so the next sync reads no fall
-        $.navHigh = Math.saturatingSub($.navHigh, assets); // and the drawdown stays where it was
+        AceVaultNav.bookExit(assets, shares, nav, _virtualSupply(), PERF_FEE_BPS != 0);
         IERC20(asset()).safeTransfer(receiver, assets);
     }
 
@@ -641,7 +503,7 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
     function requestExit(uint256 shares) external nonReentrant {
         _sync();
         address holder = _msgSender();
-        VaultLayout storage $ = AceVaultFlows.layout();
+        VaultLayout storage $ = AceVaultFlows.vaultLayout();
         Request storage req = $.requests[holder];
         if (shares != 0) {
             _context(holder);
@@ -662,7 +524,7 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
 
     /// @notice Return a lapsed request's whole escrow to its holder. PERMISSIONLESS once the lease has run.
     function lapseExit(address holder) external nonReentrant {
-        Request memory req = AceVaultFlows.layout().requests[holder];
+        Request memory req = AceVaultFlows.vaultLayout().requests[holder];
         if (req.shares == 0) revert NoRequest();
         if (block.timestamp < req.expiresAt) revert RequestLive();
         _unrequest(holder, req.shares);
@@ -671,7 +533,7 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
     /// @dev Hand `shares` of `holder`'s escrow back.
     function _unrequest(address holder, uint256 shares) private {
         _sync();
-        VaultLayout storage $ = AceVaultFlows.layout();
+        VaultLayout storage $ = AceVaultFlows.vaultLayout();
         Request storage req = $.requests[holder];
         if (shares > req.shares) revert OverRequest();
         req.shares -= shares;
@@ -681,9 +543,9 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
     }
 
     /// @notice The shares of `holder`'s request a claim could burn now, against idle, at the price the claim would pay.
-    /// @dev It replays the release: for the last requester, every other share a donation or (for an LP) the curator's, it adds the pile back to NAV.
+    /// @dev It replays the release: for the last requester, every other share a donation or (for an LP) the curator's, it adds the deferred gain back to NAV.
     function maxClaim(address holder) public view returns (uint256 shares) {
-        VaultLayout storage $ = AceVaultFlows.layout();
+        VaultLayout storage $ = AceVaultFlows.vaultLayout();
         uint256 own = $.requests[holder].shares;
         (uint256 nav, uint256 deferred) = _navParts();
         if (own == $.requestedShares && _freeSupply(holder, totalSupply()) == 0) nav += deferred;
@@ -691,15 +553,15 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
     }
 
     /// @notice Burn `shares` of the caller's request and pay their worth to `receiver` from idle, first come, at its NAV rounded down, at least `minAssets`.
-    /// @dev The last requester releases the pile BEFORE the fee, so the fee is charged on it; any other claim leaves its share of the pile to the stayers.
+    /// @dev The last requester releases the deferred gain BEFORE the fee, so the fee is charged on it; any other claim leaves its share to the stayers.
     function claimExit(uint256 shares, address receiver, uint256 minAssets) external nonReentrant returns (uint256 assets) {
         uint256 gross = _sync();
         address holder = _msgSender();
-        VaultLayout storage $ = AceVaultFlows.layout();
+        VaultLayout storage $ = AceVaultFlows.vaultLayout();
         Request storage req = $.requests[holder];
         if (shares > req.shares) revert OverRequest();
-        if (req.shares == $.requestedShares && _freeSupply(holder, totalSupply()) == 0) _release(gross);
-        uint256 nav = totalAssets();
+        if (req.shares == $.requestedShares && _freeSupply(holder, totalSupply()) == 0) AceVaultNav.release(gross);
+        uint256 nav = _totalAssetsAt(gross);
         _collectFeeAt(nav);
         assets = _assetsAt(shares, nav, Math.Rounding.Floor);
         if (assets == 0) revert ZeroAssets();
@@ -714,50 +576,157 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
         emit Withdraw(holder, receiver, holder, assets, shares);
     }
 
-    // ---- the curator surface ----
+    // ---- borrowing: `borrow` and the roll policy ----
 
-    /// @notice Stop or resume lending: ON by the curator or the guardian, OFF by the curator alone, each at once; refused for a vault without a drain.
-    /// @notice While it stands nothing lends or extends, entry shuts and exits take all of idle first come: settle first, or exits leave at the pre-loss price.
-    function setDrain(bool on) external nonReentrant {
-        if (!DRAINABLE) revert NotDrainable();
-        address by = _msgSender();
-        if (by != CURATOR && !(on && by == GUARDIAN)) revert NotCurator();
+    /// @notice Borrow against collateral at the product's terms: the vault opens to itself, then pays and hands title over.
+    /// @notice The draw is bound to the ask, railed by the tenor bounds, and held under lendable cash, the collateral's room and the total.
+    /// @param request What the borrower asks; the product's terms decide what it admits, within it.
+    /// @param data The product's own payload, such as a signed quote.
+    /// @param permit2 A Permit2 SignatureTransfer for the collateral, or empty to pull on allowance.
+    /// @return loanId The loan, titled to the caller.
+    function borrow(BorrowRequest calldata request, bytes calldata data, bytes calldata permit2) external nonReentrant returns (uint256 loanId) {
+        if (draining()) revert Draining();
+        uint256 gross = _sync();
+        (MarketParams memory mp, Terms memory draw) = IVaultTerms(TERMS).borrowTerms(msg.sender, request, data);
+        draw = AceVaultCaps.admit(request, mp, draw, AceVaultCaps.hubAsk(IN_KIND, DOOR), MIN_TENOR, MAX_TENOR); // the mode, the ask and the tenor rail
+        bytes32 id = AceVaultFlows.place(Ctx(asset(), MANAGER, _instantCashAt(_totalAssetsAt(gross)), _room(mp, draw.principal, gross)), mp, draw, permit2);
+        IVaultTerms(TERMS).beforeLend(Lend.Borrow, mp, 0, data);
+        loanId = _lend(id, mp, draw, request.minPayout, request.deadline);
+        IVaultTerms(TERMS).afterLend(Lend.Borrow, mp, loanId, msg.sender, data);
         _sync();
-        AceVaultFlows.layout().draining = on;
-        emit DrainSet(by, on);
     }
 
-    /// @notice Exempt the pots and door goods standing now from the entry gate, for those that can never sell. GUARDIAN ONLY; none without one.
-    /// @notice It refuses `PotsMoved` unless the hub's settled count is still the one named; any later settlement, a stranger's too, voids it until renewed.
-    function exemptDeadPots(uint256 expectedSettled) external nonReentrant {
-        if (GUARDIAN == address(0) || _msgSender() != GUARDIAN) revert NotGuardian();
-        (uint256 unsoldPots, uint256 settledPots) = _hubCounts();
-        if (settledPots != expectedSettled) revert PotsMoved(settledPots);
-        VaultLayout storage $ = AceVaultFlows.layout();
-        uint256 mark = $.navMark;
-        if (!IN_KIND && AceVaultFlows.unsold(unsoldPots, $.openSeized, settledPots, $.exemptSettled) && AceVaultFlows.material(_loss(mark, grossNav()), mark)) {
-            $.troughHold = TROUGH_MARKED; // `_markTrough`'s mark rule (keep the two equal), never its clear: a sync clears over the pile it just stamped
-        }
-        $.exemptSettled = settledPots;
-        emit DeadPotsExempted(unsoldPots, settledPots);
+    /// @dev The room for `principal` at `gross`, which must be `borrow`'s sync read: `OverTotal` past the total, else the least of the row's and the product's.
+    function _room(MarketParams memory mp, uint256 principal, uint256 gross) private view returns (uint256) {
+        (uint256 row, uint256 total) = AceVaultCaps.room(ACE, asset(), mp.collateral, gross - idle(), AceVaultNav.drawdown(gross));
+        if (principal > total) revert AceVaultCaps.OverTotal();
+        return Math.min(row, _ask(abi.encodeCall(IVaultTerms.room, (mp))));
     }
 
-    // ---- the permissionless crank: it moves cash and prices nothing ----
+    /// @dev One word from the product, any failure read as zero: `AceVaultFlows.ask` on `TERMS`, kept as one call site, which is smaller than three.
+    function _ask(bytes memory callData) private view returns (uint256) {
+        return AceVaultFlows.ask(TERMS, callData);
+    }
+
+    /// @dev `borrow`'s hub leg, then the payout and the title to the caller.
+    function _lend(bytes32 id, MarketParams memory mp, Terms memory draw, uint256 minPayout, uint64 deadline) private returns (uint256 loanId) {
+        uint256 payout;
+        (loanId, payout) = AceVaultFlows.lend(ACE, id, mp, draw, minPayout, deadline);
+        IERC20(asset()).safeTransfer(msg.sender, payout);
+        IERC721(TITLE).transferFrom(address(this), msg.sender, loanId);
+    }
+
+    /// @notice The vault is its own roll policy: it consents to one of its loans running longer exactly while it would lend there now.
+    /// @notice The hub asks it for any caller, a stranger included: the exit gate binds a stranger's lengthening as it binds the holder's.
+    /// @dev A plain view the hub asks under its lock, so its own legs read no hub view; the product's word is asked last, and only exactly one is a yes.
+    /// @param ext The extension the hub asks about.
+    /// @param data The caller's payload.
+    /// @return The selector to consent; zero refuses.
+    function admitsExtension(Extension calldata ext, bytes calldata data) external view returns (bytes4) {
+        bool yes = ext.dst.lender == address(this) && !draining() && _legsOpen(ext)
+            && (ext.newExpiry <= ext.expiry || _exitsCovered() || AceVaultNav.shutByHoldAlone(VEST_WINDOW, VEST_FLOOR))
+            && _ask(abi.encodeCall(IVaultTerms.admitsExtension, (ext, data))) == 1;
+        return yes ? IRollPolicy.admitsExtension.selector : bytes4(0);
+    }
+
+    /// @dev The cap and rail legs of an extension: its collateral's effective cap and the total nonzero, and every tenor inside the rail.
+    function _legsOpen(Extension calldata ext) private view returns (bool) {
+        VaultLayout storage $ = AceVaultFlows.vaultLayout();
+        MarketParams calldata dst = ext.dst;
+        return AceVaultCaps.effective($, dst.collateral) != 0 && $.caps[address(this)].cap != 0 && dst.minTenor >= MIN_TENOR && dst.maxTenor <= MAX_TENOR
+            && Math.saturatingSub(ext.newExpiry, block.timestamp) <= MAX_TENOR;
+    }
+
+    // ---- the lending verbs on a live loan ----
+
+    /// @notice Extend a loan of this vault's in place for its title holder, the caller, at its own tenor from now, in any mode.
+    /// @notice The fee is the hub's on the time added, pulled from the holder; approve this vault for the title to renew at any time in the term.
+    /// @notice Unapproved, the vault is a non-holder at the hub: it renews only in the last quarter, at or above the price and out of the band.
+    /// @return fee The fee the hub charged.
+    function extendFor(uint256 loanId, uint256 maxFee, uint256 minBufferWad, bytes calldata data, bytes calldata permit2) external returns (uint256 fee) {
+        loanId; // these compile to nothing; they keep the inputs' ABI names, as the decoder has bounds-checked each `bytes` whole
+        maxFee;
+        minBufferWad;
+        data.length;
+        permit2.length;
+        _return(_lendingVerb());
+    }
+
+    /// @notice Refinance a loan of this vault's for its title holder, the caller, into the market the product answers, at the product's draw.
+    /// @notice The caller approves this vault for the title, which it holds for this call alone; both titles and the net come home in the call.
+    /// @return newId The successor loan.
+    /// @return out The net paid to the caller.
+    function refinanceFor(
+        uint256 loanId,
+        address collateral,
+        uint256 principal,
+        uint64 tenor,
+        uint256 minPayout,
+        uint256 minBufferWad,
+        uint64 deadline,
+        uint256 withdrawUnits,
+        address withdrawTo,
+        bytes calldata data
+    ) external returns (uint256 newId, uint256 out) {
+        loanId; // these compile to nothing; they keep the inputs' ABI names
+        collateral;
+        principal;
+        tenor;
+        minPayout;
+        minBufferWad;
+        deadline;
+        withdrawUnits;
+        withdrawTo;
+        data.length; // decoded whole here, so the forward carries an encoding the vault checked
+        _return(_lendingVerb());
+    }
+
+    /// @notice Draw more on a loan of this vault's for its title holder, the caller, in place: the same loan and term, at its market's price.
+    /// @notice The product consents by its refinance answer, the loan's own market admitting the whole new debt; the caller approves this vault for the title.
+    /// @return fee The fee the hub charged, netted from the holder's payout.
+    function drawMoreFor(uint256 loanId, uint256 amount, uint256 minPayout, uint256 minBufferWad, uint64 deadline, bytes calldata data)
+        external
+        returns (uint256 fee)
+    {
+        loanId; // these compile to nothing; they keep the inputs' ABI names
+        amount;
+        minPayout;
+        minBufferWad;
+        deadline;
+        data.length; // decoded whole here, so the forward carries an encoding the vault checked
+        _return(_lendingVerb());
+    }
+
+    /// @dev The live-loan lending verbs' wrapper under the lock: drain, sweep, the exit gate and lendable cash as transient words, body, both zeroed, sweep.
+    function _lendingVerb() private nonReentrant returns (bytes memory ret) {
+        if (draining()) revert Draining();
+        uint256 nav = _sweep();
+        bytes32 gate = AceVaultFlows.LENDING;
+        bytes32 cash = bytes32(uint256(gate) + 1);
+        TransientSlot.tstore(TransientSlot.asUint256(gate), _exitsCovered() || AceVaultNav.shutByHoldAlone(VEST_WINDOW, VEST_FLOOR) ? 1 : 0);
+        TransientSlot.tstore(TransientSlot.asUint256(cash), _instantCashAt(nav));
+        ret = _delegate(address(AceVaultFlows));
+        TransientSlot.tstore(TransientSlot.asUint256(gate), 0);
+        TransientSlot.tstore(TransientSlot.asUint256(cash), 0);
+        _sweep();
+    }
+
+    // ---- defaults: the crank, the collect, and door mode's return and write-off ----
 
     /// @notice Collect everything the hub has credited this vault, every market at once, into idle; NAV-neutral. PERMISSIONLESS.
     function crank() external nonReentrant {
         _sweep();
     }
 
-    /// @dev The crank's body, which the collect, the door's return and the other lending doors also close with.
-    function _sweep() private {
+    /// @dev The crank's body, which the collect, the door's return and the live-loan lending verbs also close with.
+    /// @return nav NAV once the hub's credit is home and the fee charged.
+    function _sweep() private returns (uint256 nav) {
         _sync();
         uint256 paid = IAceLenderOps(ACE).collect(asset(), address(this)); // this vault's own pool, to this vault
         if (paid != 0) emit Collected(paid);
-        _collectFeeAt(totalAssets());
+        nav = totalAssets(); // read again: the collect moved the hub's credit into idle
+        _collectFeeAt(nav);
     }
-
-    // ---- the collect: in kind, or to the door ----
 
     /// @notice End each named loan of this vault's and take its pot: in kind to this vault, PERMISSIONLESS; in door mode to the door, THE DOOR ONLY.
     /// @notice A repaid or already-collected id yields zero and the batch goes on; one neither expired nor settleable on distress reverts the whole batch.
@@ -780,8 +749,6 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
         _sweep();
         TransientSlot.tstore(TransientSlot.asUint256(AceVaultFlows.BOOKED), 0);
     }
-
-    // ---- door mode: the return and the write-off ----
 
     /// @notice Take a sale's cash from the door against a seized collateral, and close it from the entry gate if `closes`. THE DOOR ONLY.
     /// @notice Any key takes cash; only `(collateral, 0, false)` refuses. The cash vests, and lowers the drawdown one for one.
@@ -819,78 +786,62 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
         _return(_fwd(address(AceVaultFlows)));
     }
 
-    // ---- the lending doors beyond the borrow ----
+    // ---- the curator and the guardian: the caps, the drain, the dead-pot exemption ----
 
-    /// @notice Extend a loan of this vault's in place for its title holder, the caller, at its own tenor from now, in any mode.
-    /// @notice The fee is the hub's on the time added, pulled from the holder; approve this vault for the title to renew at any time in the term.
-    /// @notice Unapproved, the vault is a non-holder at the hub: it renews only in the last quarter, at or above the price and out of the band.
-    /// @return fee The fee the hub charged.
-    function extendFor(uint256 loanId, uint256 maxFee, uint256 minBufferWad, bytes calldata data, bytes calldata permit2) external returns (uint256 fee) {
-        loanId; // these compile to nothing; they keep the inputs' ABI names, as the decoder has bounds-checked each `bytes` whole
-        maxFee;
-        minBufferWad;
-        data.length;
-        permit2.length;
-        _return(_lendingDoor());
+    /// @notice A collateral's effective cap: its row while listed, else the wildcard's.
+    function effectiveCap(address collateral) public view returns (uint256) {
+        return AceVaultCaps.effective(AceVaultFlows.vaultLayout(), collateral);
     }
 
-    /// @notice Refinance a loan of this vault's for its title holder, the caller, into the market the product answers, at the product's draw.
-    /// @notice The caller approves this vault for the title, which it holds for this call alone; both titles and the net come home in the call.
-    /// @return newId The successor loan.
-    /// @return out The net paid to the caller.
-    function refinanceFor(
-        uint256 loanId,
-        address collateral,
-        uint256 principal,
-        uint64 tenor,
-        uint256 minPayout,
-        uint256 minBufferWad,
-        uint64 deadline,
-        uint256 withdrawUnits,
-        address withdrawTo,
-        bytes calldata data
-    ) external returns (uint256 newId, uint256 out) {
-        loanId; // these compile to nothing; they keep the inputs' ABI names
-        collateral;
-        principal;
-        tenor;
-        minPayout;
-        minBufferWad;
-        deadline;
-        withdrawUnits;
-        withdrawTo;
-        data.length; // decoded whole here, so the forward carries an encoding the vault checked
-        _return(_lendingDoor());
+    /// @notice Set a key's cap and list it: at or under its effective cap it lands at once, by the curator or the guardian; above it, it waits.
+    /// @notice The key is a collateral, `address(0)` for the wildcard, or this vault for the total; in kind the wildcard stays zero and the asset is no key.
+    function submitCap(address key, uint192 cap) external {
+        key; // these compile to nothing; they keep the inputs' ABI names, as the body reads them in the library
+        cap;
+        _return(_fwd(address(AceVaultCaps)));
     }
 
-    /// @notice Draw more on a loan of this vault's for its title holder, the caller, in place: the same loan and term, at its market's price.
-    /// @notice The product consents by its refinance answer, the loan's own market admitting the whole new debt; the caller approves this vault for the title.
-    /// @return fee The fee the hub charged, netted from the holder's payout.
-    function drawMoreFor(uint256 loanId, uint256 amount, uint256 minPayout, uint256 minBufferWad, uint64 deadline, bytes calldata data)
-        external
-        returns (uint256 fee)
-    {
-        loanId; // these compile to nothing; they keep the inputs' ABI names
-        amount;
-        minPayout;
-        minBufferWad;
-        deadline;
-        data.length; // decoded whole here, so the forward carries an encoding the vault checked
-        _return(_lendingDoor());
+    /// @notice Delist a collateral so the wildcard applies: at once unless the wildcard is above its row, else after the timelock.
+    function submitDelist(address collateral) external {
+        collateral; // compiles to nothing; it keeps the input's ABI name
+        _return(_fwd(address(AceVaultCaps)));
     }
 
-    /// @dev The other lending doors' wrapper under the lock: drain, sweep, the exit gate and lendable cash as transient words, body, both zeroed, sweep.
-    function _lendingDoor() private nonReentrant returns (bytes memory ret) {
-        if (draining()) revert Draining();
-        _sweep();
-        bytes32 gate = AceVaultFlows.LENDING;
-        bytes32 cash = bytes32(uint256(gate) + 1);
-        TransientSlot.tstore(TransientSlot.asUint256(gate), _exitsCovered() || _shutByHoldAlone() ? 1 : 0);
-        TransientSlot.tstore(TransientSlot.asUint256(cash), _instantCashAt(totalAssets()));
-        ret = _delegate(address(AceVaultFlows));
-        TransientSlot.tstore(TransientSlot.asUint256(gate), 0);
-        TransientSlot.tstore(TransientSlot.asUint256(cash), 0);
-        _sweep();
+    /// @notice Make a key's pending change live once it has waited out the timelock. PERMISSIONLESS.
+    function acceptCap(address key) external {
+        key; // compiles to nothing; it keeps the input's ABI name
+        _return(_fwd(address(AceVaultCaps)));
+    }
+
+    /// @notice Drop a key's pending change. The curator or the guardian.
+    function revokePendingCap(address key) external {
+        key; // compiles to nothing; it keeps the input's ABI name
+        _return(_fwd(address(AceVaultCaps)));
+    }
+
+    /// @notice Stop or resume lending: ON by the curator or the guardian, OFF by the curator alone, each at once; refused for a vault without a drain.
+    /// @notice While it stands nothing lends or extends, entry shuts and exits take all of idle first come: settle first, or exits leave at the pre-loss price.
+    function setDrain(bool on) external nonReentrant {
+        if (!DRAINABLE) revert NotDrainable();
+        address by = _msgSender();
+        if (by != CURATOR && !(on && by == GUARDIAN)) revert NotCurator();
+        _sync();
+        AceVaultFlows.vaultLayout().draining = on;
+        emit DrainSet(by, on);
+    }
+
+    /// @notice Exempt the pots and door goods standing now from the entry gate, for those that can never sell. GUARDIAN ONLY; none without one.
+    /// @notice Refuses `PotsMoved` if the settled count moved; a later settlement, a stranger's too, voids it. Out of kind it marks the hold as a sync does.
+    function exemptDeadPots(uint256 expectedSettled) external nonReentrant {
+        if (GUARDIAN == address(0) || _msgSender() != GUARDIAN) revert NotGuardian();
+        (uint256 unsoldPots, uint256 settledPots) = IAceLenderOps(ACE).lenderUnresolved(address(this), asset());
+        if (settledPots != expectedSettled) revert PotsMoved(settledPots);
+        VaultLayout storage $ = AceVaultFlows.vaultLayout();
+        if (!IN_KIND && AceVaultNav.unsold(unsoldPots, $.openSeized, settledPots, $.exemptSettled) && AceVaultNav.lossMarks($.navMark, grossNav())) {
+            $.troughHold = AceVaultNav.TROUGH_MARKED; // the sync's mark rule, never its clear: a sync clears over the vest it just stamped
+        }
+        $.exemptSettled = settledPots;
+        emit DeadPotsExempted(unsoldPots, settledPots);
     }
 
     // ---- in kind: the claim and the tracker ----
@@ -928,7 +879,19 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
         if (IN_KIND) AceVaultInKind.moved(from, to, value);
     }
 
-    // ---- the forwarded verbs: each named here, its body run in a linked library as this vault ----
+    // ---- the share token: every move takes the lock ----
+
+    /// @notice ERC-20 transfer, under the vault's lock, so no product write call can move shares mid-verb.
+    function transfer(address to, uint256 value) public override(ERC20, IERC20) nonReentrant returns (bool) {
+        return super.transfer(to, value);
+    }
+
+    /// @notice ERC-20 transferFrom, under the vault's lock, as `transfer` is.
+    function transferFrom(address from, address to, uint256 value) public override(ERC20, IERC20) nonReentrant returns (bool) {
+        return super.transferFrom(from, to, value);
+    }
+
+    // ---- the forwarded verbs: each named above, its body run in a linked library as this vault ----
 
     /// @dev This call's own calldata, run in linked library `lib` as this vault under the lock; its answer is kept in memory.
     function _fwd(address lib) private nonReentrant returns (bytes memory) {
@@ -951,112 +914,5 @@ contract AceVault is ERC4626, ReentrancyGuardTransient, IAceVaultDoor {
         assembly ("memory-safe") {
             return(add(ret, 0x20), mload(ret))
         }
-    }
-
-    // ---- the share token: every move takes the lock ----
-
-    /// @notice ERC-20 transfer, under the vault's lock, so no product write call can move shares mid-verb.
-    function transfer(address to, uint256 value) public override(ERC20, IERC20) nonReentrant returns (bool) {
-        return super.transfer(to, value);
-    }
-
-    /// @notice ERC-20 transferFrom, under the vault's lock, as `transfer` is.
-    function transferFrom(address from, address to, uint256 value) public override(ERC20, IERC20) nonReentrant returns (bool) {
-        return super.transferFrom(from, to, value);
-    }
-
-    // ---- deferral: one weighted accumulator, and this contract holds the only copy of it ----
-
-    /// @notice Value observed but not yet recognized; the live figure, decayed to this instant.
-    function unvested() public view returns (uint256) {
-        VaultLayout storage $ = AceVaultFlows.layout();
-        return _readVest($.vestBasis, $.vestMaturity);
-    }
-
-    /// @dev What a (basis, maturity) pair reads as now, CEIL, which favours stayers on an exit and the entrant on an entry; zero once matured or burnt out.
-    function _readVest(uint128 basis, uint64 maturity) internal view returns (uint256) {
-        if (basis == 0 || maturity <= block.timestamp) return 0;
-        return Math.mulDiv(basis, maturity - block.timestamp, VEST_WINDOW, Math.Rounding.Ceil);
-    }
-
-    /// @dev The vest a `rise` onto pile `deferred` stamps: a size-blended maturity and a FLOORED basis reading back exactly the sum; saturates, never reverts.
-    function _grossed(uint256 deferred, uint256 rise) internal view returns (uint128 basis, uint64 maturity) {
-        maturity = AceVaultFlows.blended(deferred, rise, AceVaultFlows.layout().vestMaturity, VEST_WINDOW);
-        basis = uint128(Math.min(Math.mulDiv(deferred + rise, VEST_WINDOW, maturity - block.timestamp), type(uint128).max));
-    }
-
-    /// @dev The basis left after a `fall` against pile `deferred`; FLOOR, retiring the pile's share.
-    function _scaled(uint256 deferred, uint256 fall) internal view returns (uint128) {
-        if (fall >= deferred) return 0;
-        return SafeCast.toUint128(Math.mulDiv(AceVaultFlows.layout().vestBasis, deferred - fall, deferred, Math.Rounding.Floor));
-    }
-
-    /// @dev Fold an observed NAV rise into the vest.
-    function _stampVest(uint256 amount) internal {
-        if (amount == 0) return;
-        VaultLayout storage $ = AceVaultFlows.layout();
-        ($.vestBasis, $.vestMaturity) = _grossed(unvested(), amount);
-        emit ValueDeferred(amount);
-    }
-
-    /// @dev A NAV fall retires the vest pro rata: a gain already wiped out cannot still be pending.
-    function _burnVest(uint256 amount) internal {
-        uint256 deferred = unvested();
-        if (deferred == 0 || amount == 0) return;
-        AceVaultFlows.layout().vestBasis = _scaled(deferred, amount);
-    }
-
-    /// @dev The pile the next `_sync` would leave at `gross`, through the verb's own helpers, so the view and the verb never round apart.
-    function _pendingUnvested(uint256 gross) internal view returns (uint256) {
-        uint256 deferred = unvested();
-        VaultLayout storage $ = AceVaultFlows.layout();
-        uint256 mark = $.navMark;
-        if (gross > mark) {
-            (uint128 basis, uint64 maturity) = _grossed(deferred, gross - mark);
-            return _readVest(basis, maturity);
-        }
-        if (gross < mark && deferred != 0) return _readVest(_scaled(deferred, mark - gross), $.vestMaturity);
-        return deferred;
-    }
-
-    /// @dev The last requester's release: the pile vests whole, and the mark takes the gross `_sync` read, which nothing since has moved.
-    function _release(uint256 gross) internal {
-        VaultLayout storage $ = AceVaultFlows.layout();
-        ($.vestBasis, $.navMark) = (0, gross);
-    }
-
-    // ---- the performance fee ----
-
-    /// @notice Collect the performance fee against the NAV the last sync observed.
-    function collectFee() external nonReentrant {
-        _sync();
-        if (PERF_FEE_BPS != 0) _collectFeeAt(totalAssets()); // the zero-fee test is what skips the NAV read
-    }
-
-    /// @dev Mint the fee shares `_pendingFeeShares` prices at `nav`, then lift the high-water to `nav` if it passes; no live supply re-stamps at `nav`.
-    function _collectFeeAt(uint256 nav) internal {
-        if (PERF_FEE_BPS == 0) return;
-        uint256 shares = _pendingFeeShares(nav);
-        if (shares != 0) {
-            _mint(CURATOR, shares);
-            emit FeeCharged(shares, nav);
-        }
-        VaultLayout storage $ = AceVaultFlows.layout();
-        uint256 highWater = $.feeHighWater;
-        if (_hasLiveShares() ? nav > highWater : nav != highWater) $.feeHighWater = nav;
-    }
-
-    /// @notice The fee shares a collection would mint now.
-    function pendingFeeShares() public view returns (uint256) {
-        return _pendingFeeShares(totalAssets());
-    }
-
-    /// @dev The fee shares a collection at `nav` mints: PERF_FEE_BPS of the rise past the high-water, priced net of the fee; none with no live supply.
-    function _pendingFeeShares(uint256 nav) internal view returns (uint256) {
-        if (PERF_FEE_BPS == 0) return 0;
-        uint256 highWater = AceVaultFlows.layout().feeHighWater;
-        if (!_hasLiveShares() || nav <= highWater) return 0;
-        uint256 fee = Math.mulDiv(nav - highWater, PERF_FEE_BPS, 10_000); // at most half of NAV, so `nav - fee` never reaches zero
-        return Math.mulDiv(fee, totalSupply(), nav - fee);
     }
 }

@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
-import {CapListing, ProductConfig} from "../../src/curator/AceVaultCaps.sol";
+import {CapListing, ProductConfig} from "../../src/curator/libraries/AceVaultCaps.sol";
 import {CuratorTerms, Listing} from "../../src/entities/curated/CuratorTerms.sol";
 import {CuratedVaults} from "../utils/CuratedVaults.sol";
 import {PocDeployConfig} from "../../src/config/Defaults.sol";

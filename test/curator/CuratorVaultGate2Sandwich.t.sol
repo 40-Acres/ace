@@ -105,7 +105,7 @@ contract CuratorVaultGate2SandwichTest is CuratorVaultBase {
 
     /// @dev UNDER AN EXEMPTION THE VEST IS THE DEFENCE: the guardian exempts a pot that then sells, so entry is open over the sale.
     /// @dev The curve, because the profit scales in the stake and a single size cannot show a slope.
-    /// @dev MUTATION TARGET: neuter `_stampVest` and the attacker extracts a share of the payment the sale rebates.
+    /// @dev MUTATION TARGET: neuter `AceVaultNav.stampVest` and the attacker extracts a share of the payment the sale rebates.
     function test_Gate2_UnderAnExemptionTheVestLeavesTheSandwichNothing() public {
         uint256[4] memory sizes = [uint256(5_000e6), 50_000e6, 200_000e6, 40 * SEED];
         for (uint256 i; i < sizes.length; i++) {

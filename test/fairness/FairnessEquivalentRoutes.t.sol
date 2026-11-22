@@ -104,7 +104,7 @@ contract FairnessEquivalentRoutesTest is FairnessHarness {
 
     struct Split {
         uint256 payout; // quote the borrower took
-        uint256 protocolCut; // the market's revenue rise
+        uint256 protocolCut; // the quote's revenue pot rise
         uint256 tickCut; // the lender's owed rise, less the old escrow it earned
         uint256 escrowCut; // the escrow's rise, less the old escrow's unearned part
     }
@@ -123,11 +123,11 @@ contract FairnessEquivalentRoutesTest is FairnessHarness {
     function _topUpSplit(uint256 loanId, uint256 amount) internal returns (Split memory s) {
         uint256 e0 = read.feeEscrowOf(loanId);
         uint256 r0 = _unearned(loanId, e0);
-        (uint256 bal0, uint256 rev0, uint256 owed0) = (usdc.balanceOf(borrower), read.protocolRevenue(bandOff), _owed());
+        (uint256 bal0, uint256 rev0, uint256 owed0) = (usdc.balanceOf(borrower), read.revenuePot(address(usdc)), _owed());
         vm.prank(borrower);
         ace.drawMore(loanId, amount, OpenBounds(0, 0, 0));
         s.payout = usdc.balanceOf(borrower) - bal0;
-        s.protocolCut = read.protocolRevenue(bandOff) - rev0;
+        s.protocolCut = read.revenuePot(address(usdc)) - rev0;
         s.tickCut = _owed() - owed0 - (e0 - r0);
         s.escrowCut = read.feeEscrowOf(loanId) - r0;
     }
@@ -136,11 +136,11 @@ contract FairnessEquivalentRoutesTest is FairnessHarness {
     function _openSplit(uint256 amount, uint64 term) internal returns (Split memory s) {
         uint256 units = _units(amount, 5000);
         coll.mint(borrower, units);
-        (uint256 bal0, uint256 rev0, uint256 owed0) = (usdc.balanceOf(borrower), read.protocolRevenue(bandOff), _owed());
+        (uint256 bal0, uint256 rev0, uint256 owed0) = (usdc.balanceOf(borrower), read.revenuePot(address(usdc)), _owed());
         vm.prank(borrower);
         uint256 fresh = ace.open(bandOff, units, amount, term, borrower, OpenBounds(0, 0, 0));
         s.payout = usdc.balanceOf(borrower) - bal0;
-        s.protocolCut = read.protocolRevenue(bandOff) - rev0;
+        s.protocolCut = read.revenuePot(address(usdc)) - rev0;
         s.tickCut = _owed() - owed0;
         s.escrowCut = read.feeEscrowOf(fresh);
     }

@@ -9,8 +9,8 @@ import {VaultLens} from "../utils/VaultLens.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {NoRecord} from "../../src/ace/hub/Settlement.sol";
 import {AceVault} from "../../src/curator/AceVault.sol";
-import {AceVaultCaps} from "../../src/curator/AceVaultCaps.sol";
-import {BorrowRequest} from "../../src/curator/AceVaultFlows.sol";
+import {AceVaultCaps} from "../../src/curator/libraries/AceVaultCaps.sol";
+import {BorrowRequest} from "../../src/curator/libraries/AceVaultFlows.sol";
 import {IAceVaultLens, IInKindTerms, IInKindVault, Quote} from "./InKindSurface.sol";
 import {InKindRig} from "./InKindRig.sol";
 

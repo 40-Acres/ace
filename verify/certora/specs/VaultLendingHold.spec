@@ -1,7 +1,7 @@
-// AceVault's LENDING DOORS leave the requests' hold home: a borrow, a refinance or a top-up draws only cash the standing exit
+// AceVault's LENDING VERBS leave the requests' hold home: a borrow, a refinance or a top-up draws only cash the standing exit
 // requests do not hold. VaultBoundary's `aPlacementSitsUnderLendable` states the borrow's draw against `lendable`; these state
-// the doors by their EFFECT on idle, which is what an LP waiting on a request relies on: after the call, idle still covers
-// what the requests held before it. A refinance's and a top-up's own check read lendable cash after the door's sweep, which a
+// the verbs by their EFFECT on idle, which is what an LP waiting on a request relies on: after the call, idle still covers
+// what the requests held before it. A refinance's and a top-up's own check read lendable cash after the verb's sweep, which a
 // collect of what the hub owes the vault only raises, so the pre-call hold is the binding bound.
 //
 // THE SCENE, VaultBoundary's (see that spec's header): the MUNGED vault, DummyERC20, BoundaryHub moving the asset as the hub

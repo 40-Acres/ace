@@ -16,7 +16,7 @@ import {AceReader} from "../utils/AceReader.sol";
 /// @notice Audit run 2026-09-13-670568 phase 7, goal 2: try to make the books lie on the POOLED, sole-tenant model.
 /// @notice Two lenders share one quote; one lender runs two markets, so her pool spans both; a borrower moves its loan between lenders.
 /// @notice The invariant handler drives no migration between two lenders' markets, so this sequence holds the identity across one.
-/// @dev After every step: hub quote == pools(resting + owed) + markets(revenue + quoteOwed) + loans(feeEscrow), and pool legs match markets.
+/// @dev After every step: hub quote == pools(resting + owed) + the quote's revenue pot + markets(quoteOwed) + loans(feeEscrow), and pool legs match markets.
 contract AceP7PooledIdentityTest is WarpClock {
     Ace internal ace;
     AceReader internal read;
@@ -79,10 +79,10 @@ contract AceP7PooledIdentityTest is WarpClock {
     function _assertBooks(string memory step) internal view {
         (uint256 rA, uint256 lA, uint256 oA) = read.lenderPools(alice, address(usdc));
         (uint256 rM, uint256 lM, uint256 oM) = read.lenderPools(mallory, address(usdc));
-        uint256 pots = rA + oA + rM + oM;
+        uint256 pots = rA + oA + rM + oM + read.revenuePot(address(usdc)); // one revenue pot for all three markets: they share the quote
         bytes32[3] memory ms = [h1, h2, d];
         for (uint256 i; i < 3; i++) {
-            pots += read.protocolRevenue(ms[i]) + read.quoteOwedTotal(ms[i]);
+            pots += read.quoteOwedTotal(ms[i]);
         }
         uint256 n = read.loanCount();
         uint256 claimsA;
@@ -143,7 +143,7 @@ contract AceP7PooledIdentityTest is WarpClock {
         vm.prank(stranger);
         ace.forceClose(a2);
         assertGt(read.invPotOf(d, a2), 0, "fixture: the starved successor settled into a pot");
-        _assertBooks("starved successor settles, with the piggyback sweep");
+        _assertBooks("starved successor settles");
 
         _warpTo(read.inventoryAskOpensAt(a2));
         usdc.mint(stranger, 70e6);
@@ -175,9 +175,7 @@ contract AceP7PooledIdentityTest is WarpClock {
         ace.withdraw(h1, type(uint256).max, alice, 0);
         ace.withdraw(h2, type(uint256).max, alice, 0);
         vm.stopPrank();
-        ace.sweepRevenue(h1);
-        ace.sweepRevenue(h2);
-        ace.sweepRevenue(d);
+        ace.sweepRevenue(address(usdc)); // one pot holds all three markets' revenue
         _assertBooks("both lenders fully out, revenue swept");
     }
 }
