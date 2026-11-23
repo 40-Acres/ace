@@ -3,8 +3,8 @@ pragma solidity 0.8.36;
 
 import {Vm} from "forge-std/Vm.sol";
 import {MarketParams} from "../../../src/ace/hub/Types.sol";
-import {AceVault} from "../../../src/curator/AceVault.sol";
-import {AceVaultFlows, Terms} from "../../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVault} from "../../../src/vault/AceVault.sol";
+import {AceVaultFlows, Terms} from "../../../src/vault/libraries/AceVaultFlows.sol";
 import {AceFixtures} from "../../utils/AceFixtures.sol";
 import {MockTerms} from "../vault/MockTerms.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";

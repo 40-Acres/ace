@@ -6,7 +6,7 @@ import {MarketParams, OpenBounds} from "../../../src/ace/hub/Types.sol";
 import {IAceLenderOps} from "../../../src/interfaces/IAceLenderOps.sol";
 import {Extension} from "../../../src/interfaces/IRollPolicy.sol";
 import {IVaultTerms, Lend, RefinanceRequest} from "../../../src/interfaces/IVaultTerms.sol";
-import {BorrowRequest, Terms} from "../../../src/curator/libraries/AceVaultFlows.sol";
+import {BorrowRequest, Terms} from "../../../src/vault/libraries/AceVaultFlows.sol";
 
 /// @notice A product whose every answer a row sets, and which can turn hostile on any view: revert, burn its gas, bomb, or answer a malformed word.
 /// @dev Its write calls can re-enter any address with any calldata, and record what the re-entry met; they never revert themselves.

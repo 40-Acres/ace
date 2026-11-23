@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
 import {MockTerms} from "./vault/MockTerms.sol";
 

@@ -4,7 +4,7 @@ pragma solidity 0.8.36;
 import {Vm} from "forge-std/Test.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
+import {AceVault, VaultConfig} from "../../src/vault/AceVault.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {GUARD_TRIP} from "../utils/GuardTrip.sol";

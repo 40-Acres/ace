@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {Loan, MarketParams} from "../../src/ace/hub/Types.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";

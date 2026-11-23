@@ -3,8 +3,8 @@ pragma solidity 0.8.36;
 
 import {MockStakeVault} from "../../mocks/MockStakeVault.sol";
 import {MockPersistenceRecord} from "../../mocks/MockPersistenceRecord.sol";
-import {AceVault} from "../../../src/curator/AceVault.sol";
-import {AceVaultFlows, Terms} from "../../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVault} from "../../../src/vault/AceVault.sol";
+import {AceVaultFlows, Terms} from "../../../src/vault/libraries/AceVaultFlows.sol";
 import {AceVaultDoorRig} from "../vault/AceVaultDoorRig.sol";
 
 /// @dev The lens views these rows read beside the vault's own gates.

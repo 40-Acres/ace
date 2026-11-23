@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {Test, console2} from "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
 import {CuratorVaultHandler} from "./CuratorVaultHandler.sol";
 import {IAceVaultLens, VaultLens} from "../utils/VaultLens.sol";
 

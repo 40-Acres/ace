@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {Ace} from "../../src/ace/hub/Ace.sol";
 import {PriceFrame} from "../utils/PriceFrame.sol";

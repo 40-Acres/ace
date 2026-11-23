@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
-import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
 import {NoRecordPrice} from "../../src/ace/hub/Ace.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";
 import {UnsoldPotRig, IDeadPotOverride} from "./CuratorVaultUnsoldPotRig.sol";

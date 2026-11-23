@@ -2,8 +2,8 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
-import {AceVaultFlows} from "../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
+import {AceVaultFlows} from "../../src/vault/libraries/AceVaultFlows.sol";
 
 /// @notice Audit V-Q1: a requesting holder MANUFACTURES the repayment their hold waits for.
 /// @dev The hold a standing request takes is computed at read time from the requests' worth, so an inflow is held only up to that worth.

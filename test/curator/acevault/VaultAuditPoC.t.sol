@@ -7,8 +7,8 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {PolicyRefused} from "../../../src/ace/hub/Borrower.sol";
 import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
 import {Loan, MarketParams} from "../../../src/ace/hub/Types.sol";
-import {CuratorTerms, Row} from "../../../src/entities/curated/CuratorTerms.sol";
-import {PriceGrid} from "../../../src/curator/libraries/PriceGrid.sol";
+import {CuratorTerms, Row} from "../../../src/vault/curated/CuratorTerms.sol";
+import {PriceGrid} from "../../../src/vault/libraries/PriceGrid.sol";
 import {_extended} from "../../utils/Extended.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
 

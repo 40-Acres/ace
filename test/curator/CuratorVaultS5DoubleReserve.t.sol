@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
 
 /// @title CuratorVaultS5DoubleReserve
 /// @notice No need is held twice: a request claimed whole leaves nothing held behind.

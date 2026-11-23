@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {Vm} from "forge-std/Vm.sol";
 import {MarketParams} from "../../src/ace/hub/Types.sol";
-import {BorrowRequest, Terms} from "../../src/curator/libraries/AceVaultFlows.sol";
+import {BorrowRequest, Terms} from "../../src/vault/libraries/AceVaultFlows.sol";
 
 /// @title IAceVaultLens
 /// @notice The surface of `AceVaultLens`: the door's preview, the in-kind tracker's views and the vault's stored figures, each taking the vault first.

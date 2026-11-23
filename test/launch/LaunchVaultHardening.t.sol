@@ -8,7 +8,7 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {OpenBounds} from "../../src/ace/hub/Types.sol";
 import {Bid, Checkpoint} from "../../src/interfaces/ILaunchAuction.sol";
 import {LaunchVault} from "../../src/entities/launch/LaunchVault.sol";
-import {PriceGrid} from "../../src/curator/libraries/PriceGrid.sol";
+import {PriceGrid} from "../../src/vault/libraries/PriceGrid.sol";
 import {LaunchOpsBudget} from "../../src/entities/launch/LaunchOpsBudget.sol";
 import {LockAccount} from "../../src/entities/launch/LockAccount.sol";
 import {LaunchVaultBase} from "./LaunchVault.t.sol";

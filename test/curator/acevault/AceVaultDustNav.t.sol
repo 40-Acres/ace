@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
-import {AceVault, VaultConfig} from "../../../src/curator/AceVault.sol";
-import {Listing} from "../../../src/entities/curated/CuratorTerms.sol";
+import {AceVault, VaultConfig} from "../../../src/vault/AceVault.sol";
+import {Listing} from "../../../src/vault/curated/CuratorTerms.sol";
 import {CuratedVaults} from "../../utils/CuratedVaults.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
 

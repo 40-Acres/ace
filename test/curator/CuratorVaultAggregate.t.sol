@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
 
 /// @title CuratorVaultAggregate
 /// @notice THE AGGREGATE IDENTITY over the hub flow `CuratorVaultNav.t.sol` never drives: the inventory FILL.

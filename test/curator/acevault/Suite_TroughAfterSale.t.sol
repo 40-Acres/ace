@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {AceVaultFlows} from "../../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVaultFlows} from "../../../src/vault/libraries/AceVaultFlows.sol";
 import {AceFixtures} from "../../utils/AceFixtures.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
 

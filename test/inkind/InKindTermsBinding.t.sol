@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {MarketParams} from "../../src/ace/hub/Types.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
 import {Lend, RefinanceRequest} from "../../src/interfaces/IVaultTerms.sol";
 import {InKindConfig, InKindVaults} from "../utils/InKindVaults.sol";
 import {IInKindTerms, IInKindVault, Quote, Row} from "./InKindSurface.sol";

@@ -2,8 +2,8 @@
 pragma solidity 0.8.36;
 
 import {Vm} from "forge-std/Vm.sol";
-import {AceVaultCaps} from "../../../src/curator/libraries/AceVaultCaps.sol";
-import {CuratorTerms, Row} from "../../../src/entities/curated/CuratorTerms.sol";
+import {AceVaultCaps} from "../../../src/vault/libraries/AceVaultCaps.sol";
+import {CuratorTerms, Row} from "../../../src/vault/curated/CuratorTerms.sol";
 import {MockPersistenceRecord} from "../../mocks/MockPersistenceRecord.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
 

@@ -5,7 +5,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {InsufficientCash, LoanMatured, PolicyRefused} from "../../../src/ace/hub/Borrower.sol";
 import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
 import {Loan, MarketParams, MigrateArgs, OpenBounds} from "../../../src/ace/hub/Types.sol";
-import {AceVault} from "../../../src/curator/AceVault.sol";
+import {AceVault} from "../../../src/vault/AceVault.sol";
 import {Extension, IRollPolicy} from "../../../src/interfaces/IRollPolicy.sol";
 import {PolicyGasMeter} from "../../utils/PolicyGasMeter.sol";
 import {POLICY_YES} from "../../utils/RollPolicyMocks.sol";

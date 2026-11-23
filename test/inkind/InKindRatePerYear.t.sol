@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {Test} from "forge-std/Test.sol";
-import {InKindTerms, InKindTermsConfig, Listing, Row} from "../../src/entities/inkind/InKindTerms.sol";
+import {InKindTerms, InKindTermsConfig, Listing, Row} from "../../src/vault/inkind/InKindTerms.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 
 /// @title InKindRatePerYear

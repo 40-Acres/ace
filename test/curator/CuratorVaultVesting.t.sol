@@ -2,8 +2,8 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
-import {Listing, Row} from "../../src/entities/curated/CuratorTerms.sol";
+import {AceVault, VaultConfig} from "../../src/vault/AceVault.sol";
+import {Listing, Row} from "../../src/vault/curated/CuratorTerms.sol";
 import {CuratedVaults} from "../utils/CuratedVaults.sol";
 import {MarketState} from "../../src/ace/hub/Types.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";

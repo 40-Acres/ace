@@ -3,8 +3,8 @@ pragma solidity 0.8.36;
 
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {Signing1271Wallet} from "../mocks/Mock1271Wallet.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
-import {AceVaultFlows} from "../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
+import {AceVaultFlows} from "../../src/vault/libraries/AceVaultFlows.sol";
 import {IInKindTerms, IInKindVault, InKindConfig, Listing, Quote, Row} from "./InKindSurface.sol";
 import {InKindRig} from "./InKindRig.sol";
 

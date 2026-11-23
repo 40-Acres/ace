@@ -2,8 +2,8 @@
 pragma solidity 0.8.36;
 
 import {PolicyRefused} from "../../../src/ace/hub/Borrower.sol";
-import {AceVaultCaps} from "../../../src/curator/libraries/AceVaultCaps.sol";
-import {Terms} from "../../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVaultCaps} from "../../../src/vault/libraries/AceVaultCaps.sol";
+import {Terms} from "../../../src/vault/libraries/AceVaultFlows.sol";
 import {IRollPolicy} from "../../../src/interfaces/IRollPolicy.sol";
 import {MockPersistenceRecord} from "../../mocks/MockPersistenceRecord.sol";
 import {MockStakeVault} from "../../mocks/MockStakeVault.sol";

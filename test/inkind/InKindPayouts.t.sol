@@ -3,8 +3,8 @@ pragma solidity 0.8.36;
 
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 import {Checkpoints} from "@openzeppelin/contracts/utils/structs/Checkpoints.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
-import {AceVaultFactory} from "../../src/curator/AceVaultFactory.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
+import {AceVaultFactory} from "../../src/vault/AceVaultFactory.sol";
 import {AceVaultBaseRig} from "../curator/vault/AceVaultBaseRig.sol";
 import {InKindVaults} from "../utils/InKindVaults.sol";
 import {VaultSeed} from "../utils/VaultSeed.sol";

@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
 
 /// @notice An exit request placed by an address holding NO shares: the phantom request through the front door, closed by escrow.
 /// @dev A request moves real shares onto the vault, so a holder of none cannot request any and an escrow cannot leave.

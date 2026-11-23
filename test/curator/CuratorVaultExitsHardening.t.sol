@@ -2,8 +2,8 @@
 pragma solidity 0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
 import {IAceVaultDoor} from "../../src/interfaces/IAceVaultDoor.sol";
 import {CuratorVaultExitsRig, ICuratorVaultExits} from "./CuratorVaultExitsRig.sol";
 import {VaultSeed} from "../utils/VaultSeed.sol";

@@ -3,10 +3,10 @@ pragma solidity 0.8.36;
 
 import {Constants} from "../../../src/ace/hub/Constants.sol";
 import {Loan} from "../../../src/ace/hub/Types.sol";
-import {AceVault} from "../../../src/curator/AceVault.sol";
-import {ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
-import {VaultConfig} from "../../../src/curator/libraries/AceVaultFlows.sol";
-import {CuratorTerms, CuratorTermsConfig, Listing, Row} from "../../../src/entities/curated/CuratorTerms.sol";
+import {AceVault} from "../../../src/vault/AceVault.sol";
+import {ProductConfig} from "../../../src/vault/libraries/AceVaultCaps.sol";
+import {VaultConfig} from "../../../src/vault/libraries/AceVaultFlows.sol";
+import {CuratorTerms, CuratorTermsConfig, Listing, Row} from "../../../src/vault/curated/CuratorTerms.sol";
 import {AceFixtures} from "../../utils/AceFixtures.sol";
 import {AceReader} from "../../utils/AceReader.sol";
 import {AceVaultBaseRig} from "./AceVaultBaseRig.sol";

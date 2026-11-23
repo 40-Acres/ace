@@ -4,8 +4,8 @@ pragma solidity 0.8.36;
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {MockStakeVault} from "../../mocks/MockStakeVault.sol";
 import {MockPersistenceRecord} from "../../mocks/MockPersistenceRecord.sol";
-import {AceVault} from "../../../src/curator/AceVault.sol";
-import {AceVaultFlows, Terms} from "../../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVault} from "../../../src/vault/AceVault.sol";
+import {AceVaultFlows, Terms} from "../../../src/vault/libraries/AceVaultFlows.sol";
 import {IAceVaultDoor} from "../../../src/interfaces/IAceVaultDoor.sol";
 import {AceVaultDoorRig} from "../vault/AceVaultDoorRig.sol";
 

@@ -18,10 +18,10 @@ import {GateRefused, InsufficientCash, LoanMatured} from "../../../src/ace/hub/B
 import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
 import {MarketParams, OpenBounds} from "../../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../../src/ace/positions/PositionManager.sol";
-import {AceVault} from "../../../src/curator/AceVault.sol";
-import {AceVaultCaps, CapListing, ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
-import {AceVaultFlows, BorrowRequest, Terms, VaultConfig} from "../../../src/curator/libraries/AceVaultFlows.sol";
-import {AceVaultTail} from "../../../src/curator/libraries/AceVaultTail.sol";
+import {AceVault} from "../../../src/vault/AceVault.sol";
+import {AceVaultCaps, CapListing, ProductConfig} from "../../../src/vault/libraries/AceVaultCaps.sol";
+import {AceVaultFlows, BorrowRequest, Terms, VaultConfig} from "../../../src/vault/libraries/AceVaultFlows.sol";
+import {AceVaultTail} from "../../../src/vault/libraries/AceVaultTail.sol";
 import {IAceLenderOps} from "../../../src/interfaces/IAceLenderOps.sol";
 import {IAceVaultDoor} from "../../../src/interfaces/IAceVaultDoor.sol";
 import {Extension} from "../../../src/interfaces/IRollPolicy.sol";

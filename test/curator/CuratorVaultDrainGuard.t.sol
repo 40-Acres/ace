@@ -2,8 +2,8 @@
 pragma solidity 0.8.36;
 
 import {ReentrancyGuardTransient} from "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
-import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
-import {Listing} from "../../src/entities/curated/CuratorTerms.sol";
+import {AceVault, VaultConfig} from "../../src/vault/AceVault.sol";
+import {Listing} from "../../src/vault/curated/CuratorTerms.sol";
 import {CuratedVaults} from "../utils/CuratedVaults.sol";
 import {PocDeployConfig} from "../../src/config/Defaults.sol";
 import {MockSendHookERC20} from "../mocks/MockSendHookERC20.sol";

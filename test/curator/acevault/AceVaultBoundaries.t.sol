@@ -4,9 +4,9 @@ pragma solidity 0.8.36;
 import {LoanClosed} from "../../../src/ace/hub/Borrower.sol";
 import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
 import {MarketParams} from "../../../src/ace/hub/Types.sol";
-import {AceVaultFlows} from "../../../src/curator/libraries/AceVaultFlows.sol";
-import {AceVault} from "../../../src/curator/AceVault.sol";
-import {CuratorTerms} from "../../../src/entities/curated/CuratorTerms.sol";
+import {AceVaultFlows} from "../../../src/vault/libraries/AceVaultFlows.sol";
+import {AceVault} from "../../../src/vault/AceVault.sol";
+import {CuratorTerms} from "../../../src/vault/curated/CuratorTerms.sol";
 import {_extended} from "../../utils/Extended.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
 

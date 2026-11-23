@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
-import {AceVault} from "../../../src/curator/AceVault.sol";
-import {AceVaultFlows, Terms} from "../../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVault} from "../../../src/vault/AceVault.sol";
+import {AceVaultFlows, Terms} from "../../../src/vault/libraries/AceVaultFlows.sol";
 import {AceVaultDoorRig} from "../vault/AceVaultDoorRig.sol";
 
 /// @title AceVaultTroughHoldDoor

@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {MarketParams} from "../ace/hub/Types.sol";
-import {BorrowRequest, Terms} from "../curator/libraries/AceVaultFlows.sol";
+import {BorrowRequest, Terms} from "../vault/libraries/AceVaultFlows.sol";
 import {Extension} from "./IRollPolicy.sol";
 
 /// @notice Which lending verb a product's write call brackets.

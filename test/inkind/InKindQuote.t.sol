@@ -7,9 +7,9 @@ import {Reverting1271Wallet, Signing1271Wallet} from "../mocks/Mock1271Wallet.so
 import {TenorOutOfRange} from "../../src/ace/hub/Borrower.sol";
 import {LoanMath} from "../../src/ace/hub/libraries/LoanMath.sol";
 import {MarketParams} from "../../src/ace/hub/Types.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
-import {AceVaultFlows, BorrowRequest, Terms} from "../../src/curator/libraries/AceVaultFlows.sol";
-import {PriceGrid} from "../../src/curator/libraries/PriceGrid.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
+import {AceVaultFlows, BorrowRequest, Terms} from "../../src/vault/libraries/AceVaultFlows.sol";
+import {PriceGrid} from "../../src/vault/libraries/PriceGrid.sol";
 import {IInKindTerms, Listing, Quote, RollQuote} from "./InKindSurface.sol";
 import {InKindRig} from "./InKindRig.sol";
 

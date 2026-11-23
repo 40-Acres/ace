@@ -3,8 +3,8 @@ pragma solidity 0.8.36;
 
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
-import {Listing} from "../../src/entities/curated/CuratorTerms.sol";
+import {AceVault, VaultConfig} from "../../src/vault/AceVault.sol";
+import {Listing} from "../../src/vault/curated/CuratorTerms.sol";
 import {CuratedVaults} from "../utils/CuratedVaults.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {PocDeployConfig} from "../../src/config/Defaults.sol";

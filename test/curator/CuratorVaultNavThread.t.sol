@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
 
 /// @title CuratorVaultNavThread
 /// @notice What a verb's NAV, read once, carries THROUGH an exit and a claim: the claim's rounding direction.

@@ -2,11 +2,11 @@
 pragma solidity 0.8.36;
 
 import {Vm} from "forge-std/Vm.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
-import {CapListing, ProductConfig} from "../../src/curator/libraries/AceVaultCaps.sol";
-import {AceVaultFactory} from "../../src/curator/AceVaultFactory.sol";
-import {VaultConfig} from "../../src/curator/libraries/AceVaultFlows.sol";
-import {CuratorTerms, CuratorTermsConfig, Listing} from "../../src/entities/curated/CuratorTerms.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
+import {CapListing, ProductConfig} from "../../src/vault/libraries/AceVaultCaps.sol";
+import {AceVaultFactory} from "../../src/vault/AceVaultFactory.sol";
+import {VaultConfig} from "../../src/vault/libraries/AceVaultFlows.sol";
+import {CuratorTerms, CuratorTermsConfig, Listing} from "../../src/vault/curated/CuratorTerms.sol";
 import {VaultSeed} from "./VaultSeed.sol";
 
 /// @notice A curated AceVault deployed the way a curator deploys one: CuratorTerms at the vault's address-to-be, then the vault naming them.

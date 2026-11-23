@@ -3,10 +3,10 @@ pragma solidity 0.8.36;
 
 import {stdError} from "forge-std/StdError.sol";
 import {MarketParams} from "../../../src/ace/hub/Types.sol";
-import {AceVault} from "../../../src/curator/AceVault.sol";
-import {AceVaultFactory} from "../../../src/curator/AceVaultFactory.sol";
-import {AceVaultFlows, Terms, VaultConfig} from "../../../src/curator/libraries/AceVaultFlows.sol";
-import {CapListing, ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
+import {AceVault} from "../../../src/vault/AceVault.sol";
+import {AceVaultFactory} from "../../../src/vault/AceVaultFactory.sol";
+import {AceVaultFlows, Terms, VaultConfig} from "../../../src/vault/libraries/AceVaultFlows.sol";
+import {CapListing, ProductConfig} from "../../../src/vault/libraries/AceVaultCaps.sol";
 import {CuratedVaults} from "../../utils/CuratedVaults.sol";
 import {VaultSeed} from "../../utils/VaultSeed.sol";
 import {AceVaultBaseRig} from "./AceVaultBaseRig.sol";

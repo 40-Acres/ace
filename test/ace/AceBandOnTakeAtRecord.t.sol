@@ -8,7 +8,7 @@ import {NoRecordPrice, RecordUnreadable} from "../../src/ace/hub/Borrower.sol";
 import {HUB_POLICY_GAS} from "../../src/config/Defaults.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {PushGasShort} from "../../src/ace/hub/Ace.sol";
-import {AceVaultFlows} from "../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVaultFlows} from "../../src/vault/libraries/AceVaultFlows.sol";
 import {IGasShortRefusals} from "../../src/interfaces/IGasShortRefusals.sol";
 import {PolicyGasShort, RecordGasShort} from "../../src/ace/hub/libraries/Probe.sol";
 

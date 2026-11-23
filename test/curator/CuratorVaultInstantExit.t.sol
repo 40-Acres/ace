@@ -5,8 +5,8 @@ import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.so
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
-import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
+import {AceVault, VaultConfig} from "../../src/vault/AceVault.sol";
 
 /// @notice The instant-exit rig: a production AceVault, which exits at once by default, with a guardian key.
 abstract contract InstantExitRig is CuratorVaultBase {

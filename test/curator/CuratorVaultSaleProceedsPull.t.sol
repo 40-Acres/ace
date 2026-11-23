@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
 
 /// @title CuratorVaultSaleProceedsPull
 /// @notice A SALE CREDITS THE VAULT'S POOL, and the next terminal close in its (lender, quote) pair carries it home with NO crank.

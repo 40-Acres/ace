@@ -3,8 +3,8 @@ pragma solidity 0.8.36;
 
 import {Vm} from "forge-std/Vm.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
 import {AceInventoryLens} from "../../src/ace/lens/AceInventoryLens.sol";
 
 /// @title CuratorVaultFeeHighWaterHardening

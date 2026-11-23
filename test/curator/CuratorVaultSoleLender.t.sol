@@ -2,10 +2,10 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
-import {Listing} from "../../src/entities/curated/CuratorTerms.sol";
+import {AceVault, VaultConfig} from "../../src/vault/AceVault.sol";
+import {Listing} from "../../src/vault/curated/CuratorTerms.sol";
 import {CuratedVaults} from "../utils/CuratedVaults.sol";
-import {BorrowRequest} from "../../src/curator/libraries/AceVaultFlows.sol";
+import {BorrowRequest} from "../../src/vault/libraries/AceVaultFlows.sol";
 import {GUARD_TRIP} from "../utils/GuardTrip.sol";
 import {MarketParams} from "../../src/ace/hub/Types.sol";
 import {PocDeployConfig} from "../../src/config/Defaults.sol";

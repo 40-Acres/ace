@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {MockERC20} from "../mocks/MockERC20.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
 import {Listing} from "./InKindSurface.sol";
 import {InKindRig} from "./InKindRig.sol";
 

@@ -2,9 +2,9 @@
 pragma solidity 0.8.36;
 
 import {CREATE3} from "../../../vendor/solady/CREATE3.sol";
-import {AceVault} from "../../../src/curator/AceVault.sol";
-import {ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
-import {AceVaultFactory} from "../../../src/curator/AceVaultFactory.sol";
+import {AceVault} from "../../../src/vault/AceVault.sol";
+import {ProductConfig} from "../../../src/vault/libraries/AceVaultCaps.sol";
+import {AceVaultFactory} from "../../../src/vault/AceVaultFactory.sol";
 import {AceVaultBaseRig} from "./AceVaultBaseRig.sol";
 import {MockTerms} from "./MockTerms.sol";
 import {VaultSeed} from "../../utils/VaultSeed.sol";

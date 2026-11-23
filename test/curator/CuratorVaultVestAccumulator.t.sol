@@ -3,12 +3,12 @@ pragma solidity 0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
-import {Listing} from "../../src/entities/curated/CuratorTerms.sol";
+import {AceVault, VaultConfig} from "../../src/vault/AceVault.sol";
+import {Listing} from "../../src/vault/curated/CuratorTerms.sol";
 import {CuratedVaults} from "../utils/CuratedVaults.sol";
-import {AceVaultFlows} from "../../src/curator/libraries/AceVaultFlows.sol";
-import {AceVaultNav} from "../../src/curator/libraries/AceVaultNav.sol";
-import {CapListing, ProductConfig} from "../../src/curator/libraries/AceVaultCaps.sol";
+import {AceVaultFlows} from "../../src/vault/libraries/AceVaultFlows.sol";
+import {AceVaultNav} from "../../src/vault/libraries/AceVaultNav.sol";
+import {CapListing, ProductConfig} from "../../src/vault/libraries/AceVaultCaps.sol";
 
 /// @notice The vault with `AceVaultNav.stampVest` exposed and its two fields readable, so credits land at chosen instants.
 /// @dev Exposes the shipped internal UNCHANGED -- it substitutes no arithmetic and mocks nothing.

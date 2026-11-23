@@ -7,7 +7,7 @@ import {Ace} from "../../src/ace/hub/Ace.sol";
 import {AceLens} from "../../src/ace/lens/AceLens.sol";
 import {MarketParams, OpenBounds} from "../../src/ace/hub/Types.sol";
 import {PositionManager} from "../../src/ace/positions/PositionManager.sol";
-import {AceVaultFlows} from "../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVaultFlows} from "../../src/vault/libraries/AceVaultFlows.sol";
 import {HubLoanTerm} from "../../src/interfaces/HubLoanTerm.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 import {MockPersistenceRecord} from "../mocks/MockPersistenceRecord.sol";

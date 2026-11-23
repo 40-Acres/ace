@@ -2,8 +2,8 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
-import {AceVaultFlows} from "../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
+import {AceVaultFlows} from "../../src/vault/libraries/AceVaultFlows.sol";
 
 /// @title CuratorVaultRemoveMarketInvPot
 /// @notice THE BLIND SPOT, still real: `lenderAssets` excludes `invPot`, so a market holding the whole

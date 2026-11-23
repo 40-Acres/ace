@@ -3,9 +3,9 @@ pragma solidity 0.8.36;
 
 import {IERC721} from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
 import {MarketParams} from "../../../src/ace/hub/Types.sol";
-import {AceVault} from "../../../src/curator/AceVault.sol";
-import {AceVaultFlows, BorrowRequest} from "../../../src/curator/libraries/AceVaultFlows.sol";
-import {CuratorTerms} from "../../../src/entities/curated/CuratorTerms.sol";
+import {AceVault} from "../../../src/vault/AceVault.sol";
+import {AceVaultFlows, BorrowRequest} from "../../../src/vault/libraries/AceVaultFlows.sol";
+import {CuratorTerms} from "../../../src/vault/curated/CuratorTerms.sol";
 import {MockStakeVault} from "../../mocks/MockStakeVault.sol";
 import {IAceVaultLens, VaultLens} from "../../utils/VaultLens.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";

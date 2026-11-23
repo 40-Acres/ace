@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
-import {AceVault} from "../../../src/curator/AceVault.sol";
-import {CapListing, ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
-import {AceVaultFlows, VaultConfig} from "../../../src/curator/libraries/AceVaultFlows.sol";
-import {AceVaultTail} from "../../../src/curator/libraries/AceVaultTail.sol";
+import {AceVault} from "../../../src/vault/AceVault.sol";
+import {CapListing, ProductConfig} from "../../../src/vault/libraries/AceVaultCaps.sol";
+import {AceVaultFlows, VaultConfig} from "../../../src/vault/libraries/AceVaultFlows.sol";
+import {AceVaultTail} from "../../../src/vault/libraries/AceVaultTail.sol";
 
 /// @title CuratorVaultHarness
 /// @notice AceVault, the vault a curated product names its terms on, plus three views: the vest maturity, the NAV mark and the suffix's match.

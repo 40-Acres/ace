@@ -2,9 +2,9 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
-import {CuratorTerms, Row} from "../../src/entities/curated/CuratorTerms.sol";
-import {AceVaultFlows, BorrowRequest, Terms} from "../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
+import {CuratorTerms, Row} from "../../src/vault/curated/CuratorTerms.sol";
+import {AceVaultFlows, BorrowRequest, Terms} from "../../src/vault/libraries/AceVaultFlows.sol";
 import {MarketParams} from "../../src/ace/hub/Types.sol";
 import {AceFixtures} from "../utils/AceFixtures.sol";
 import {MockTerms} from "./vault/MockTerms.sol";

@@ -3,10 +3,10 @@ pragma solidity 0.8.36;
 
 import {Constants} from "../../../src/ace/hub/Constants.sol";
 import {MarketParams} from "../../../src/ace/hub/Types.sol";
-import {AceVault} from "../../../src/curator/AceVault.sol";
-import {ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
-import {AceVaultFlows, BorrowRequest, Terms} from "../../../src/curator/libraries/AceVaultFlows.sol";
-import {CuratorTerms, CuratorTermsConfig, Listing, Row} from "../../../src/entities/curated/CuratorTerms.sol";
+import {AceVault} from "../../../src/vault/AceVault.sol";
+import {ProductConfig} from "../../../src/vault/libraries/AceVaultCaps.sol";
+import {AceVaultFlows, BorrowRequest, Terms} from "../../../src/vault/libraries/AceVaultFlows.sol";
+import {CuratorTerms, CuratorTermsConfig, Listing, Row} from "../../../src/vault/curated/CuratorTerms.sol";
 import {Extension} from "../../../src/interfaces/IRollPolicy.sol";
 import {Lend} from "../../../src/interfaces/IVaultTerms.sol";
 import {MockERC20} from "../../mocks/MockERC20.sol";

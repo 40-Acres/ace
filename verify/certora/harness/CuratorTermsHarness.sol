@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
-import {CuratorTerms, CuratorTermsConfig, Listing} from "../../../src/entities/curated/CuratorTerms.sol";
+import {CuratorTerms, CuratorTermsConfig, Listing} from "../../../src/vault/curated/CuratorTerms.sol";
 
 /// @title CuratorTermsHarness
 /// @notice `CuratorTerms` with one view: whether its transient reentrancy guard is entered. It adds no state.

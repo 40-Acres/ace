@@ -4,7 +4,7 @@ pragma solidity 0.8.36;
 import {PolicyRefused, TriggerAboveFloor} from "../../../src/ace/hub/Borrower.sol";
 import {Loan, MarketParams} from "../../../src/ace/hub/Types.sol";
 import {Extension, IRollPolicy} from "../../../src/interfaces/IRollPolicy.sol";
-import {AceVault} from "../../../src/curator/AceVault.sol";
+import {AceVault} from "../../../src/vault/AceVault.sol";
 import {MockTerms} from "../vault/MockTerms.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
 

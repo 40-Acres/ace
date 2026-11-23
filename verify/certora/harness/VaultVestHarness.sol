@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
-import {CapListing, ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
-import {AceVaultFlows, VaultConfig} from "../../../src/curator/libraries/AceVaultFlows.sol";
-import {AceVaultNav} from "../../../src/curator/libraries/AceVaultNav.sol";
+import {CapListing, ProductConfig} from "../../../src/vault/libraries/AceVaultCaps.sol";
+import {AceVaultFlows, VaultConfig} from "../../../src/vault/libraries/AceVaultFlows.sol";
+import {AceVaultNav} from "../../../src/vault/libraries/AceVaultNav.sol";
 import {CuratorVaultHarness} from "./CuratorVaultHarness.sol";
 
 /// @title VaultVestHarness

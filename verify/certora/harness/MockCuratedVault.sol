@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
-import {AceVaultFlows} from "../../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVaultFlows} from "../../../src/vault/libraries/AceVaultFlows.sol";
 import {DummyERC20} from "./DummyERC20.sol";
 
 /// @title MockCuratedVault

@@ -2,9 +2,9 @@
 pragma solidity 0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {CapListing, ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
-import {AceVaultFlows, VaultConfig} from "../../../src/curator/libraries/AceVaultFlows.sol";
-import {AceVaultNav} from "../../../src/curator/libraries/AceVaultNav.sol";
+import {CapListing, ProductConfig} from "../../../src/vault/libraries/AceVaultCaps.sol";
+import {AceVaultFlows, VaultConfig} from "../../../src/vault/libraries/AceVaultFlows.sol";
+import {AceVaultNav} from "../../../src/vault/libraries/AceVaultNav.sol";
 import {VaultForwardHarness} from "./VaultForwardHarness.sol";
 
 /// @title VaultBoundaryHarness

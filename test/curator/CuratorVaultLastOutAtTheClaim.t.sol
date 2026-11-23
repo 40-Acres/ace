@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
 
 /// @title CuratorVaultLastOutAtTheClaim
 /// @notice A vault whose every holder requests is wound down by its claims: the requests are paid every wei of cash, up to their worth.

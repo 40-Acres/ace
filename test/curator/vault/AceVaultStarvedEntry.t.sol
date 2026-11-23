@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
-import {VaultConfig} from "../../../src/curator/libraries/AceVaultFlows.sol";
+import {VaultConfig} from "../../../src/vault/libraries/AceVaultFlows.sol";
 import {AceVaultBaseRig} from "./AceVaultBaseRig.sol";
 import {MockTerms} from "./MockTerms.sol";
 

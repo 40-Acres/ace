@@ -2,9 +2,9 @@
 pragma solidity 0.8.36;
 
 import {Checkpoints} from "@openzeppelin/contracts/utils/structs/Checkpoints.sol";
-import {AceVaultInKind} from "../../../src/curator/libraries/AceVaultInKind.sol";
-import {CapListing, ProductConfig} from "../../../src/curator/libraries/AceVaultCaps.sol";
-import {AceVaultFlows, Cap, PendingCap, Seizure, VaultConfig} from "../../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVaultInKind} from "../../../src/vault/libraries/AceVaultInKind.sol";
+import {CapListing, ProductConfig} from "../../../src/vault/libraries/AceVaultCaps.sol";
+import {AceVaultFlows, Cap, PendingCap, Seizure, VaultConfig} from "../../../src/vault/libraries/AceVaultFlows.sol";
 import {CuratorVaultHarness} from "./CuratorVaultHarness.sol";
 
 /// @title VaultForwardHarness

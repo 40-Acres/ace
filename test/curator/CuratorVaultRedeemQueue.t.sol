@@ -3,7 +3,7 @@ pragma solidity 0.8.36;
 
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
 
 /// @title CuratorVaultRedeemQueue
 /// @notice The escrowed request: a share count held on the vault, never a position of the vault's, and never more than its holder escrowed.

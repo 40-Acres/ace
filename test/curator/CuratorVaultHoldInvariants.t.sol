@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
 import {MockERC20} from "../mocks/MockERC20.sol";
 
 /// @notice The rig's loan rails, exposed so the handler can drive a door draw and its repayment.

@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {MarketParams} from "../../../src/ace/hub/Types.sol";
-import {AceVaultFlows, BorrowRequest, Terms} from "../../../src/curator/libraries/AceVaultFlows.sol";
+import {AceVaultFlows, BorrowRequest, Terms} from "../../../src/vault/libraries/AceVaultFlows.sol";
 import {MockERC20} from "../../mocks/MockERC20.sol";
 import {IAceVaultLens, VaultLens} from "../../utils/VaultLens.sol";
 import {MockTerms} from "./MockTerms.sol";

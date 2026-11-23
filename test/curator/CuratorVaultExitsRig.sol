@@ -2,8 +2,8 @@
 pragma solidity 0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
-import {VaultConfig} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
+import {VaultConfig} from "../../src/vault/AceVault.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
 
 /// @notice The exit request and the drain, named by selector so a row binds the surface and not the contract's ABI.

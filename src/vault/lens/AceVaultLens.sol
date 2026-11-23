@@ -2,14 +2,14 @@
 pragma solidity 0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {MarketParams} from "../ace/hub/Types.sol";
-import {IAceLenderOps} from "../interfaces/IAceLenderOps.sol";
-import {IVaultTerms} from "../interfaces/IVaultTerms.sol";
-import {AceVault} from "./AceVault.sol";
-import {AceVaultCaps} from "./libraries/AceVaultCaps.sol";
-import {AceVaultFlows, BorrowRequest, Terms} from "./libraries/AceVaultFlows.sol";
-import {AceVaultInKind} from "./libraries/AceVaultInKind.sol";
-import {AceVaultNav} from "./libraries/AceVaultNav.sol";
+import {MarketParams} from "../../ace/hub/Types.sol";
+import {IAceLenderOps} from "../../interfaces/IAceLenderOps.sol";
+import {IVaultTerms} from "../../interfaces/IVaultTerms.sol";
+import {AceVault} from "../AceVault.sol";
+import {AceVaultCaps} from "../libraries/AceVaultCaps.sol";
+import {AceVaultFlows, BorrowRequest, Terms} from "../libraries/AceVaultFlows.sol";
+import {AceVaultInKind} from "../libraries/AceVaultInKind.sol";
+import {AceVaultNav} from "../libraries/AceVaultNav.sol";
 
 /// @title AceVaultLens
 /// @notice Read-only views over any AceVault, the vault first in each: `borrow`'s preview, the entry gate, the in-kind tracker and its stored figures.

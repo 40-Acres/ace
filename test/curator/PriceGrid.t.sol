@@ -4,7 +4,7 @@ pragma solidity 0.8.36;
 import {Test} from "forge-std/Test.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
-import {PriceGrid} from "../../src/curator/libraries/PriceGrid.sol";
+import {PriceGrid} from "../../src/vault/libraries/PriceGrid.sol";
 
 /// @notice External face of `PriceGrid.sqrtPriceX96`, an internal function.
 contract SqrtPriceHarness {

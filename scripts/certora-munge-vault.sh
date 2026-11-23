@@ -76,7 +76,7 @@ trap 'rm -rf "$STAGE"' EXIT
 rm -rf "$STAGE"
 mkdir -p "$STAGE/contracts" "$STAGE/harness"
 cp -R "$ROOT/src" "$STAGE/src"
-CUR="$STAGE/src/curator"
+CUR="$STAGE/src/vault"
 
 # swap FILE OLD NEW: replace the one whole line OLD with NEW (which may hold a newline), refusing unless OLD occurs exactly once
 swap() {
@@ -172,7 +172,7 @@ if grep -qE 'extsload|sload\(' "$CUR/AceVault.sol"; then
   exit 1
 fi
 CUT=13 # the view's NatSpec line and its eleven-line body, plus the forward line swapped above
-cut="$(diff "$ROOT/src/curator/AceVault.sol" "$CUR/AceVault.sol" | grep -c '^<' || true)"
+cut="$(diff "$ROOT/src/vault/AceVault.sol" "$CUR/AceVault.sol" | grep -c '^<' || true)"
 [ "$cut" -eq "$CUT" ] || { echo "certora-munge-vault: $cut AceVault lines removed but $CUT were expected -- refusing." >&2; exit 1; }
 
 # twenty-nine lines differ: fourteen forwarded signatures, the tail read and its twelve readers' mutability, the forward,
@@ -180,7 +180,7 @@ cut="$(diff "$ROOT/src/curator/AceVault.sol" "$CUR/AceVault.sol" | grep -c '^<' 
 EXPECTED=29
 changed=0
 for f in libraries/AceVaultCaps libraries/AceVaultInKind libraries/AceVaultFlows libraries/AceVaultTail AceVault; do
-  n="$(diff "$ROOT/src/curator/$f.sol" "$CUR/$f.sol" | grep -c '^>' || true)"
+  n="$(diff "$ROOT/src/vault/$f.sol" "$CUR/$f.sol" | grep -c '^>' || true)"
   changed=$((changed + n))
 done
 if [ "$changed" -ne "$EXPECTED" ]; then

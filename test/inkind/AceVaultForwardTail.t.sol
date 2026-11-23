@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.36;
 
-import {AceVaultCaps} from "../../src/curator/libraries/AceVaultCaps.sol";
-import {AceVaultFlows} from "../../src/curator/libraries/AceVaultFlows.sol";
-import {AceVaultInKind} from "../../src/curator/libraries/AceVaultInKind.sol";
-import {AceVaultTail} from "../../src/curator/libraries/AceVaultTail.sol";
+import {AceVaultCaps} from "../../src/vault/libraries/AceVaultCaps.sol";
+import {AceVaultFlows} from "../../src/vault/libraries/AceVaultFlows.sol";
+import {AceVaultInKind} from "../../src/vault/libraries/AceVaultInKind.sol";
+import {AceVaultTail} from "../../src/vault/libraries/AceVaultTail.sol";
 import {AceVaultBaseRig} from "../curator/vault/AceVaultBaseRig.sol";
 import {IInKindVault} from "./InKindSurface.sol";
 import {InKindRig} from "./InKindRig.sol";

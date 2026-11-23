@@ -8,9 +8,9 @@ import {AceFixtures} from "../../utils/AceFixtures.sol";
 import {Ace} from "../../../src/ace/hub/Ace.sol";
 import {CuratedVaults} from "../../utils/CuratedVaults.sol";
 import {VaultSeed} from "../../utils/VaultSeed.sol";
-import {BorrowRequest} from "../../../src/curator/libraries/AceVaultFlows.sol";
-import {AceVault, VaultConfig} from "../../../src/curator/AceVault.sol";
-import {Listing, Row} from "../../../src/entities/curated/CuratorTerms.sol";
+import {BorrowRequest} from "../../../src/vault/libraries/AceVaultFlows.sol";
+import {AceVault, VaultConfig} from "../../../src/vault/AceVault.sol";
+import {Listing, Row} from "../../../src/vault/curated/CuratorTerms.sol";
 
 /// @notice A cash token that answers no `decimals()`.
 contract NoDecimalsCash {

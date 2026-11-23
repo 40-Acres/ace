@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {Vm} from "forge-std/Vm.sol";
-import {AceVault} from "../../../src/curator/AceVault.sol";
+import {AceVault} from "../../../src/vault/AceVault.sol";
 import {LoanMath} from "../../../src/ace/hub/libraries/LoanMath.sol";
 import {AceVaultRig} from "./AceVaultRig.sol";
 

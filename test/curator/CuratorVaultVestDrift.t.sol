@@ -3,8 +3,8 @@ pragma solidity 0.8.36;
 
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {VaultConfig} from "../../src/curator/AceVault.sol";
-import {CapListing, ProductConfig} from "../../src/curator/libraries/AceVaultCaps.sol";
+import {VaultConfig} from "../../src/vault/AceVault.sol";
+import {CapListing, ProductConfig} from "../../src/vault/libraries/AceVaultCaps.sol";
 import {CuratedVaults} from "../utils/CuratedVaults.sol";
 import {AccumVault} from "./CuratorVaultVestAccumulator.t.sol";
 

@@ -3,8 +3,8 @@ pragma solidity 0.8.36;
 
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
-import {AceVault, VaultConfig} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
+import {AceVault, VaultConfig} from "../../src/vault/AceVault.sol";
 import {IAceVaultDoor} from "../../src/interfaces/IAceVaultDoor.sol";
 import {InstantExitRig} from "./CuratorVaultInstantExit.t.sol";
 

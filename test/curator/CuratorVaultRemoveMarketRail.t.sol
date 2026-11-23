@@ -2,7 +2,7 @@
 pragma solidity 0.8.36;
 
 import {CuratorVaultBase} from "./CuratorVaultBase.sol";
-import {AceVault} from "../../src/curator/AceVault.sol";
+import {AceVault} from "../../src/vault/AceVault.sol";
 
 /// @title CuratorVaultRemoveMarketRail
 /// @notice THE RECOVERY DOOR: removing a collateral ends new lending on it, and the value behind its markets still comes home.
